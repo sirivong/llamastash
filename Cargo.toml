@@ -1,0 +1,57 @@
+[package]
+name = "llamatui"
+version = "0.1.0-dev"
+authors = ["Deepu K Sasidharan <d4udts@gmail.com>"]
+description = "A fast, keyboard-driven TUI for launching local llama.cpp models"
+documentation = "https://github.com/kdash-rs/llamatui"
+keywords = ["llamatui", "llama-cpp", "llm", "tui", "gguf"]
+repository = "https://github.com/kdash-rs/llamatui"
+homepage = "https://github.com/kdash-rs/llamatui"
+readme = "README.md"
+license = "MIT"
+edition = "2021"
+exclude = [
+  "test_data/*",
+  "deployment/*",
+  "artwork/*",
+  ".github",
+  "CONTRIBUTING.md",
+  "*.log",
+  "tags",
+]
+
+[badges]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", default-features = false, features = [
+  "help",
+  "usage",
+  "error-context",
+  "derive",
+  "std",
+] }
+crossterm = "0.29"
+directories = "6"
+log = "0.4"
+ratatui = { version = "0.30", default-features = false, features = [
+  "crossterm",
+] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_yaml = "0.9"
+simplelog = { version = "0.12", default-features = false }
+strum = { version = "0.27", features = ["derive"] }
+tokio = { version = "1.50", default-features = false, features = [
+  "macros",
+  "rt-multi-thread",
+] }
+
+[[bin]]
+name = "llamatui"
+path = "src/main.rs"
+bench = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
