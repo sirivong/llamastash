@@ -11,11 +11,15 @@
 //! filesystem watcher, and the HuggingFace pull worker land in later
 //! commits within Unit 4.
 
+pub mod catalog;
 pub mod known_caches;
 pub mod lm_studio;
 pub mod ollama;
 pub mod scanner;
 pub mod split_gguf;
+pub mod watcher;
+
+pub use catalog::ModelCatalog;
 
 use std::path::PathBuf;
 

@@ -10,6 +10,7 @@ use std::{
   time::Duration,
 };
 
+use llamatui::daemon::discovery_task::DiscoveryOptions;
 use llamatui::daemon::{run_foreground, DaemonOptions, StartOutcome};
 use llamatui::ipc::Client;
 use serde_json::json;
@@ -32,6 +33,7 @@ fn opts_for(temp: &Path) -> DaemonOptions {
   DaemonOptions {
     state_dir: temp.to_path_buf(),
     socket_path: temp.join("daemon.sock"),
+    discovery: DiscoveryOptions::new(Vec::new()),
   }
 }
 

@@ -324,7 +324,7 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 
 ### Phase B — Discovery & Acquisition
 
-- [ ] **Unit 4: Filesystem scan, cache auto-discovery, watcher**
+- [x] **Unit 4: Filesystem scan, cache auto-discovery, watcher**
 
 **Goal:** Asynchronously discover GGUF files across user-configured roots and well-known caches (HF, Ollama, LM Studio), group them by directory and surface them with parsed metadata. Detect split-GGUF sibling sets and Ollama's content-addressed blob layout. Keep the list live via a debounced filesystem watcher.
 
@@ -365,6 +365,12 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 
 **Verification:**
 - A scan of a representative HF + Ollama + LM Studio tree returns within 5 s on a developer SSD and surfaces the expected count of distinct models.
+
+**Review follow-ups from Unit 4 discovery review:**
+- [ ] **P1: Route Ollama cache roots through the Ollama enumerator.** `known_caches::default_set` currently returns `$HOME/.ollama/models` as a normal scanner root, but the generic scanner only emits extension-matched `*.gguf` files while Ollama stores model blobs as hash-named files without `.gguf`. Add a unified discovery stream that sends Ollama roots through `ollama::enumerate`, or make root resolution return typed root jobs so specialized enumerators are invoked. Add a regression that default cache discovery surfaces an Ollama manifest-backed blob.
+- [ ] **P2: Include symlinked GGUFs and dedupe by canonical path.** The scanner must satisfy the symlink edge case by accepting symlinked `.gguf` files, canonicalizing them before emit/grouping, and deduping canonical duplicates so the same target is not listed twice. Add a scanner test with a real file plus symlink under the scan root.
+- [ ] **P2: Wire LM Studio settings overrides into default roots.** `lm_studio::resolve_models_dirs` reads settings-based custom model directories, but `known_caches::default_set` still uses only hard-coded defaults. Use the resolver from root resolution and add a `default_set` regression for a settings-provided models directory.
+- [ ] **P1: Complete live discovery/listing integration.** Unit 4 still needs `watcher::start` with debounced events and the daemon/list-models integration so newly dropped GGUFs appear via `list_models` within ~1 second, per the integration scenario above.
 
 ---
 
@@ -644,4 +650,3 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
   - `notify-debouncer-mini` crate docs
   - `nvml-wrapper` crate docs
   - HuggingFace Hub API docs (model file listing endpoint)
-

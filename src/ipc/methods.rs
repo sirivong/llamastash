@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use super::protocol::{ErrorCode, ErrorObject, Request, Response, JSONRPC_VERSION};
 use crate::daemon::shutdown::ShutdownToken;
+use crate::discovery::ModelCatalog;
 
 /// Shared state that the daemon hands to each request handler. Cheap to
 /// clone (`Arc` inside).
@@ -29,14 +30,26 @@ pub struct MethodContext {
   /// Live connection count. Maintained by the accept loop; surfaced via
   /// `version` so `daemon status` can show it without a separate method.
   pub active_connections: Arc<std::sync::atomic::AtomicUsize>,
+  /// Catalog of currently-discovered models. Populated by the daemon's
+  /// discovery task; read by the `list_models` handler. Cheap to clone
+  /// (`Arc<RwLock<…>>`).
+  pub catalog: ModelCatalog,
 }
 
 impl MethodContext {
   pub fn new(shutdown: ShutdownToken) -> Self {
+    Self::with_catalog(shutdown, ModelCatalog::new())
+  }
+
+  /// Build a context with an externally-owned catalog. The daemon's
+  /// `run_foreground` uses this to thread the same catalog into the
+  /// discovery task and the dispatcher.
+  pub fn with_catalog(shutdown: ShutdownToken, catalog: ModelCatalog) -> Self {
     Self {
       started_at: Instant::now(),
       shutdown,
       active_connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+      catalog,
     }
   }
 }
@@ -75,6 +88,12 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
     "shutdown" => {
       ctx.shutdown.trigger();
       Response::ok(id, json!({"shutdown": "scheduled"}))
+    }
+    "list_models" => {
+      // Read the latest catalog snapshot. The discovery task keeps
+      // this up-to-date; handlers never trigger a scan themselves.
+      let body = ctx.catalog.to_list_response().await;
+      Response::ok(id, body)
     }
     other => Response::err(
       id,
@@ -134,6 +153,56 @@ mod tests {
       "error message should name the missing method, got: {}",
       err.message
     );
+  }
+
+  #[tokio::test]
+  async fn list_models_returns_catalog_snapshot() {
+    use std::path::PathBuf;
+
+    use crate::discovery::{DiscoveredModel, ModelSource};
+    use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+
+    let catalog = ModelCatalog::new();
+    catalog
+      .upsert(DiscoveredModel {
+        path: PathBuf::from("/m/seed.gguf"),
+        parent: PathBuf::from("/m"),
+        source: ModelSource::HuggingFace,
+        metadata: Some(ModelMetadata {
+          arch: Some("llama".to_string()),
+          total_parameters: Some(7_000_000_000),
+          parameter_label: Some("7B".to_string()),
+          quant: Quant::Q4_K,
+          native_ctx: Some(8192),
+          chat_template: None,
+          tokenizer_kind: Some("llama".to_string()),
+          reasoning_hint: None,
+          mode_hint: ModeHint::Chat,
+        }),
+        parse_error: None,
+        split_siblings: Vec::new(),
+      })
+      .await;
+
+    let c = MethodContext::with_catalog(ShutdownToken::new(), catalog);
+    let resp = dispatch_request(&c, Request::new(1, "list_models", None)).await;
+    assert!(resp.error.is_none());
+    let body = resp.result.expect("list_models result body");
+    let models = body
+      .get("models")
+      .and_then(Value::as_array)
+      .expect("models array");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["path"], json!("/m/seed.gguf"));
+    assert_eq!(models[0]["source"], json!("huggingface"));
+    assert_eq!(models[0]["metadata"]["quant"], json!("Q4_K"));
+  }
+
+  #[tokio::test]
+  async fn list_models_returns_empty_array_when_catalog_is_empty() {
+    let resp = dispatch_request(&ctx(), Request::new(1, "list_models", None)).await;
+    let body = resp.result.expect("result");
+    assert_eq!(body["models"], json!([]));
   }
 
   #[tokio::test]

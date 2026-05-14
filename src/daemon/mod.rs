@@ -6,6 +6,7 @@
 //! socket to become connectable before returning. The child is the daemon;
 //! no in-runtime `fork()` is involved, which keeps the tokio runtime safe.
 
+pub mod discovery_task;
 pub mod lockfile;
 pub mod peercred;
 pub mod server;
@@ -21,9 +22,11 @@ use anyhow::{anyhow, Context, Result};
 use tokio::net::UnixListener;
 
 use self::{
+  discovery_task::DiscoveryOptions,
   lockfile::{acquire, AcquireOutcome},
   shutdown::{install_signal_handlers, ShutdownToken},
 };
+use crate::discovery::ModelCatalog;
 use crate::ipc::methods::MethodContext;
 
 /// Options for starting the daemon. `state_dir` holds the PID lockfile;
@@ -34,6 +37,11 @@ use crate::ipc::methods::MethodContext;
 pub struct DaemonOptions {
   pub state_dir: PathBuf,
   pub socket_path: PathBuf,
+  /// Discovery roots and scan tunables. An empty `scan_roots` list
+  /// leaves the catalog empty until the user adds paths via the TUI
+  /// or CLI; tests construct one of these with a temp dir seeded
+  /// with `.gguf` fixtures.
+  pub discovery: DiscoveryOptions,
 }
 
 impl DaemonOptions {
@@ -46,6 +54,11 @@ impl DaemonOptions {
     Ok(Self {
       state_dir,
       socket_path,
+      // Production-default discovery: no scan roots until a later
+      // commit threads config + CLI flags through `handle_start`.
+      // Empty roots still produce a working daemon — `list_models`
+      // returns `{"models": []}`.
+      discovery: DiscoveryOptions::new(Vec::new()),
     })
   }
 }
@@ -85,12 +98,19 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // 3. Shutdown plumbing.
   let token = ShutdownToken::new();
   let _signal_task = install_signal_handlers(token.clone());
-  let ctx = MethodContext::new(token.clone());
 
-  // 4. Accept loop until shutdown is triggered.
+  // 4. Discovery. The catalog is shared between the discovery task
+  // (writer) and the IPC dispatcher (reader). An empty scan_roots
+  // produces a working daemon with an empty catalog — `list_models`
+  // returns `{"models": []}`.
+  let catalog = ModelCatalog::new();
+  let _discovery = discovery_task::spawn(catalog.clone(), opts.discovery.clone());
+  let ctx = MethodContext::with_catalog(token.clone(), catalog);
+
+  // 5. Accept loop until shutdown is triggered.
   let result = server::serve(listener, ctx).await;
 
-  // 5. Cleanup. Lockfile cleans itself in Drop; the socket file is
+  // 6. Cleanup. Lockfile cleans itself in Drop; the socket file is
   // removed here. We let the listener drop naturally.
   let _ = fs::remove_file(&opts.socket_path);
   drop(lockfile);
