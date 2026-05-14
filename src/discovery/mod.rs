@@ -11,6 +11,9 @@
 //! filesystem watcher, and the HuggingFace pull worker land in later
 //! commits within Unit 4.
 
+pub mod known_caches;
+pub mod lm_studio;
+pub mod ollama;
 pub mod scanner;
 pub mod split_gguf;
 
@@ -50,7 +53,7 @@ pub struct DiscoveredModel {
 
 /// Provenance label for a discovered model. The TUI groups by source
 /// in the left pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModelSource {
   /// A user-configured `--model-path` or config-level scan root.
   UserPath,
