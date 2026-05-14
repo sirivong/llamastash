@@ -280,10 +280,6 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 - `ls -l <socket>` shows mode `srw-------`.
 - `llamatui daemon stop` exits 0; subsequent `llamatui daemon status` shows "not running".
 
-**Review follow-ups from `20260514-122211-codex`:**
-- [ ] **P2: Harden stale PID lock ownership.** Current `lockfile::acquire` treats any live PID in `daemon.pid` as an active daemon. If a crashed daemon leaves the pidfile behind and the OS later reuses that PID, `daemon start` can report "already running" while `daemon status` reports "not running". Replace live-PID-only ownership with daemon-specific ownership, such as holding an advisory `flock` for the daemon lifetime, or verify socket/protocol ownership before returning `AlreadyRunning`. Add a regression test for a stale pidfile containing an unrelated live PID.
-- [ ] **P2: Make detached startup option handling explicit.** `start_detached(opts)` polls `opts.socket_path`, but the child process is re-execed as plain `llamatui daemon start` and rebuilds default `DaemonOptions`. Either document and enforce detached startup as default-path-only, or propagate `state_dir`/`socket_path` to the child through private env vars or hidden CLI flags. Add an integration test that calls `start_detached` with temp `DaemonOptions` and verifies the child binds the temp socket.
-
 ---
 
 - [x] **Unit 3: GGUF parser, metadata extraction, model identity**

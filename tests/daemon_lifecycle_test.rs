@@ -7,7 +7,7 @@ use std::{
   time::Duration,
 };
 
-use llamatui::daemon::{run_foreground, DaemonOptions, StartOutcome};
+use llamatui::daemon::{run_foreground, start_detached_with_exe, DaemonOptions, StartOutcome};
 use llamatui::ipc::Client;
 use tokio::time::timeout;
 
@@ -133,6 +133,72 @@ async fn stale_socket_is_cleaned_before_bind() {
     .expect("daemon exits")
     .expect("join")
     .expect("daemon result");
+
+  std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Regression test for the Unit 2 P2 follow-up: `start_detached` used to
+/// re-exec the child as plain `llamatui daemon start`, which rebuilt
+/// `DaemonOptions` from XDG defaults and silently ignored the caller's
+/// `state_dir` / `socket_path`. With the hidden `--state-dir` /
+/// `--socket-path` flags wired through, the child must bind the
+/// caller-specified temp socket, not the production default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_detached_honours_caller_supplied_paths() {
+  let dir = unique_temp_dir("detach-opts");
+  let opts = opts_for(&dir);
+  let socket = opts.socket_path.clone();
+  let pidfile = dir.join("daemon.pid");
+  let exe = PathBuf::from(env!("CARGO_BIN_EXE_llamatui"));
+
+  // `start_detached_with_exe` blocks on a sync poll loop, so push it off
+  // the tokio reactor to keep the test runtime live.
+  let opts_for_spawn = opts.clone();
+  let outcome = tokio::task::spawn_blocking(move || start_detached_with_exe(opts_for_spawn, exe))
+    .await
+    .expect("join")
+    .expect("start_detached should succeed");
+  match outcome {
+    StartOutcome::RanToCompletion => {}
+    StartOutcome::AlreadyRunning(pid) => {
+      panic!("temp paths should not collide with any running daemon (pid {pid})")
+    }
+  }
+
+  // The child must be listening on *our* temp socket, not the XDG default.
+  assert!(
+    socket.exists(),
+    "child must bind the caller-supplied socket at {}",
+    socket.display()
+  );
+  assert!(
+    pidfile.exists(),
+    "child must drop its pidfile in the caller-supplied state dir at {}",
+    pidfile.display()
+  );
+
+  let mut client = Client::connect(&socket)
+    .await
+    .expect("connect to detached child via temp socket");
+  let _ = client
+    .call("ping", None)
+    .await
+    .expect("ping detached child");
+  let _ = client
+    .call("shutdown", None)
+    .await
+    .expect("shutdown detached child");
+
+  // Wait for the child to tear down its socket so the temp dir cleanup
+  // doesn't race a still-running process.
+  let deadline = std::time::Instant::now() + Duration::from_secs(3);
+  while socket.exists() && std::time::Instant::now() < deadline {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  assert!(
+    !socket.exists(),
+    "detached child must remove its socket on shutdown"
+  );
 
   std::fs::remove_dir_all(&dir).ok();
 }

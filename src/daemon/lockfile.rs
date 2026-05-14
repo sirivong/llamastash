@@ -1,26 +1,40 @@
-//! Single-instance enforcement via a PID lockfile.
+//! Single-instance enforcement via a PID lockfile with kernel-backed
+//! ownership (`flock(2)` on Unix).
 //!
-//! On `acquire`:
-//! 1. Try to create `daemon.pid` with `O_CREAT | O_EXCL` and write our PID.
-//! 2. If the file already exists, read the PID and probe it with `kill(0)`.
-//!    - Alive → return `AlreadyRunning(pid)`. The caller exits zero with a
-//!      friendly message.
-//!    - Dead (`ESRCH`) → unlink the stale file and retry once.
-//!    - Permission denied (`EPERM`) → assume the process is alive but
-//!      owned by another user, refuse to take over.
+//! Why flock and not "is the recorded PID alive?":
+//! - If the daemon crashes (SIGKILL, segfault, OOM), the file persists
+//!   with the dead PID. If the OS later recycles that PID for an unrelated
+//!   process, a live-PID probe says "alive" and the new daemon falsely
+//!   reports `AlreadyRunning` — while `daemon status` correctly reports
+//!   "not running" because nothing owns the socket. The two surfaces
+//!   disagree.
+//! - `flock(LOCK_EX | LOCK_NB)` ties ownership to the file descriptor.
+//!   The kernel releases the lock when the owning process dies, however
+//!   it dies. A surviving pidfile with no flock holder is, by
+//!   construction, stale — no PID-recycling false positive is possible.
 //!
-//! On `Drop`, the file is removed. This is best-effort: a process killed
-//! with SIGKILL leaves the file behind, which is what the stale-PID
-//! detection is for on the next start.
+//! Lifecycle:
+//! 1. `acquire(state_dir)` opens `daemon.pid` (creating it if missing)
+//!    and attempts a non-blocking exclusive `flock`.
+//! 2. If the `flock` fails with `EWOULDBLOCK`, another live daemon holds
+//!    the lock; read the pid for a friendly message and return
+//!    `AlreadyRunning`.
+//! 3. If the `flock` succeeds, we own the lock. Truncate the file and
+//!    write our PID. The held `File` keeps the lock for the daemon
+//!    lifetime.
+//! 4. On `Drop`, close the fd (kernel releases the lock) and unlink the
+//!    file. A SIGKILL'd daemon still releases the lock at fd-teardown
+//!    time; the file is left behind, which is exactly the "stale" case
+//!    the next `acquire` is built to handle.
 
 use std::{
   fs::{File, OpenOptions},
-  io::{self, Read, Write},
+  io::{self, Read, Seek, SeekFrom, Write},
   path::{Path, PathBuf},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
 
 /// Result of `acquire`.
 #[derive(Debug)]
@@ -35,12 +49,13 @@ pub enum AcquireOutcome {
 }
 
 /// Owned lockfile. Removes the file on drop. Held by the daemon for its
-/// entire lifetime.
+/// entire lifetime so the kernel-backed `flock` survives the whole run.
 #[derive(Debug)]
 pub struct Lockfile {
   path: PathBuf,
-  /// Held open so the inode stays pinned for the life of the daemon —
-  /// future enhancements can use `flock` on this fd for advisory locking.
+  /// Held open for the daemon lifetime. Closing the fd releases the
+  /// `flock` automatically (the kernel does this on process exit too,
+  /// which is what gives us recycled-PID safety).
   _file: File,
 }
 
@@ -97,97 +112,87 @@ impl From<io::Error> for LockfileError {
 }
 
 /// Try to acquire the PID lockfile at `state_dir/daemon.pid`. Creates
-/// `state_dir` if it doesn't exist. See module docs for the policy on
-/// stale PIDs.
+/// `state_dir` if it doesn't exist. See module docs for the policy.
 pub fn acquire(state_dir: &Path) -> Result<AcquireOutcome, LockfileError> {
   std::fs::create_dir_all(state_dir).map_err(LockfileError::StateDir)?;
   let path = state_dir.join("daemon.pid");
-  // Two-pass: first attempt creates a fresh file. If it fails with
-  // AlreadyExists, we probe the PID and either bail (live) or unlink and
-  // retry (stale).
-  for attempt in 0..2 {
-    match try_create_pidfile(&path) {
-      Ok(file) => return Ok(AcquireOutcome::Acquired(Lockfile { path, _file: file })),
-      Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-        let pid = read_pid(&path)?;
-        if pid_is_alive(pid) {
-          return Ok(AcquireOutcome::AlreadyRunning { pid, path });
-        }
-        // Stale — drop it and loop. Cap attempts so a permanent
-        // permission error or another racing daemon don't trap us.
-        if attempt == 0 {
-          log::info!(
-            "removing stale lockfile {} (pid {pid} not alive)",
-            path.display()
-          );
-          std::fs::remove_file(&path)?;
-          continue;
-        }
-        return Err(LockfileError::Io(io::Error::other(
-          "lockfile reappeared after stale-pid cleanup; another daemon raced us",
-        )));
-      }
-      Err(e) => return Err(LockfileError::Io(e)),
-    }
-  }
-  unreachable!("loop exits via return on every path")
-}
 
-fn try_create_pidfile(path: &Path) -> io::Result<File> {
   let mut opts = OpenOptions::new();
-  opts.write(true).create_new(true);
+  opts.read(true).write(true).create(true).truncate(false);
   #[cfg(unix)]
   {
     opts.mode(0o600);
   }
-  let mut file = opts.open(path)?;
-  writeln!(file, "{}", std::process::id())?;
-  file.sync_all()?;
-  Ok(file)
+  let mut file = opts.open(&path)?;
+
+  match try_flock_exclusive(&file)? {
+    FlockOutcome::Acquired => {
+      // We own the lock — overwrite the file with our PID.
+      file.seek(SeekFrom::Start(0))?;
+      file.set_len(0)?;
+      writeln!(file, "{}", std::process::id())?;
+      file.sync_all()?;
+      Ok(AcquireOutcome::Acquired(Lockfile { path, _file: file }))
+    }
+    FlockOutcome::Contended => {
+      // Another process holds the lock — read its PID for a friendly
+      // message. The PID is informational only; ownership is decided by
+      // the flock itself, so even if the file is mid-write we still
+      // correctly report contention.
+      let pid = read_pid(&path).unwrap_or(0);
+      Ok(AcquireOutcome::AlreadyRunning { pid, path })
+    }
+  }
+}
+
+#[derive(Debug)]
+enum FlockOutcome {
+  Acquired,
+  Contended,
+}
+
+/// Attempt a non-blocking exclusive `flock` on `file`. Returns
+/// `Contended` if another process holds the lock, `Acquired` if we now
+/// hold it. Any other error is propagated.
+#[cfg(unix)]
+fn try_flock_exclusive(file: &File) -> io::Result<FlockOutcome> {
+  // SAFETY: `flock(2)` is a kernel syscall that operates on a borrowed
+  // file descriptor; no memory is touched. The fd outlives the call
+  // because `file` is a borrowed reference.
+  let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+  if ret == 0 {
+    return Ok(FlockOutcome::Acquired);
+  }
+  let err = io::Error::last_os_error();
+  match err.raw_os_error() {
+    // EWOULDBLOCK on Linux and macOS both signal "already locked by
+    // another process". POSIX permits returning either EWOULDBLOCK or
+    // EAGAIN; libc aliases EWOULDBLOCK to EAGAIN on every platform we
+    // target.
+    Some(code) if code == libc::EWOULDBLOCK => Ok(FlockOutcome::Contended),
+    _ => Err(err),
+  }
+}
+
+#[cfg(not(unix))]
+fn try_flock_exclusive(_file: &File) -> io::Result<FlockOutcome> {
+  // Non-Unix isn't a supported daemon target; refuse to acquire so we
+  // never silently coexist with a peer.
+  Err(io::Error::other(
+    "lockfile flock not supported on this platform",
+  ))
 }
 
 fn read_pid(path: &Path) -> Result<i32, LockfileError> {
   let mut contents = String::new();
   File::open(path)?.read_to_string(&mut contents)?;
-  contents
-    .trim()
+  let trimmed = contents.trim();
+  if trimmed.is_empty() {
+    return Ok(0);
+  }
+  trimmed
     .parse::<i32>()
     .map_err(|e| LockfileError::CorruptLockfile(path.to_path_buf(), e.to_string()))
-}
-
-/// Is `pid` a live process? Uses `kill(pid, 0)` — a signal value of 0
-/// performs the existence check without actually delivering a signal.
-/// `EPERM` indicates the process exists but is owned by another UID; we
-/// treat that as "alive" so a daemon under a different user isn't kicked
-/// out.
-#[cfg(unix)]
-fn pid_is_alive(pid: i32) -> bool {
-  if pid <= 0 {
-    return false;
-  }
-  // SAFETY: `kill(2)` with signal 0 is the documented existence check;
-  // no memory is touched.
-  let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
-  if ret == 0 {
-    return true;
-  }
-  // `errno` access path
-  let err = io::Error::last_os_error();
-  match err.raw_os_error() {
-    Some(libc::ESRCH) => false, // no such process
-    Some(libc::EPERM) => true,  // exists, owned by another uid
-    _ => {
-      log::warn!("kill(pid={pid}, 0) returned unexpected error: {err}; assuming alive");
-      true
-    }
-  }
-}
-
-#[cfg(not(unix))]
-fn pid_is_alive(_pid: i32) -> bool {
-  // Non-Unix isn't a supported target for the daemon; conservatively say
-  // yes so we never silently steal a peer's lockfile.
-  true
 }
 
 #[cfg(test)]
@@ -244,7 +249,7 @@ mod tests {
   }
 
   #[test]
-  fn second_acquire_with_live_pid_reports_already_running() {
+  fn second_acquire_with_live_lock_reports_already_running() {
     let dir = temp_state_dir("live");
     let _first = match acquire(&dir).expect("first acquire") {
       AcquireOutcome::Acquired(l) => l,
@@ -255,18 +260,50 @@ mod tests {
       AcquireOutcome::AlreadyRunning { pid, .. } => {
         assert_eq!(pid, std::process::id() as i32);
       }
-      AcquireOutcome::Acquired(_) => panic!("second acquire should observe live pid"),
+      AcquireOutcome::Acquired(_) => panic!("second acquire should observe live flock"),
     }
     drop(_first);
     std::fs::remove_dir_all(&dir).ok();
   }
 
   #[test]
-  fn stale_pidfile_is_removed_and_re_acquired() {
-    let dir = temp_state_dir("stale");
+  fn stale_pidfile_without_flock_is_re_acquired() {
+    // Pre-seed a pidfile but do NOT hold an flock on it. This is the
+    // "crashed daemon" shape: the file persists but the kernel released
+    // its lock when the daemon's fd closed. acquire must succeed even
+    // though the recorded pid (here: our own) is provably alive.
+    let dir = temp_state_dir("stale-no-flock");
     let path = dir.join("daemon.pid");
-    // PID 1 sometimes exists, so use a value that's almost certainly free:
-    // 2^31 - 1 is the kernel max on 64-bit Linux and an unallocated value.
+    let live_but_unrelated_pid = std::process::id() as i32;
+    std::fs::write(&path, format!("{live_but_unrelated_pid}\n")).expect("seed pidfile");
+
+    let outcome = acquire(&dir).expect("acquire over stale pidfile");
+    match outcome {
+      AcquireOutcome::Acquired(lock) => {
+        let raw = std::fs::read_to_string(lock.path()).expect("readable");
+        assert_eq!(
+          raw.trim(),
+          std::process::id().to_string(),
+          "pidfile must be rewritten to our pid"
+        );
+      }
+      AcquireOutcome::AlreadyRunning { pid, .. } => {
+        panic!(
+          "stale pidfile with no flock holder should be acquirable, got AlreadyRunning(pid={pid})"
+        )
+      }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn arbitrary_dead_pid_is_re_acquired() {
+    let dir = temp_state_dir("stale-dead-pid");
+    let path = dir.join("daemon.pid");
+    // 2^31 - 1 is the kernel pid_max ceiling on 64-bit Linux and won't
+    // be allocated under normal conditions — but with flock-based
+    // ownership the PID value is irrelevant; what matters is no live
+    // process holds the lock.
     std::fs::write(&path, "2147483646\n").expect("seed stale pidfile");
     let outcome = acquire(&dir).expect("acquire");
     match outcome {
@@ -275,21 +312,29 @@ mod tests {
         assert_eq!(raw.trim(), std::process::id().to_string());
       }
       AcquireOutcome::AlreadyRunning { pid, .. } => {
-        panic!("stale pid {pid} should have been cleaned up")
+        panic!("stale pid {pid} should have been re-acquired")
       }
     }
     std::fs::remove_dir_all(&dir).ok();
   }
 
   #[test]
-  fn corrupt_pidfile_surfaces_actionable_error() {
+  fn corrupt_pidfile_is_recovered_when_lock_is_free() {
+    // With flock-based ownership, corrupt pidfile content is no longer
+    // fatal — what matters is the lock state. The file gets rewritten
+    // with our PID on successful acquire.
     let dir = temp_state_dir("corrupt");
     let path = dir.join("daemon.pid");
     std::fs::write(&path, "this is not a pid").expect("seed corrupt pidfile");
-    let err = acquire(&dir).expect_err("corrupt lockfile should error");
-    match err {
-      LockfileError::CorruptLockfile(p, _) => assert_eq!(p, path),
-      other => panic!("expected CorruptLockfile, got {other:?}"),
+    let outcome = acquire(&dir).expect("acquire over corrupt pidfile");
+    match outcome {
+      AcquireOutcome::Acquired(lock) => {
+        let raw = std::fs::read_to_string(lock.path()).expect("readable");
+        assert_eq!(raw.trim(), std::process::id().to_string());
+      }
+      AcquireOutcome::AlreadyRunning { pid, .. } => {
+        panic!("corrupt pidfile with no flock holder should be acquirable, got pid={pid}")
+      }
     }
     std::fs::remove_dir_all(&dir).ok();
   }
@@ -312,16 +357,5 @@ mod tests {
     assert_eq!(mode, 0o600, "pidfile must be 0600");
     drop(lock);
     std::fs::remove_dir_all(&dir).ok();
-  }
-
-  #[test]
-  fn pid_is_alive_returns_false_for_obviously_dead_pid() {
-    assert!(!pid_is_alive(0));
-    assert!(!pid_is_alive(-1));
-  }
-
-  #[test]
-  fn pid_is_alive_returns_true_for_self() {
-    assert!(pid_is_alive(std::process::id() as i32));
   }
 }

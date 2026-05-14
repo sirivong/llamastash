@@ -6,7 +6,7 @@
 //! `status` — connect to the daemon and report PID + uptime; emits "not
 //! running" if the socket is missing or the connection fails.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 
@@ -18,14 +18,22 @@ use crate::util::paths::runtime_socket_path;
 /// Top-level dispatch for `daemon <action>`.
 pub async fn handle(action: DaemonAction) -> Result<()> {
   match action {
-    DaemonAction::Start { detach } => handle_start(detach).await,
+    DaemonAction::Start {
+      detach,
+      state_dir,
+      socket_path,
+    } => handle_start(detach, state_dir, socket_path).await,
     DaemonAction::Stop => handle_stop().await,
     DaemonAction::Status => handle_status().await,
   }
 }
 
-async fn handle_start(detach: bool) -> Result<()> {
-  let opts = DaemonOptions::from_defaults()?;
+async fn handle_start(
+  detach: bool,
+  state_dir: Option<PathBuf>,
+  socket_path: Option<PathBuf>,
+) -> Result<()> {
+  let opts = build_options(state_dir, socket_path)?;
   if detach {
     // `start_detached` blocks until the child reports socket bound.
     match start_detached(opts)? {
@@ -63,6 +71,25 @@ async fn handle_stop() -> Result<()> {
     }
     Err(other) => Err(other).context("daemon stop"),
   }
+}
+
+/// Compose [`DaemonOptions`] from the parsed CLI overrides. Hidden
+/// `--state-dir` / `--socket-path` flags take precedence; unset fields
+/// fall back to the platform-default XDG paths. Centralised so the
+/// re-exec'd child of `start_detached` honours the same priority order
+/// as a hand-typed `llamatui daemon start --state-dir ...` invocation.
+fn build_options(
+  state_dir: Option<PathBuf>,
+  socket_path: Option<PathBuf>,
+) -> Result<DaemonOptions> {
+  let mut opts = DaemonOptions::from_defaults()?;
+  if let Some(p) = state_dir {
+    opts.state_dir = p;
+  }
+  if let Some(p) = socket_path {
+    opts.socket_path = p;
+  }
+  Ok(opts)
 }
 
 async fn handle_status() -> Result<()> {

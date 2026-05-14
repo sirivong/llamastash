@@ -80,6 +80,17 @@ pub enum DaemonAction {
     /// Background the daemon by detaching from the controlling terminal.
     #[arg(long)]
     detach: bool,
+    /// Internal hand-off: state directory to use instead of XDG defaults.
+    /// `start_detached` propagates this to the re-exec'd child so tests
+    /// and alternate deployments can drive the daemon at a custom path.
+    /// Hidden from `--help` because end users should reach for the
+    /// config file or XDG env vars instead.
+    #[arg(long, value_name = "PATH", hide = true)]
+    state_dir: Option<PathBuf>,
+    /// Internal hand-off: socket path to bind instead of the
+    /// platform-default runtime socket. See `state-dir` for rationale.
+    #[arg(long, value_name = "PATH", hide = true)]
+    socket_path: Option<PathBuf>,
   },
   /// Stop the running daemon. Running models keep running.
   Stop,
@@ -308,8 +319,40 @@ mod tests {
   fn daemon_subcommands_parse() {
     let cli_start = parse(&["daemon", "start", "--detach"]);
     match cli_start.command {
-      Some(Command::Daemon(DaemonAction::Start { detach })) => assert!(detach),
+      Some(Command::Daemon(DaemonAction::Start {
+        detach,
+        state_dir,
+        socket_path,
+      })) => {
+        assert!(detach);
+        assert!(state_dir.is_none());
+        assert!(socket_path.is_none());
+      }
       other => panic!("expected daemon start --detach, got {other:?}"),
+    }
+
+    let cli_with_paths = parse(&[
+      "daemon",
+      "start",
+      "--state-dir",
+      "/tmp/llamatui-test-state",
+      "--socket-path",
+      "/tmp/llamatui-test-state/daemon.sock",
+    ]);
+    match cli_with_paths.command {
+      Some(Command::Daemon(DaemonAction::Start {
+        detach,
+        state_dir,
+        socket_path,
+      })) => {
+        assert!(!detach);
+        assert_eq!(state_dir, Some(PathBuf::from("/tmp/llamatui-test-state")));
+        assert_eq!(
+          socket_path,
+          Some(PathBuf::from("/tmp/llamatui-test-state/daemon.sock"))
+        );
+      }
+      other => panic!("expected daemon start with paths, got {other:?}"),
     }
 
     let cli_stop = parse(&["daemon", "stop"]);

@@ -119,6 +119,17 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
 ///    surface its exit status.
 #[cfg(unix)]
 pub fn start_detached(opts: DaemonOptions) -> Result<StartOutcome> {
+  let exe = std::env::current_exe().context("locating current executable for --detach")?;
+  start_detached_with_exe(opts, exe)
+}
+
+/// Detached-start with an explicit executable path. Production callers
+/// should use [`start_detached`], which resolves `current_exe()` itself.
+/// Integration tests use this overload to point at the test binary so
+/// they can exercise the full re-exec path against temp `DaemonOptions`.
+#[cfg(unix)]
+#[doc(hidden)]
+pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<StartOutcome> {
   use std::{
     os::unix::process::CommandExt,
     process::{Command, Stdio},
@@ -133,12 +144,17 @@ pub fn start_detached(opts: DaemonOptions) -> Result<StartOutcome> {
     }
   }
 
-  let exe = std::env::current_exe().context("locating current executable for --detach")?;
-
-  let mut cmd = Command::new(exe);
+  let mut cmd = Command::new(&exe);
   cmd
     .arg("daemon")
     .arg("start")
+    // Propagate the caller-supplied paths to the re-exec'd child via
+    // hidden flags. Without this, the child rebuilt `DaemonOptions`
+    // from XDG defaults and silently ignored the parent's choices.
+    .arg("--state-dir")
+    .arg(&opts.state_dir)
+    .arg("--socket-path")
+    .arg(&opts.socket_path)
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());
@@ -195,27 +211,42 @@ pub fn start_detached(_opts: DaemonOptions) -> Result<StartOutcome> {
   Err(anyhow!("--detach is only supported on Unix targets"))
 }
 
-/// Returns the PID owning the daemon lockfile if (and only if) that PID
-/// is live. Used by `start_detached` to short-circuit when an existing
-/// daemon already owns the socket.
+#[cfg(not(unix))]
+#[doc(hidden)]
+pub fn start_detached_with_exe(_opts: DaemonOptions, _exe: PathBuf) -> Result<StartOutcome> {
+  Err(anyhow!("--detach is only supported on Unix targets"))
+}
+
+/// Returns the PID owning the daemon lockfile if (and only if) a live
+/// process currently holds its `flock`. Used by `start_detached` to
+/// short-circuit when an existing daemon already owns the socket.
+///
+/// Probing via `flock` rather than `kill(pid, 0)` matches `acquire`'s
+/// ownership model: a recycled-PID collision can't masquerade as a live
+/// daemon because the kernel released the lock when the original daemon
+/// died, regardless of what the on-disk PID still says.
 #[cfg(unix)]
 fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
+  use std::os::unix::io::AsRawFd;
   let pidfile = state_dir.join("daemon.pid");
-  let raw = fs::read_to_string(&pidfile).ok()?;
-  let pid = raw.trim().parse::<i32>().ok()?;
-  if pid <= 0 {
+  let file = std::fs::OpenOptions::new()
+    .read(true)
+    .write(true)
+    .open(&pidfile)
+    .ok()?;
+  // SAFETY: `flock(2)` is a kernel syscall over a borrowed fd; no memory
+  // is touched. `file` outlives the call.
+  let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+  if ret == 0 {
+    // We just acquired the lock — no daemon is running. Dropping `file`
+    // closes the fd and releases the lock.
     return None;
   }
-  // SAFETY: `kill(pid, 0)` is the documented liveness probe — no signal
-  // is delivered.
-  let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
-  if ret == 0 {
-    return Some(pid);
-  }
-  match std::io::Error::last_os_error().raw_os_error() {
-    Some(libc::EPERM) => Some(pid), // alive, owned by another uid
-    _ => None,
-  }
+  // Lock contended → a daemon owns the pidfile. Read the recorded PID
+  // for the friendly "already running" message; ownership is decided by
+  // the lock, the PID value is informational.
+  let raw = fs::read_to_string(&pidfile).ok()?;
+  raw.trim().parse::<i32>().ok().filter(|p| *p > 0)
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
