@@ -36,7 +36,7 @@ Full requirements list lives in the origin document. Mapping each requirement to
 | R10 binary lookup | Unit 5 | R26 themes (5) | Unit 1 | R43 Linux + macOS | Unit 9 |
 | R11 launch picker | Unit 6 | R27 keyboard-first | Unit 6 | R44 GPU detect | Unit 5 |
 | R12 ctx-length presets | Unit 6 | R28 a11y dual-encoding | Unit 6 | R45 single binary dist | Unit 9 |
-| R13 reasoning toggle | Unit 6 | R29 perf targets | Unit 6, 7 | R46 HF pull | Unit 4 |
+| R13 reasoning toggle | Unit 6 | R29 perf targets | Unit 6, 7 | R46 HF pull | **v2 deferral** |
 | R14 advanced panel | Unit 6 | R30 clipboard | Unit 6 | R47 peercred auth | Unit 2 |
 | R15 port allocation | Unit 5 | R31 right-pane tabs | Unit 7 |  |  |
 | R16 health probe | Unit 5 | R32 smoke-test chat | Unit 7 |  |  |
@@ -45,9 +45,13 @@ Full requirements list lives in the origin document. Mapping each requirement to
 
 Carried verbatim from origin doc's Scope Boundaries:
 
-- **Deferred to v2:** HTTP API and MCP server.
+- **Deferred to v2:** HTTP API and MCP server; HuggingFace pull worker (R46) — see "v2 deferrals" below.
 - **Out of scope:** daily-driver chat (markdown render, history); model sources other than HuggingFace; quantization/conversion; backends other than llama-server; multi-user/remote/network daemon; Windows; telemetry; auto-update; OS-level notifications.
 - **Explicit non-feature:** llamatui maintains no model registry — disk files are the source of truth.
+
+### v2 deferrals
+
+- **R46 HuggingFace pull (CLI + TUI hotkey).** Originally owned by Unit 4. Descoped from v1 mid-implementation to keep Unit 4 focused on local-disk discovery. The CLI `pull` subcommand surface remains scaffolded in `cli_args.rs` and the dispatcher arm exits via `unimplemented!`; both are tagged `TODO(v2-R46)` and ship as `hide = true` until the worker lands. The TUI hotkey is not bound. v1 users obtain GGUFs through their normal HF / Ollama / LM Studio workflows; discovery picks the resulting files up via the existing cache enumerators.
 
 ## Context & Research
 
@@ -71,7 +75,7 @@ No `docs/solutions/` yet in this repo (greenfield). Pattern decisions are inheri
 - **llama-server reference** — `examples/server/README.md` in llama.cpp. Endpoints in use: `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`, `/health`. Flags in active use for v1: `-m`, `-c` (ctx), `--port`, `-ngl`, `--n-cpu-moe`, `--cache-type-k/v`, `--threads`, `--flash-attn`, `--mlock`, `--no-mmap`, `--parallel`, `--jinja`, `--reasoning-format`, `--embeddings`, `--reranking`.
 - **Candidate crates** (subject to final selection at implementation time):
   - GGUF parsing: `gguf-rs` first-choice; fall back to a hand-rolled header reader if the crate doesn't expose what R7/R8 need.
-  - HuggingFace pull: `hf-hub` (official-ish crate by hf-rs).
+  - ~~HuggingFace pull: `hf-hub` (official-ish crate by hf-rs).~~ *Deferred to v2 with R46.*
   - Filesystem watching: `notify` + `notify-debouncer-mini`.
   - NVIDIA GPU memory: `nvml-wrapper`. AMD: shell-out to `rocm-smi --showmeminfo vram --json`. Apple Silicon: shell-out to `system_profiler SPDisplaysDataType -json` (no Metal SDK dependency).
   - Process supervision: `tokio::process::Child` for I/O; signal delivery via `nix` (`libc::kill` is OS-portable but `nix` is ergonomic).
@@ -136,13 +140,11 @@ flowchart LR
         SUP[Process supervisor<br/>spawn / health / stop]
         RES[Resource monitor<br/>RAM/VRAM/CPU]
         STATE[Persisted state<br/>favorites / presets / running]
-        HF[HF pull worker]
     end
 
     subgraph external[External]
         LS1[llama-server PID 1]
         LS2[llama-server PID 2]
-        HF_HUB[huggingface.co]
         FS[(filesystem)]
     end
 
@@ -151,14 +153,11 @@ flowchart LR
     IPC --> SCAN
     IPC --> SUP
     IPC --> STATE
-    IPC --> HF
     SCAN --> GGUF
     SCAN --> FS
     SUP --> LS1
     SUP --> LS2
     SUP --> RES
-    HF --> HF_HUB
-    HF --> FS
 ```
 
 ### Model lifecycle state machine
@@ -325,18 +324,20 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 
 ### Phase B — Discovery & Acquisition
 
-- [ ] **Unit 4: Filesystem scan, cache auto-discovery, watcher, HuggingFace pull**
+- [ ] **Unit 4: Filesystem scan, cache auto-discovery, watcher**
 
-**Goal:** Asynchronously discover GGUF files across user-configured roots and well-known caches (HF, Ollama, LM Studio), group them by directory and surface them with parsed metadata. Detect split-GGUF sibling sets and Ollama's content-addressed blob layout. Keep the list live via a debounced filesystem watcher. Provide a HuggingFace pull worker (TUI hotkey + `llamatui pull` CLI both call into it).
+**Goal:** Asynchronously discover GGUF files across user-configured roots and well-known caches (HF, Ollama, LM Studio), group them by directory and surface them with parsed metadata. Detect split-GGUF sibling sets and Ollama's content-addressed blob layout. Keep the list live via a debounced filesystem watcher.
 
-**Requirements:** R1, R2, R3, R4, R5, R6, R9, R22, R46.
+> **Note:** The HuggingFace *pull* worker (R46) originally belonged to this unit. Descoped to v2 mid-implementation — see "v2 deferrals" in `Scope Boundaries`. Unit 4's discovery side still surfaces files HF deposits in its cache directory; only the in-app *download* surface is deferred.
+
+**Requirements:** R1, R2, R3, R4, R5, R6, R9, R22.
 
 **Dependencies:** Units 1, 3.
 
 **Files:**
-- Create: `src/discovery/mod.rs`, `src/discovery/scanner.rs`, `src/discovery/known_caches.rs`, `src/discovery/watcher.rs`, `src/discovery/split_gguf.rs`, `src/discovery/ollama.rs`, `src/discovery/lm_studio.rs`, `src/hf/mod.rs`, `src/hf/pull.rs`, `src/hf/progress.rs`
-- Modify: `src/daemon/mod.rs` (host the discovery + HF pull tasks), `src/ipc/methods.rs` (add `list_models`, `pull`, `pull_status` methods)
-- Test: `tests/discovery_scan_test.rs`, `tests/split_gguf_test.rs`, `tests/known_caches_test.rs`, `tests/hf_pull_smoke_test.rs` (against a local mock HTTP server), inline tests in `src/discovery/split_gguf.rs`
+- Create: `src/discovery/mod.rs`, `src/discovery/scanner.rs`, `src/discovery/known_caches.rs`, `src/discovery/watcher.rs`, `src/discovery/split_gguf.rs`, `src/discovery/ollama.rs`, `src/discovery/lm_studio.rs`
+- Modify: `src/daemon/mod.rs` (host the discovery task), `src/ipc/methods.rs` (add `list_models` method)
+- Test: `tests/discovery_scan_test.rs`, `tests/split_gguf_test.rs`, `tests/known_caches_test.rs`, inline tests in `src/discovery/split_gguf.rs`
 
 **Approach:**
 - `scanner::scan(roots, ignore_dirs) -> tokio::sync::mpsc::Receiver<DiscoveredModel>`: walks roots with `ignore`-style respect (`.gitignore`-aware skip, plus user-configurable exclude globs). Uses `tokio::task::spawn_blocking` for the walk; sends results into a channel so the UI can stream them as they arrive (R9).
@@ -346,8 +347,6 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 - `lm_studio::enumerate()`: tries (in order) `~/.lmstudio/models`, `~/.cache/lm-studio/models`, then probes the LM Studio config file at `~/.lmstudio/settings.json` if present for a configured `modelsDirectory`.
 - `known_caches::default_set(config) -> Vec<Root>` builds the merged scan-root list respecting per-cache disables (`disable_default_cache_paths.huggingface`, `.ollama`, `.lmstudio`) and the global `--no-scan` flag.
 - `watcher::start(roots) -> mpsc::Receiver<WatchEvent>`: `notify-debouncer-mini` with 500 ms debounce. HF hub tree is watched with depth-limited scope (`models--*/snapshots`, two levels) plus a `tokio::time::interval(5*60s)` full rescan backstop.
-- `hf::pull::start(repo, file_glob, target_dir, progress_tx)`: uses `hf-hub` to enumerate files matching the glob (default `*.gguf`), downloads over HTTPS only (no plaintext fallback even if a custom endpoint is configured), progress streamed via `progress_tx`. Partial files written with `.part` suffix; renamed atomically on completion; the watcher then picks them up. Cancellation: a `CancellationToken` per pull is held by the daemon; when the CLI client disconnects mid-pull or the user cancels via TUI, the token is tripped and the worker aborts cleanly, removing the `.part` file.
-- `pull` method on the daemon returns a `pull_id` (string); `pull_status` returns progress for a pull_id; `pull_cancel` aborts.
 
 **Patterns to follow:**
 - `kdash/src/network/stream.rs` mpsc-stream pattern for incremental UI updates.
@@ -356,20 +355,16 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 - Happy path: scan a fixture tree with 3 GGUFs in two dirs → emits 3 `DiscoveredModel` events grouped under their parent directories.
 - Happy path: split-GGUF detection groups `model-00001-of-00003.gguf` + siblings into a single entry whose launch target is shard 1.
 - Happy path: Ollama manifest enumeration maps the recorded blob hash → human name in the output.
-- Happy path: HF pull downloads a small fixture from a locally-served HTTP mock; resulting file appears in the watcher within 500 ms.
 - Edge case: symlinked GGUF → deduplicated to its canonical path (same model not listed twice).
 - Edge case: `.gguf.part` (mid-download) is ignored by the scanner.
 - Edge case: empty file with `.gguf` extension → flagged as invalid (via Unit 3 parser) but does not crash discovery; surfaced with `metadata: None` and a warning glyph.
 - Edge case: `LLAMATUI_NO_SCAN=1` set → only user-supplied paths are scanned; default cache locations skipped even if they exist.
 - Edge case: `--model-path` overlaps a default cache → file listed once (deduped by canonical path).
 - Error path: scan root that doesn't exist → logged as warning, scan continues with other roots; daemon does not crash.
-- Error path: HF pull to an unreachable URL → `pull_status` reports `Failed{reason}`, no `.part` file left behind.
-- Error path: HF pull where target dir is unwritable → fast-fail with `IoError(EACCES)`.
 - Integration: a newly-dropped `model.gguf` into a watched root appears via `list_models` within ~1 second.
 
 **Verification:**
 - A scan of a representative HF + Ollama + LM Studio tree returns within 5 s on a developer SSD and surfaces the expected count of distinct models.
-- HF pull of a known small GGUF (CI uses a 50 MB test model or a mocked server) succeeds end-to-end and the new file appears via `list_models`.
 
 ---
 
@@ -529,14 +524,14 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 
 - [ ] **Unit 8: CLI non-interactive subcommands + JSON outputs**
 
-**Goal:** A complete non-interactive CLI surface: `list`, `start`, `stop`, `status`, `logs`, `presets`, `pull`, `daemon`, all driving the daemon via the same IPC client. Every read command supports `--json`. Exit codes are distinct per failure class so scripts can branch reliably. This is v1's agent-facing surface (HTTP/MCP are v2 per R34).
+**Goal:** A complete non-interactive CLI surface: `list`, `start`, `stop`, `status`, `logs`, `presets`, `daemon`, all driving the daemon via the same IPC client. Every read command supports `--json`. Exit codes are distinct per failure class so scripts can branch reliably. This is v1's agent-facing surface (HTTP/MCP are v2 per R34; the `pull` subcommand scaffold ships hidden and exits `unimplemented` pending R46 in v2).
 
 **Requirements:** R35; R34 enforced via deliberate absence of HTTP/MCP code paths.
 
 **Dependencies:** Units 1, 2, 4, 5.
 
 **Files:**
-- Create: `src/cli/list.rs`, `src/cli/start.rs`, `src/cli/stop.rs`, `src/cli/status.rs`, `src/cli/logs.rs`, `src/cli/presets.rs`, `src/cli/pull.rs`, `src/cli/output.rs` (human + JSON formatters), `src/cli/exit_codes.rs`
+- Create: `src/cli/list.rs`, `src/cli/start.rs`, `src/cli/stop.rs`, `src/cli/status.rs`, `src/cli/logs.rs`, `src/cli/presets.rs`, `src/cli/output.rs` (human + JSON formatters), `src/cli/exit_codes.rs`. (`src/cli/pull.rs` is a v2 follow-up tracked with R46.)
 - Modify: `src/cli/mod.rs` (full subcommand wiring), `src/cli/cli_args.rs` (per-subcommand arg structs)
 - Test: `tests/cli_integration_test.rs` (drives every subcommand against a daemon fixture in a temp dir), inline tests in `src/cli/output.rs`, `src/cli/exit_codes.rs`
 
@@ -548,9 +543,9 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 - `status [--json]` returns active models, external read-only models, and daemon health.
 - `logs <id> [--follow] [-n N]` streams from `logs_tail` subscription; respects SIGINT to detach cleanly.
 - `presets <model-ref> {list|save NAME|delete NAME|show NAME}` manages presets.
-- `pull <hf-repo-id>` calls the daemon's `pull` method; if not `--background`, attaches a progress stream and exits when the pull completes; on Ctrl+C, prompts whether to cancel the pull.
+- `pull <hf-repo-id>`: **v2 (R46 deferral).** The CLI subcommand is wired and hidden from `--help`; invoking it exits with `unimplemented!` so the surface compiles but never claims work that isn't done.
 - `daemon {start|stop|status}` controls the daemon lifecycle directly (start uses the same auto-spawn path; stop sends the IPC `shutdown` method; status returns PID + uptime + #connections + #managed models).
-- Exit codes: 0 success, 64 usage error, 65 daemon unreachable, 66 model not found, 67 launch failed (probe error), 68 stop failed, 69 pull failed, 70 binary not found, 71 unknown error.
+- Exit codes: 0 success, 64 usage error, 65 daemon unreachable, 66 model not found, 67 launch failed (probe error), 68 stop failed, 70 binary not found, 71 unknown error. (Exit code 69 is reserved for `pull` and arrives with R46 in v2.)
 
 **Patterns to follow:**
 - `kdash/src/cmd/shell.rs` for subcommand-as-Rust-handler pattern.
@@ -559,7 +554,6 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 - Happy path: `llamatui list --json` against a populated daemon → valid JSON array, each element has the documented fields.
 - Happy path: `llamatui start <name> --preset coding` → exits 0; subsequent `status --json` shows the model Ready (or Loading at minimum).
 - Happy path: `llamatui stop <id>` → exits 0; `status` shows it gone.
-- Happy path: `llamatui pull org/repo` against the mock HF server → file downloaded; exits 0.
 - Happy path: `llamatui presets <ref> save coding --ctx 32768 --` → persisted; `presets list` shows it.
 - Edge case: `start` with `--ctx` exceeding native_ctx → exits 0 with a warning line; supervisor proceeds (per R12).
 - Edge case: `start` for a model already running → second instance on a new port; both visible in `status`.
@@ -598,7 +592,7 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 - Release workflow: triggered on `v*` tags; builds binaries, packages tarballs per (target, version), uploads to GitHub Releases; opens a PR against `kdash-rs/homebrew-tap` (or new `llamatui-rs/homebrew-tap`) bumping the formula's `url` and `sha256`.
 - Cargo profile: `lto = "thin"`, `codegen-units = 1` on release; strip symbols; aim for binary < 15 MB before compression.
 - Architecture doc summarises the high-level diagram from this plan (Mermaid in docs/architecture.md).
-- Troubleshooting doc covers: `llama-server` not on PATH, GPU not detected, socket file already exists (stale), port range exhausted, HF pull failures behind a proxy, Wayland clipboard quirks.
+- Troubleshooting doc covers: `llama-server` not on PATH, GPU not detected, socket file already exists (stale), port range exhausted, Wayland clipboard quirks. *(HF pull troubleshooting moves to v2 with R46.)*
 
 **Test scenarios:**
 - Test expectation: none for source code — this unit is project metadata, CI, and docs. Verification is via CI passing and release dry-run.
@@ -623,7 +617,7 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 |---|---|
 | GGUF crate doesn't expose header-only parsing → forces full mmap on huge files. | Plan B is a 200–400 LOC hand-rolled header reader; estimator falls back to params-from-name heuristic if metadata is genuinely absent. Decided in Unit 3. |
 | `llama-server` flag surface changes upstream (llama.cpp moves fast). | Free-form Advanced flag entry is always available (R14); structured flags we surface are a *subset* shortcut. We document a tested minimum llama.cpp version. |
-| Filesystem watcher noisy on HF hub trees (many writes during pull). | Debounce + depth-limited watch scope + 5-min full rescan backstop (decided above). HF pull writes to `.part` so the watcher ignores in-progress files. |
+| Filesystem watcher noisy on HF hub trees (many writes during external pulls). | Debounce + depth-limited watch scope + 5-min full rescan backstop (decided above). External pulls (HF CLI, Ollama, LM Studio) typically write to a `.part` / temp name and atomically rename; the watcher ignores in-progress files via the extension filter. |
 | Wayland clipboard failures with `arboard`. | Shellout fallbacks to `wl-copy`, `xclip`, `xsel`; user-visible toast surfaces the URL inline if all fail. |
 | Orphan re-adoption picks the wrong process (PID reuse). | Adoption requires PID alive AND port match AND `/v1/models` model-path match — three-factor confirmation. Mismatch drops from snapshot. |
 | Daemon races on first attach (TUI and CLI race to spawn). | The daemon's `O_CREAT \| O_EXCL` lockfile means the second spawn cleanly loses; both clients then attach to the survivor. |

@@ -31,7 +31,10 @@ pub async fn dispatch(cli: Cli, _config: LoadedConfig) -> Result<()> {
     Some(Command::Status(_)) => unimplemented!("status — Unit 8"),
     Some(Command::Logs(_)) => unimplemented!("logs — Unit 8"),
     Some(Command::Presets(_)) => unimplemented!("presets — Unit 8"),
-    Some(Command::Pull(_)) => unimplemented!("pull — Unit 4 / 8"),
+    // TODO(v2-R46): wire the HF pull worker. v1 scope was reduced
+    // mid-Unit-4; the subcommand surface stays scaffolded but the
+    // dispatcher must never claim work that isn't done.
+    Some(Command::Pull(_)) => unimplemented!("pull — deferred to v2 (R46)"),
     Some(Command::Favorites(_)) => unimplemented!("favorites — Unit 5 / 8"),
   }
 }

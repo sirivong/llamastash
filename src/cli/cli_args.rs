@@ -68,6 +68,12 @@ pub enum Command {
   /// Manage named launch presets for a model.
   Presets(PresetsArgs),
   /// Pull a GGUF from `HuggingFace`.
+  ///
+  /// TODO(v2-R46): the in-app pull worker is deferred to v2 (see plan
+  /// `Scope Boundaries` / `v2 deferrals`). The subcommand surface is
+  /// kept compiled so callers see a stable shape, but it is hidden
+  /// from `--help` and the dispatcher exits with `unimplemented!`.
+  #[command(hide = true)]
   Pull(PullArgs),
   /// Mark, unmark, and list favorite models.
   Favorites(FavoritesArgs),
@@ -698,11 +704,15 @@ mod tests {
   }
 
   #[test]
-  fn help_flag_lists_every_subcommand() {
+  fn help_flag_lists_every_user_facing_subcommand() {
     let result = Cli::try_parse_from(["llamatui", "--help"]);
     let err = result.unwrap_err();
     assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     let rendered = err.to_string();
+    // `pull` is intentionally excluded: it's hidden via `#[command(hide
+    // = true)]` until R46 lands in v2. The subcommand still parses (see
+    // `pull_start_parses` and `pull_status_and_cancel_parse`) so the
+    // shape stays stable, but `--help` must not advertise it.
     for sub in [
       "daemon",
       "list",
@@ -711,7 +721,6 @@ mod tests {
       "status",
       "logs",
       "presets",
-      "pull",
       "favorites",
     ] {
       assert!(
@@ -719,5 +728,24 @@ mod tests {
         "help output should list `{sub}` subcommand, got: {rendered}"
       );
     }
+  }
+
+  #[test]
+  fn pull_subcommand_is_hidden_from_help_pending_r46() {
+    let result = Cli::try_parse_from(["llamatui", "--help"]);
+    let err = result.unwrap_err();
+    let rendered = err.to_string();
+    // Top-level help omits hidden subcommands. Be precise about what we
+    // assert — the word "pull" can appear inside other text (e.g.
+    // `pull` showing up in long flag descriptions); we assert on the
+    // canonical clap subcommand-line shape `  pull   ...`.
+    let lines_with_pull_as_subcommand: Vec<&str> = rendered
+      .lines()
+      .filter(|l| l.trim_start().starts_with("pull "))
+      .collect();
+    assert!(
+      lines_with_pull_as_subcommand.is_empty(),
+      "pull must stay hidden from --help while R46 is deferred to v2: {lines_with_pull_as_subcommand:?}"
+    );
   }
 }
