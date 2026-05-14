@@ -52,14 +52,32 @@ pub fn runtime_socket_path() -> PathBuf {
 }
 
 fn username() -> String {
-  std::env::var("USER")
+  let raw = std::env::var("USER")
     .or_else(|_| std::env::var("LOGNAME"))
-    .unwrap_or_else(|_| String::from("default"))
+    .unwrap_or_else(|_| String::from("default"));
+  sanitize_username(&raw)
+}
+
+/// Strip any character not in `[A-Za-z0-9_.-]` from the supplied username.
+/// `$USER=../../root` would otherwise let an attacker direct the fallback
+/// socket out of the per-user scratch dir; see the Unit 1 review findings.
+/// Returns `"default"` if sanitization eats the whole string.
+fn sanitize_username(raw: &str) -> String {
+  let cleaned: String = raw
+    .chars()
+    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    .collect();
+  if cleaned.is_empty() {
+    String::from("default")
+  } else {
+    cleaned
+  }
 }
 
 /// Build the fallback runtime directory used when `XDG_RUNTIME_DIR` is not
 /// set (notably on macOS). Per-user scoped so concurrent users on the same
-/// host don't collide.
+/// host don't collide. Callers must supply a sanitized username — see
+/// `sanitize_username`.
 fn fallback_runtime_dir_from(tmpdir: Option<OsString>, user: &str) -> PathBuf {
   let tmp = tmpdir
     .map(PathBuf::from)
@@ -180,5 +198,28 @@ mod tests {
   fn fallback_runtime_dir_defaults_to_slash_tmp() {
     let path = fallback_runtime_dir_from(None, "default");
     assert_eq!(path, PathBuf::from("/tmp/llamatui-default"));
+  }
+
+  #[test]
+  fn sanitize_username_strips_path_traversal() {
+    assert_eq!(sanitize_username("../../root"), "....root");
+  }
+
+  #[test]
+  fn sanitize_username_strips_slashes_and_specials() {
+    assert_eq!(sanitize_username("alice/../bob"), "alice..bob");
+    assert_eq!(sanitize_username("alice;rm -rf /"), "alicerm-rf");
+  }
+
+  #[test]
+  fn sanitize_username_keeps_well_formed_names() {
+    assert_eq!(sanitize_username("alice"), "alice");
+    assert_eq!(sanitize_username("alice_user-1.0"), "alice_user-1.0");
+  }
+
+  #[test]
+  fn sanitize_username_falls_back_when_all_chars_stripped() {
+    assert_eq!(sanitize_username("///"), "default");
+    assert_eq!(sanitize_username(""), "default");
   }
 }

@@ -10,6 +10,8 @@ pub mod cli_args;
 
 use anyhow::Result;
 
+use crate::config::loader::LoadedConfig;
+
 // Public surface kept ready for later units (TUI, supervisor, CLI handlers).
 // Quiet the dead-code re-export warning until those consumers land.
 #[allow(unused_imports)]
@@ -17,11 +19,13 @@ pub use cli_args::{
   Cli, Command, DaemonAction, FavoritesAction, LaunchMode, PresetsAction, PullAction, ReasoningFlag,
 };
 
-/// Dispatch the parsed CLI to its handler. Unit 1 leaves the actual
-/// per-command behaviour as `unimplemented!` placeholders so callers can
-/// see the wiring is in place — `cargo build` succeeds and the help text
-/// is complete — without claiming work that isn't done yet.
-pub fn dispatch(cli: Cli) -> Result<()> {
+/// Dispatch the parsed CLI to its handler. The `config` argument carries
+/// the merged user-config (loaded with the `--config` override already
+/// applied) so handlers don't have to re-resolve the file path. Unit 1
+/// leaves the actual per-command behaviour as `unimplemented!` placeholders
+/// so callers can see the wiring is in place — `cargo build` succeeds and
+/// the help text is complete — without claiming work that isn't done yet.
+pub fn dispatch(cli: Cli, _config: LoadedConfig) -> Result<()> {
   match cli.command {
     None => unimplemented!("TUI entry — Unit 6"),
     Some(Command::Daemon(DaemonAction::Start { .. })) => {

@@ -10,6 +10,7 @@ homepage = "https://github.com/kdash-rs/llamatui"
 readme = "README.md"
 license = "MIT"
 edition = "2021"
+rust-version = "1.80"
 exclude = [
   "test_data/*",
   "deployment/*",
@@ -36,6 +37,7 @@ ratatui = { version = "0.30", default-features = false, features = [
   "crossterm",
 ] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json = "1.0"
 serde_yaml = "0.9"
 simplelog = { version = "0.12", default-features = false }
 strum = { version = "0.27", features = ["derive"] }
