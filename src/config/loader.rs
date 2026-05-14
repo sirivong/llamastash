@@ -228,12 +228,17 @@ mod tests {
   }
 
   #[test]
+  fn config_path_from_returns_none_when_both_sources_absent() {
+    assert_eq!(config_path_from(None, None), None);
+  }
+
+  #[test]
   fn load_config_from_path_reads_valid_yaml() {
     let dir = temp_test_dir("valid");
     let path = dir.join("config.yaml");
     fs::write(
       &path,
-      r#"
+      r"
 theme: latte
 disable_scan: false
 model_paths:
@@ -246,7 +251,7 @@ port_range:
   end: 50100
 keybindings:
   quit: ctrl+q
-"#,
+",
     )
     .expect("config fixture should be written");
 

@@ -22,8 +22,7 @@ pub fn project_dirs() -> Option<ProjectDirs> {
 pub fn state_dir() -> Option<PathBuf> {
   project_dirs().map(|d| {
     d.state_dir()
-      .map(PathBuf::from)
-      .unwrap_or_else(|| d.data_dir().to_path_buf())
+      .map_or_else(|| d.data_dir().to_path_buf(), PathBuf::from)
   })
 }
 
@@ -39,13 +38,17 @@ pub fn log_dir() -> Option<PathBuf> {
   cache_dir().map(|d| d.join("logs"))
 }
 
-pub fn runtime_socket_path() -> Option<PathBuf> {
+/// Resolve the Unix-socket path for the daemon.
+///
+/// Always returns a path. `XDG_RUNTIME_DIR` is preferred (Linux); macOS and
+/// environments without it fall back to `$TMPDIR/llamatui-$USER/daemon.sock`.
+pub fn runtime_socket_path() -> PathBuf {
   if let Some(dirs) = project_dirs() {
     if let Some(rt) = dirs.runtime_dir() {
-      return Some(rt.join("daemon.sock"));
+      return rt.join("daemon.sock");
     }
   }
-  Some(fallback_runtime_dir_from(std::env::var_os("TMPDIR"), username()).join("daemon.sock"))
+  fallback_runtime_dir_from(std::env::var_os("TMPDIR"), &username()).join("daemon.sock")
 }
 
 fn username() -> String {
@@ -57,11 +60,11 @@ fn username() -> String {
 /// Build the fallback runtime directory used when `XDG_RUNTIME_DIR` is not
 /// set (notably on macOS). Per-user scoped so concurrent users on the same
 /// host don't collide.
-fn fallback_runtime_dir_from(tmpdir: Option<OsString>, user: String) -> PathBuf {
+fn fallback_runtime_dir_from(tmpdir: Option<OsString>, user: &str) -> PathBuf {
   let tmp = tmpdir
     .map(PathBuf::from)
     .unwrap_or_else(|| PathBuf::from("/tmp"));
-  tmp.join(format!("llamatui-{}", user))
+  tmp.join(format!("llamatui-{user}"))
 }
 
 /// Convenience: return the canonical user config-file path.
@@ -92,7 +95,7 @@ mod tests {
       return rt.join("daemon.sock");
     }
     fallback_tmp
-      .join(format!("llamatui-{}", user))
+      .join(format!("llamatui-{user}"))
       .join("daemon.sock")
   }
 
@@ -114,10 +117,19 @@ mod tests {
     assert!(config_dir().is_some());
     assert!(cache_dir().is_some());
     assert!(log_dir().is_some());
-    assert!(runtime_socket_path().is_some());
     assert!(user_config_file().is_some());
     assert!(state_file().is_some());
     assert!(daemon_pidfile().is_some());
+  }
+
+  #[test]
+  fn runtime_socket_path_always_resolves() {
+    // Infallible by design — see runtime_socket_path's contract.
+    let path = runtime_socket_path();
+    assert_eq!(
+      path.file_name().and_then(|s| s.to_str()),
+      Some("daemon.sock")
+    );
   }
 
   #[test]
@@ -160,13 +172,13 @@ mod tests {
 
   #[test]
   fn fallback_runtime_dir_uses_provided_tmp_and_username() {
-    let path = fallback_runtime_dir_from(Some(OsString::from("/var/tmp")), "bob".to_string());
+    let path = fallback_runtime_dir_from(Some(OsString::from("/var/tmp")), "bob");
     assert_eq!(path, PathBuf::from("/var/tmp/llamatui-bob"));
   }
 
   #[test]
   fn fallback_runtime_dir_defaults_to_slash_tmp() {
-    let path = fallback_runtime_dir_from(None, "default".to_string());
+    let path = fallback_runtime_dir_from(None, "default");
     assert_eq!(path, PathBuf::from("/tmp/llamatui-default"));
   }
 }

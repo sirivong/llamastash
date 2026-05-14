@@ -45,14 +45,10 @@ pub enum ThemeName {
 
 impl ThemeName {
   /// Canonical kebab-case identifier (used in config files and CLI args).
-  pub fn canonical(self) -> &'static str {
-    match self {
-      Self::Macchiato => "macchiato",
-      Self::Latte => "latte",
-      Self::GruvboxDark => "gruvbox-dark",
-      Self::SolarizedDark => "solarized-dark",
-      Self::Mono => "mono",
-    }
+  /// Mirrors the first `#[strum(serialize = ...)]` attribute on each variant,
+  /// which is what `to_string()` already produces via the derived `Display`.
+  pub fn canonical(self) -> String {
+    self.to_string()
   }
 
   /// Parse a theme name from a user-supplied string, returning a structured
@@ -72,10 +68,14 @@ pub struct UnknownThemeError {
 
 impl std::fmt::Display for UnknownThemeError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let valid: Vec<String> = <ThemeName as strum::IntoEnumIterator>::iter()
+      .map(|t| t.to_string())
+      .collect();
     write!(
       f,
-      "unknown theme '{}' (valid: macchiato, latte, gruvbox-dark, solarized-dark, mono)",
-      self.value
+      "unknown theme '{}' (valid: {})",
+      self.value,
+      valid.join(", ")
     )
   }
 }
@@ -166,15 +166,63 @@ mod tests {
   #[test]
   fn canonical_strings_roundtrip_through_parse() {
     for theme in ThemeName::iter() {
-      assert_eq!(ThemeName::parse(theme.canonical()), Ok(theme));
+      assert_eq!(ThemeName::parse(&theme.to_string()), Ok(theme));
     }
   }
 
   #[test]
-  fn yaml_roundtrip_uses_kebab_case() {
-    let macchiato: ThemeName = serde_yaml::from_str("macchiato").unwrap();
-    assert_eq!(macchiato, ThemeName::Macchiato);
-    let gruvbox: ThemeName = serde_yaml::from_str("gruvbox-dark").unwrap();
-    assert_eq!(gruvbox, ThemeName::GruvboxDark);
+  fn yaml_roundtrip_uses_kebab_case_and_aliases() {
+    let cases: &[(&str, ThemeName)] = &[
+      ("macchiato", ThemeName::Macchiato),
+      ("catppuccin-macchiato", ThemeName::Macchiato),
+      ("latte", ThemeName::Latte),
+      ("catppuccin-latte", ThemeName::Latte),
+      ("gruvbox-dark", ThemeName::GruvboxDark),
+      ("gruvbox", ThemeName::GruvboxDark),
+      ("solarized-dark", ThemeName::SolarizedDark),
+      ("solarized", ThemeName::SolarizedDark),
+      ("mono", ThemeName::Mono),
+      ("monochrome", ThemeName::Mono),
+    ];
+    for (input, expected) in cases {
+      let parsed: ThemeName =
+        serde_yaml::from_str(input).unwrap_or_else(|e| panic!("`{input}` failed to parse: {e}"));
+      assert_eq!(parsed, *expected, "input: {input}");
+    }
+  }
+
+  #[test]
+  fn palettes_carry_the_expected_brand_colors() {
+    use ratatui::style::Color;
+
+    // Pin the four most user-visible slots per theme so a swapped match arm
+    // in `palette_for` shows up immediately instead of silently rendering the
+    // wrong palette.
+    assert!(palette_for(ThemeName::Macchiato).is_dark);
+    assert_eq!(
+      palette_for(ThemeName::Macchiato).bg,
+      Color::Rgb(0x24, 0x27, 0x3A)
+    );
+
+    assert!(!palette_for(ThemeName::Latte).is_dark);
+    assert_eq!(
+      palette_for(ThemeName::Latte).bg,
+      Color::Rgb(0xEF, 0xF1, 0xF5)
+    );
+
+    assert!(palette_for(ThemeName::GruvboxDark).is_dark);
+    assert_eq!(
+      palette_for(ThemeName::GruvboxDark).bg,
+      Color::Rgb(0x1D, 0x20, 0x21)
+    );
+
+    assert!(palette_for(ThemeName::SolarizedDark).is_dark);
+    assert_eq!(
+      palette_for(ThemeName::SolarizedDark).bg,
+      Color::Rgb(0x00, 0x2B, 0x36)
+    );
+
+    assert!(palette_for(ThemeName::Mono).is_dark);
+    assert_eq!(palette_for(ThemeName::Mono).bg, Color::Reset);
   }
 }

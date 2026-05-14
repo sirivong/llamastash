@@ -20,8 +20,6 @@ exclude = [
   "tags",
 ]
 
-[badges]
-
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", default-features = false, features = [

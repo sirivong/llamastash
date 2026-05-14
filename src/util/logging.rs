@@ -48,7 +48,7 @@ fn resolve_level(verbose: bool, env: Option<&str>) -> LevelFilter {
 /// always-installed baseline.
 pub fn install_panic_hook() {
   std::panic::set_hook(Box::new(|info| {
-    log::error!("panic: {}", info);
+    log::error!("panic: {info}");
     eprintln!("\nllamatui panicked: {info}");
   }));
 }

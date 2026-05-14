@@ -62,7 +62,7 @@ pub enum Command {
   Logs(LogsArgs),
   /// Manage named launch presets for a model.
   Presets(PresetsArgs),
-  /// Pull a GGUF from HuggingFace.
+  /// Pull a GGUF from `HuggingFace`.
   Pull(PullArgs),
 }
 
@@ -118,6 +118,7 @@ pub struct StartArgs {
 #[derive(Args, Debug)]
 pub struct StopArgs {
   /// Model id or port to stop. Required unless `--all` is set.
+  #[arg(required_unless_present = "all")]
   pub target: Option<String>,
   /// Stop every model owned by this daemon.
   #[arg(long, conflicts_with = "target")]
@@ -178,7 +179,7 @@ pub enum PresetsAction {
 
 #[derive(Args, Debug)]
 pub struct PullArgs {
-  /// HuggingFace repo id, optionally with `:filename.gguf` to pin a single file.
+  /// `HuggingFace` repo id, optionally with `:filename.gguf` to pin a single file.
   pub repo: String,
   /// Fire-and-forget mode: return immediately, monitor with `llamatui status`.
   #[arg(long)]
@@ -310,6 +311,74 @@ mod tests {
   }
 
   #[test]
+  fn stop_requires_target_or_all() {
+    // `llamatui stop` with neither a positional target nor --all must error
+    // at parse time. Without the ArgGroup, clap would accept this silently
+    // and the handler would have no idea what to stop.
+    let no_args = Cli::try_parse_from(["llamatui", "stop"]);
+    assert!(no_args.is_err(), "stop without target or --all must error");
+
+    let just_yes = Cli::try_parse_from(["llamatui", "stop", "--yes"]);
+    assert!(
+      just_yes.is_err(),
+      "stop --yes without target or --all must error"
+    );
+
+    // Either of the valid forms succeeds.
+    assert!(Cli::try_parse_from(["llamatui", "stop", "42"]).is_ok());
+    assert!(Cli::try_parse_from(["llamatui", "stop", "--all"]).is_ok());
+  }
+
+  #[test]
+  fn presets_list_delete_show_parse() {
+    let list = parse(&["presets", "qwen-coder", "list"]);
+    match list.command {
+      Some(Command::Presets(args)) => {
+        assert_eq!(args.model, "qwen-coder");
+        assert!(matches!(args.action, PresetsAction::List));
+      }
+      other => panic!("expected presets list, got {other:?}"),
+    }
+
+    let delete = parse(&["presets", "qwen-coder", "delete", "old-preset"]);
+    match delete.command {
+      Some(Command::Presets(args)) => match args.action {
+        PresetsAction::Delete { name } => assert_eq!(name, "old-preset"),
+        other => panic!("expected Delete, got {other:?}"),
+      },
+      other => panic!("expected presets delete, got {other:?}"),
+    }
+
+    let show = parse(&["presets", "qwen-coder", "show", "coding"]);
+    match show.command {
+      Some(Command::Presets(args)) => match args.action {
+        PresetsAction::Show { name } => assert_eq!(name, "coding"),
+        other => panic!("expected Show, got {other:?}"),
+      },
+      other => panic!("expected presets show, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn global_flags_capture_values() {
+    let cli = parse(&[
+      "--verbose",
+      "--config",
+      "/tmp/my.yaml",
+      "--llama-server",
+      "/usr/local/bin/llama-server",
+      "list",
+    ]);
+    assert!(cli.verbose);
+    assert_eq!(cli.config, Some(PathBuf::from("/tmp/my.yaml")));
+    assert_eq!(
+      cli.llama_server,
+      Some(PathBuf::from("/usr/local/bin/llama-server"))
+    );
+    assert!(matches!(cli.command, Some(Command::List(_))));
+  }
+
+  #[test]
   fn list_supports_json_and_filter() {
     let cli = parse(&["list", "--json", "--filter", "qwen"]);
     match cli.command {
@@ -341,7 +410,7 @@ mod tests {
             name, ctx, extra, ..
           } => {
             assert_eq!(name, "long-ctx");
-            assert_eq!(ctx, Some(131072));
+            assert_eq!(ctx, Some(131_072));
             assert_eq!(extra, vec![OsString::from("--flash-attn")]);
           }
           other => panic!("expected Save, got {other:?}"),
