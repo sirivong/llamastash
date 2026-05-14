@@ -13,7 +13,9 @@ use anyhow::Result;
 // Public surface kept ready for later units (TUI, supervisor, CLI handlers).
 // Quiet the dead-code re-export warning until those consumers land.
 #[allow(unused_imports)]
-pub use cli_args::{Cli, Command, DaemonAction, LaunchMode, PresetsAction, ReasoningFlag};
+pub use cli_args::{
+  Cli, Command, DaemonAction, FavoritesAction, LaunchMode, PresetsAction, PullAction, ReasoningFlag,
+};
 
 /// Dispatch the parsed CLI to its handler. Unit 1 leaves the actual
 /// per-command behaviour as `unimplemented!` placeholders so callers can
@@ -34,5 +36,6 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     Some(Command::Logs(_)) => unimplemented!("logs — Unit 8"),
     Some(Command::Presets(_)) => unimplemented!("presets — Unit 8"),
     Some(Command::Pull(_)) => unimplemented!("pull — Unit 4 / 8"),
+    Some(Command::Favorites(_)) => unimplemented!("favorites — Unit 5 / 8"),
   }
 }

@@ -37,6 +37,11 @@ pub struct Cli {
   #[arg(long, global = true)]
   pub no_scan: bool,
 
+  /// Fail fast if the daemon is not already running, instead of auto-spawning it.
+  /// Useful for scripted/agent environments that want deterministic failure.
+  #[arg(long, global = true)]
+  pub no_spawn: bool,
+
   /// Verbose logging (Debug level instead of Info).
   #[arg(short, long, global = true, action = ArgAction::SetTrue)]
   pub verbose: bool,
@@ -64,6 +69,8 @@ pub enum Command {
   Presets(PresetsArgs),
   /// Pull a GGUF from `HuggingFace`.
   Pull(PullArgs),
+  /// Mark, unmark, and list favorite models.
+  Favorites(FavoritesArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -107,7 +114,9 @@ pub struct StartArgs {
   /// + smoke-test `<think>` collapse). Advanced panel can unbundle.
   #[arg(long, value_enum)]
   pub reasoning: Option<ReasoningFlag>,
-  /// Force the launch mode. Defaults to the value detected from GGUF metadata.
+  /// Force the launch mode. `None` means "infer from GGUF metadata; error
+  /// out if the GGUF mode hint is `Unknown`" — handlers must NOT silently
+  /// default to `chat` when this is `None`.
   #[arg(long, value_enum)]
   pub mode: Option<LaunchMode>,
   /// Extra flags forwarded verbatim to `llama-server` after `--`.
@@ -130,6 +139,8 @@ pub struct StopArgs {
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
+  /// Optional model id or port to scope the response to a single model.
+  pub target: Option<String>,
   /// Emit JSON instead of the human-readable status block.
   #[arg(long)]
   pub json: bool,
@@ -137,8 +148,8 @@ pub struct StatusArgs {
 
 #[derive(Args, Debug)]
 pub struct LogsArgs {
-  /// Model id whose log to tail.
-  pub id: String,
+  /// Model id or port whose log to tail.
+  pub target: String,
   /// Follow the log instead of printing the current tail.
   #[arg(short, long)]
   pub follow: bool,
@@ -164,6 +175,8 @@ pub enum PresetsAction {
     name: String,
     #[arg(long, value_name = "TOKENS")]
     ctx: Option<u32>,
+    #[arg(long, value_name = "PORT")]
+    port: Option<u16>,
     #[arg(long, value_enum)]
     reasoning: Option<ReasoningFlag>,
     #[arg(long, value_enum)]
@@ -179,11 +192,61 @@ pub enum PresetsAction {
 
 #[derive(Args, Debug)]
 pub struct PullArgs {
-  /// `HuggingFace` repo id, optionally with `:filename.gguf` to pin a single file.
-  pub repo: String,
-  /// Fire-and-forget mode: return immediately, monitor with `llamatui status`.
-  #[arg(long)]
-  pub background: bool,
+  #[command(subcommand)]
+  pub action: PullAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PullAction {
+  /// Start a new pull from `HuggingFace`.
+  Start {
+    /// `HuggingFace` repo id, optionally with `:filename.gguf` to pin a single file.
+    repo: String,
+    /// Fire-and-forget mode: return immediately. The pull job id is emitted to stdout
+    /// (JSON when `--json` is set) so the caller can poll `llamatui pull status <id>`.
+    #[arg(long)]
+    background: bool,
+    /// Emit structured JSON output (job id + progress) instead of a human-readable stream.
+    #[arg(long)]
+    json: bool,
+  },
+  /// Poll the status of a previously-started pull.
+  Status {
+    /// Pull job id returned by `pull start`.
+    job_id: String,
+    #[arg(long)]
+    json: bool,
+  },
+  /// Cancel a running pull. Partial files are cleaned up.
+  Cancel {
+    /// Pull job id.
+    job_id: String,
+  },
+}
+
+#[derive(Args, Debug)]
+pub struct FavoritesArgs {
+  #[command(subcommand)]
+  pub action: FavoritesAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FavoritesAction {
+  /// List the user's favorites.
+  List {
+    #[arg(long)]
+    json: bool,
+  },
+  /// Mark a model as a favorite.
+  Add {
+    /// Model reference: name substring, absolute path, or canonical model id.
+    model: String,
+  },
+  /// Remove a favorite.
+  Remove {
+    /// Model reference.
+    model: String,
+  },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -421,17 +484,51 @@ mod tests {
   }
 
   #[test]
-  fn pull_parses() {
+  fn pull_start_parses() {
     let cli = parse(&[
       "pull",
+      "start",
       "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
       "--background",
+      "--json",
     ]);
     match cli.command {
-      Some(Command::Pull(args)) => {
-        assert_eq!(args.repo, "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF");
-        assert!(args.background);
-      }
+      Some(Command::Pull(args)) => match args.action {
+        PullAction::Start {
+          repo,
+          background,
+          json,
+        } => {
+          assert_eq!(repo, "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF");
+          assert!(background);
+          assert!(json);
+        }
+        other => panic!("expected PullAction::Start, got {other:?}"),
+      },
+      other => panic!("expected Pull, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn pull_status_and_cancel_parse() {
+    let status_cli = parse(&["pull", "status", "job-abc", "--json"]);
+    match status_cli.command {
+      Some(Command::Pull(args)) => match args.action {
+        PullAction::Status { job_id, json } => {
+          assert_eq!(job_id, "job-abc");
+          assert!(json);
+        }
+        other => panic!("expected PullAction::Status, got {other:?}"),
+      },
+      other => panic!("expected Pull, got {other:?}"),
+    }
+
+    let cancel_cli = parse(&["pull", "cancel", "job-abc"]);
+    match cancel_cli.command {
+      Some(Command::Pull(args)) => match args.action {
+        PullAction::Cancel { job_id } => assert_eq!(job_id, "job-abc"),
+        other => panic!("expected PullAction::Cancel, got {other:?}"),
+      },
       other => panic!("expected Pull, got {other:?}"),
     }
   }
@@ -441,11 +538,103 @@ mod tests {
     let cli = parse(&["logs", "model-abc", "-f", "-n", "200"]);
     match cli.command {
       Some(Command::Logs(args)) => {
-        assert_eq!(args.id, "model-abc");
+        assert_eq!(args.target, "model-abc");
         assert!(args.follow);
         assert_eq!(args.lines, Some(200));
       }
       other => panic!("expected Logs, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn logs_accepts_port_as_target() {
+    let cli = parse(&["logs", "41150"]);
+    match cli.command {
+      Some(Command::Logs(args)) => assert_eq!(args.target, "41150"),
+      other => panic!("expected Logs, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn no_spawn_global_flag_parses() {
+    let with_flag = parse(&["--no-spawn", "status"]);
+    assert!(with_flag.no_spawn);
+    let without_flag = parse(&["status"]);
+    assert!(!without_flag.no_spawn);
+  }
+
+  #[test]
+  fn status_accepts_optional_target() {
+    let scoped = parse(&["status", "model-abc", "--json"]);
+    match scoped.command {
+      Some(Command::Status(args)) => {
+        assert_eq!(args.target.as_deref(), Some("model-abc"));
+        assert!(args.json);
+      }
+      other => panic!("expected Status, got {other:?}"),
+    }
+
+    let unscoped = parse(&["status"]);
+    match unscoped.command {
+      Some(Command::Status(args)) => {
+        assert!(args.target.is_none());
+        assert!(!args.json);
+      }
+      other => panic!("expected Status, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn presets_save_accepts_port() {
+    let cli = parse(&[
+      "presets",
+      "qwen-coder",
+      "save",
+      "pinned",
+      "--ctx",
+      "32768",
+      "--port",
+      "41150",
+    ]);
+    match cli.command {
+      Some(Command::Presets(args)) => match args.action {
+        PresetsAction::Save { port, ctx, .. } => {
+          assert_eq!(port, Some(41150));
+          assert_eq!(ctx, Some(32_768));
+        }
+        other => panic!("expected Save, got {other:?}"),
+      },
+      other => panic!("expected Presets, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn favorites_subcommands_parse() {
+    let list_cli = parse(&["favorites", "list", "--json"]);
+    match list_cli.command {
+      Some(Command::Favorites(args)) => match args.action {
+        FavoritesAction::List { json } => assert!(json),
+        other => panic!("expected FavoritesAction::List, got {other:?}"),
+      },
+      other => panic!("expected Favorites, got {other:?}"),
+    }
+
+    let add_cli = parse(&["favorites", "add", "qwen-coder"]);
+    match add_cli.command {
+      Some(Command::Favorites(args)) => match args.action {
+        FavoritesAction::Add { model } => assert_eq!(model, "qwen-coder"),
+        other => panic!("expected FavoritesAction::Add, got {other:?}"),
+      },
+      other => panic!("expected Favorites, got {other:?}"),
+    }
+
+    let remove_cli = parse(&["favorites", "remove", "qwen-coder"]);
+    match remove_cli.command {
+      Some(Command::Favorites(args)) => match args.action {
+        FavoritesAction::Remove { model } => assert_eq!(model, "qwen-coder"),
+        other => panic!("expected FavoritesAction::Remove, got {other:?}"),
+      },
+      other => panic!("expected Favorites, got {other:?}"),
     }
   }
 
@@ -472,7 +661,15 @@ mod tests {
     assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     let rendered = err.to_string();
     for sub in [
-      "daemon", "list", "start", "stop", "status", "logs", "presets", "pull",
+      "daemon",
+      "list",
+      "start",
+      "stop",
+      "status",
+      "logs",
+      "presets",
+      "pull",
+      "favorites",
     ] {
       assert!(
         rendered.contains(sub),
