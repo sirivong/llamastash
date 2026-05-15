@@ -12,6 +12,7 @@ pub mod orphans;
 pub mod peercred;
 pub mod ports;
 pub mod probe;
+pub mod registry;
 pub mod resources;
 pub mod server;
 pub mod shutdown;

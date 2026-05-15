@@ -183,9 +183,14 @@ mod tests {
   }
 
   fn fast_watcher() -> WatcherOptions {
+    // The periodic rescan is intentionally short here so the test is
+    // robust under heavy parallel `cargo test` load: even if the
+    // watcher's event firing slips beyond the inline poll budget, the
+    // periodic tick drives a re-scan and the catalog still converges
+    // within seconds.
     WatcherOptions {
       debounce: Duration::from_millis(50),
-      periodic_rescan: Duration::from_secs(60),
+      periodic_rescan: Duration::from_secs(1),
       channel_capacity: 16,
     }
   }

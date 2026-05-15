@@ -378,7 +378,7 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 
 ### Phase C — Launching
 
-- [ ] **Unit 5: Process supervisor — launch params, binary lookup, presets, favorites, port allocation, health probe, resource monitor, orphan adoption, stop semantics**
+- [x] **Unit 5: Process supervisor — launch params, binary lookup, presets, favorites, port allocation, health probe, resource monitor, orphan adoption, stop semantics**
 
 **Goal:** The full launch and lifecycle backbone in the daemon. Locate `llama-server`, compose flags from the user's choices, allocate a port, spawn the child with piped stdout/stderr to log files and a ring buffer, drive the `Launching → Loading → Ready/Error → Stopping → Stopped` state machine, sample RAM/VRAM/CPU per model, persist last-params and presets and favorites and the running-snapshot, and handle orphan re-adoption on daemon restart.
 

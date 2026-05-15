@@ -12,11 +12,17 @@ use std::{
   time::Instant,
 };
 
+use std::time::Duration;
+
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::protocol::{ErrorCode, ErrorObject, Request, Response, JSONRPC_VERSION};
+use crate::daemon::registry::{LaunchId, SupervisorRegistry};
 use crate::daemon::shutdown::ShutdownToken;
+use crate::daemon::supervisor::ManagedState;
 use crate::discovery::ModelCatalog;
+use crate::gpu::GpuInfo;
 
 /// Shared state that the daemon hands to each request handler. Cheap to
 /// clone (`Arc` inside).
@@ -34,6 +40,15 @@ pub struct MethodContext {
   /// discovery task; read by the `list_models` handler. Cheap to clone
   /// (`Arc<RwLock<…>>`).
   pub catalog: ModelCatalog,
+  /// Active supervisor instances keyed by `LaunchId`. Populated by
+  /// `start_model` and consumed by `status`, `stop_model`,
+  /// `logs_tail`. Empty in tests that only exercise the discovery
+  /// surface.
+  pub supervisors: SupervisorRegistry,
+  /// Snapshot of `gpu::probe()` taken at daemon start. `status`
+  /// reports it alongside per-model resources so the UI can render
+  /// a GPU panel.
+  pub gpu: Arc<GpuInfo>,
 }
 
 impl MethodContext {
@@ -50,7 +65,23 @@ impl MethodContext {
       shutdown,
       active_connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
       catalog,
+      supervisors: SupervisorRegistry::new(),
+      gpu: Arc::new(GpuInfo::CpuOnly),
     }
+  }
+
+  /// Builder helper: attach a supervisor registry. Used by
+  /// `run_foreground` so the dispatcher and the daemon share one
+  /// supervisor map.
+  pub fn with_supervisors(mut self, supervisors: SupervisorRegistry) -> Self {
+    self.supervisors = supervisors;
+    self
+  }
+
+  /// Builder helper: attach a probed GPU info snapshot.
+  pub fn with_gpu(mut self, gpu: GpuInfo) -> Self {
+    self.gpu = Arc::new(gpu);
+    self
   }
 }
 
@@ -95,6 +126,19 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
       let body = ctx.catalog.to_list_response().await;
       Response::ok(id, body)
     }
+    "status" => Response::ok(id, status_response(ctx).await),
+    "stop_model" => match stop_model_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "stop_all" => match stop_all_handler(ctx).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "logs_tail" => match logs_tail_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
     other => Response::err(
       id,
       ErrorObject::new(
@@ -104,6 +148,121 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
     ),
   }
 }
+
+/// Snapshot every active managed model plus the daemon's GPU info.
+/// `status` is read-only; never triggers any state-machine transitions.
+async fn status_response(ctx: &MethodContext) -> Value {
+  let snap = ctx.supervisors.snapshot().await;
+  let mut models: Vec<Value> = Vec::with_capacity(snap.len());
+  for (launch_id, model) in snap {
+    let state = model.state().await;
+    let pid = model.pid().await;
+    let ready_at = model.ready_at().await;
+    models.push(json!({
+      "launch_id": launch_id,
+      "id": model.id(),
+      "port": model.port(),
+      "mode": model.mode().label(),
+      "pid": pid,
+      "ready_at": ready_at,
+      "state": state,
+    }));
+  }
+  json!({
+    "models": models,
+    "gpu": ctx.gpu.as_ref(),
+  })
+}
+
+#[derive(Deserialize)]
+struct StopParams {
+  launch_id: LaunchId,
+  #[serde(default = "default_grace_secs")]
+  grace_secs: u64,
+}
+
+fn default_grace_secs() -> u64 {
+  5
+}
+
+async fn stop_model_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: StopParams = parse_params(params)?;
+  let model = ctx
+    .supervisors
+    .get(&parsed.launch_id)
+    .await
+    .ok_or_else(|| {
+      ErrorObject::new(
+        ErrorCode::InvalidParams,
+        format!("unknown launch_id: {}", parsed.launch_id.as_str()),
+      )
+    })?;
+  let final_state = model.stop(Duration::from_secs(parsed.grace_secs)).await;
+  ctx.supervisors.remove(&parsed.launch_id).await;
+  Ok(json!({
+    "launch_id": parsed.launch_id,
+    "state": final_state,
+  }))
+}
+
+async fn stop_all_handler(ctx: &MethodContext) -> Result<Value, ErrorObject> {
+  let snap = ctx.supervisors.snapshot().await;
+  let mut stopped: Vec<Value> = Vec::with_capacity(snap.len());
+  for (launch_id, model) in snap {
+    let s = model.stop(Duration::from_secs(default_grace_secs())).await;
+    ctx.supervisors.remove(&launch_id).await;
+    stopped.push(json!({"launch_id": launch_id, "state": s}));
+  }
+  Ok(json!({"stopped": stopped}))
+}
+
+#[derive(Deserialize)]
+struct LogsTailParams {
+  launch_id: LaunchId,
+  #[serde(default = "default_lines")]
+  lines: usize,
+}
+
+fn default_lines() -> usize {
+  200
+}
+
+async fn logs_tail_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: LogsTailParams = parse_params(params)?;
+  let model = ctx
+    .supervisors
+    .get(&parsed.launch_id)
+    .await
+    .ok_or_else(|| {
+      ErrorObject::new(
+        ErrorCode::InvalidParams,
+        format!("unknown launch_id: {}", parsed.launch_id.as_str()),
+      )
+    })?;
+  let tail = model.tail(parsed.lines).await;
+  Ok(json!({
+    "launch_id": parsed.launch_id,
+    "lines": tail,
+  }))
+}
+
+fn parse_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T, ErrorObject> {
+  let raw = params.unwrap_or(Value::Null);
+  serde_json::from_value(raw)
+    .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, format!("params parse error: {e}")))
+}
+
+// Silence the unused-state-import warning when no test exercises it.
+#[allow(dead_code)]
+const _: fn() = || {
+  let _ = std::mem::size_of::<ManagedState>();
+};
 
 #[cfg(test)]
 mod tests {

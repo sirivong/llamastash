@@ -170,8 +170,7 @@ mod tests {
       Some(PathBuf::from("/models/a.gguf"))
     );
 
-    let long_pair: Vec<String> =
-      vec!["llama-server".into(), "--model".into(), "/m/b.gguf".into()];
+    let long_pair: Vec<String> = vec!["llama-server".into(), "--model".into(), "/m/b.gguf".into()];
     assert_eq!(
       extract_model_path(&long_pair),
       Some(PathBuf::from("/m/b.gguf"))
