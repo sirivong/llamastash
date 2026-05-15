@@ -35,7 +35,7 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<()> {
   let command = cli.command.take();
   let resolved_config = &config.config;
   match command {
-    None => unimplemented!("TUI entry — Unit 6"),
+    None => handle_tui(&cli, resolved_config).await,
     Some(Command::Daemon(action)) => daemon::handle(action, &cli, resolved_config).await,
     Some(Command::List(_)) => unimplemented!("list — Unit 8"),
     Some(Command::Start(_)) => unimplemented!("start — Unit 8"),
@@ -49,4 +49,15 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<()> {
     Some(Command::Pull(_)) => unimplemented!("pull — deferred to v2 (R46)"),
     Some(Command::Favorites(_)) => unimplemented!("favorites — Unit 5 / 8"),
   }
+}
+
+/// Entry point for the TUI (`llamatui` with no subcommand).
+///
+/// Resolves the daemon socket path the same way `daemon stop`
+/// does, then hands off to [`crate::tui::events::launch`]. The
+/// TUI's run-loop owns the alternate-screen lifecycle; this
+/// function returns once the user quits.
+async fn handle_tui(_cli: &Cli, config: &crate::config::Config) -> Result<()> {
+  let socket = crate::util::paths::runtime_socket_path();
+  crate::tui::events::launch(config.theme, &socket).await
 }

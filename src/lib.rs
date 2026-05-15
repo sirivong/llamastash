@@ -20,4 +20,5 @@ pub mod gpu;
 pub mod ipc;
 pub mod launch;
 pub mod theme;
+pub mod tui;
 pub mod util;

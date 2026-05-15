@@ -440,7 +440,7 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 
 ### Phase D — Frontends
 
-- [ ] **Unit 6: TUI shell — layout, list pane, filter, help bar, launch picker, advanced panel, clipboard, theme application, status icons**
+- [x] **Unit 6: TUI shell — layout, list pane, filter, help bar, launch picker, advanced panel, clipboard, theme application, status icons**
 
 **Goal:** The `ratatui`-based TUI. Layout: model-list pane (left), right pane (placeholder for tabs in Unit 7), contextual help bar (bottom). List pane shows favorites first, then directory-grouped models with metadata badges. `/` opens a filter. Marking favorites and selecting models all work. Selecting a model and pressing `Enter` opens a launch picker (context length / reasoning / Advanced panel). Themes apply. Status icons render with both colour and glyph. Clipboard yanks endpoint URL / curl / model path.
 

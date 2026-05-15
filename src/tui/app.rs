@@ -1,0 +1,670 @@
+//! TUI application state.
+//!
+//! The render loop and the event loop are in [`super::events`]; this
+//! module is the pure state machine they drive. Keeping it pure lets
+//! the TestBackend smoke test and the inline unit tests assert
+//! behaviour without spinning up tokio.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+use crate::discovery::DiscoveredModel;
+use crate::theme::{palette_for, Palette, ThemeName};
+use crate::tui::advanced_panel::AdvancedPanelState;
+use crate::tui::filter::rank;
+use crate::tui::keybindings::Focus;
+use crate::tui::launch_picker::LaunchPickerState;
+use crate::tui::list_pane::{build_rows, ListRow, RowInputs};
+use crate::tui::status_icons::SurfaceState;
+
+/// Maximum age of a toast before the App auto-clears it. Keeps
+/// transient yank confirmations from sticking around forever.
+const TOAST_TTL: Duration = Duration::from_secs(3);
+
+/// In-memory snapshot of one launched model the daemon is
+/// supervising. Mirrors the IPC `status` shape — kept in App so
+/// the right-pane header can show port/state without re-querying.
+#[derive(Debug, Clone)]
+pub struct ManagedRow {
+  pub launch_id: String,
+  pub path: PathBuf,
+  pub port: u16,
+  pub state: SurfaceState,
+}
+
+/// Immutable parts of the App that don't change after construction.
+#[derive(Debug, Clone)]
+pub struct AppOptions {
+  pub theme: ThemeName,
+}
+
+impl Default for AppOptions {
+  fn default() -> Self {
+    Self {
+      theme: ThemeName::Macchiato,
+    }
+  }
+}
+
+/// Central App state.
+#[derive(Debug)]
+pub struct App {
+  pub options: AppOptions,
+  pub focus: Focus,
+  pub models: Vec<DiscoveredModel>,
+  pub favorites: Vec<PathBuf>,
+  pub managed: Vec<ManagedRow>,
+  /// Cursor index into the rendered row list (which mixes headers
+  /// and models). Header rows are skipped during `move_*`.
+  pub list_cursor: usize,
+  pub filter_buffer: String,
+  pub launch_picker: Option<LaunchPickerState>,
+  pub advanced_panel: Option<AdvancedPanelState>,
+  pub toast: Option<(String, Instant)>,
+  pub daemon_connected: bool,
+  /// Set when the user presses `q` so the event loop can exit.
+  pub should_exit: bool,
+}
+
+impl App {
+  pub fn new(options: AppOptions) -> Self {
+    Self {
+      options,
+      focus: Focus::List,
+      models: Vec::new(),
+      favorites: Vec::new(),
+      managed: Vec::new(),
+      list_cursor: 0,
+      filter_buffer: String::new(),
+      launch_picker: None,
+      advanced_panel: None,
+      toast: None,
+      daemon_connected: false,
+      should_exit: false,
+    }
+  }
+
+  pub fn palette(&self) -> &'static Palette {
+    palette_for(self.options.theme)
+  }
+
+  /// Apply a `list_models` IPC response. The TUI calls this after
+  /// every refresh.
+  pub fn ingest_list_models(&mut self, body: &Value) {
+    let arr = match body.get("models").and_then(Value::as_array) {
+      Some(a) => a,
+      None => return,
+    };
+    let mut next: Vec<DiscoveredModel> = Vec::with_capacity(arr.len());
+    for row in arr {
+      if let Some(m) = parse_list_models_row(row) {
+        next.push(m);
+      }
+    }
+    self.models = next;
+    self.clamp_cursor();
+  }
+
+  /// Apply a `status` IPC response — just the supervisor side.
+  /// Discovery rows survive intact.
+  pub fn ingest_status(&mut self, body: &Value) {
+    let arr = match body.get("models").and_then(Value::as_array) {
+      Some(a) => a,
+      None => return,
+    };
+    let mut next: Vec<ManagedRow> = Vec::with_capacity(arr.len());
+    for row in arr {
+      if let Some(m) = parse_status_row(row) {
+        next.push(m);
+      }
+    }
+    self.managed = next;
+  }
+
+  /// Apply a `favorite_list` IPC response.
+  pub fn ingest_favorites(&mut self, body: &Value) {
+    let arr = match body.get("favorites").and_then(Value::as_array) {
+      Some(a) => a,
+      None => return,
+    };
+    self.favorites = arr
+      .iter()
+      .filter_map(|row| {
+        row
+          .get("id")
+          .and_then(|id| id.get("path"))
+          .and_then(Value::as_str)
+      })
+      .map(PathBuf::from)
+      .collect();
+  }
+
+  /// Build the list of rows the renderer should draw, applying any
+  /// active filter. Cached results aren't worth it: discovery
+  /// snapshots are small (hundreds of rows) and the filter is
+  /// hand-rolled subsequence matching.
+  pub fn rendered_rows(&self) -> Vec<ListRow> {
+    let model_states = self.surface_states();
+    let mut all = build_rows(RowInputs {
+      models: &self.models,
+      favorites: &self.favorites,
+      model_states: &model_states,
+    });
+    if !self.filter_buffer.is_empty() {
+      all = apply_filter(&all, &self.filter_buffer);
+    }
+    all
+  }
+
+  fn surface_states(&self) -> BTreeMap<PathBuf, SurfaceState> {
+    self
+      .managed
+      .iter()
+      .map(|m| (m.path.clone(), m.state))
+      .collect()
+  }
+
+  /// Move cursor down to the next selectable (model) row.
+  pub fn move_down(&mut self) {
+    let rows = self.rendered_rows();
+    if rows.is_empty() {
+      return;
+    }
+    let mut next = self.list_cursor + 1;
+    while next < rows.len() && !rows[next].is_selectable() {
+      next += 1;
+    }
+    if next < rows.len() {
+      self.list_cursor = next;
+    }
+  }
+
+  pub fn move_up(&mut self) {
+    if self.list_cursor == 0 {
+      return;
+    }
+    let rows = self.rendered_rows();
+    let mut next = self.list_cursor;
+    while next > 0 {
+      next -= 1;
+      if rows.get(next).map(|r| r.is_selectable()).unwrap_or(false) {
+        self.list_cursor = next;
+        return;
+      }
+    }
+  }
+
+  pub fn go_top(&mut self) {
+    let rows = self.rendered_rows();
+    for (i, r) in rows.iter().enumerate() {
+      if r.is_selectable() {
+        self.list_cursor = i;
+        return;
+      }
+    }
+  }
+
+  pub fn go_bottom(&mut self) {
+    let rows = self.rendered_rows();
+    for (i, r) in rows.iter().enumerate().rev() {
+      if r.is_selectable() {
+        self.list_cursor = i;
+        return;
+      }
+    }
+  }
+
+  fn clamp_cursor(&mut self) {
+    let rows = self.rendered_rows();
+    if rows.is_empty() {
+      self.list_cursor = 0;
+      return;
+    }
+    if self.list_cursor >= rows.len() {
+      self.list_cursor = rows.len() - 1;
+    }
+    if !rows[self.list_cursor].is_selectable() {
+      // Snap to next selectable row.
+      self.go_top();
+    }
+  }
+
+  /// Path of the model the cursor sits on.
+  pub fn focused_path(&self) -> Option<PathBuf> {
+    let rows = self.rendered_rows();
+    rows
+      .get(self.list_cursor)
+      .and_then(|r| r.path().map(|p| p.to_path_buf()))
+  }
+
+  /// Display name of the focused model.
+  pub fn focused_name(&self) -> Option<String> {
+    let rows = self.rendered_rows();
+    match rows.get(self.list_cursor) {
+      Some(ListRow::Model { name, .. }) => Some(name.clone()),
+      _ => None,
+    }
+  }
+
+  pub fn focused_managed(&self) -> Option<&ManagedRow> {
+    let path = self.focused_path()?;
+    self.managed.iter().find(|m| m.path == path)
+  }
+
+  /// Open the launch picker for the focused model. No-op when the
+  /// cursor is on a header.
+  pub fn open_launch_picker(&mut self) {
+    if let Some(name) = self.focused_name() {
+      self.launch_picker = Some(LaunchPickerState::for_model(name));
+      self.focus = Focus::LaunchPicker;
+    }
+  }
+
+  pub fn close_launch_picker(&mut self) {
+    self.launch_picker = None;
+    self.focus = Focus::List;
+  }
+
+  pub fn open_advanced_panel(&mut self) {
+    self.advanced_panel = Some(AdvancedPanelState::default());
+    self.focus = Focus::AdvancedPanel;
+  }
+
+  pub fn close_advanced_panel(&mut self) {
+    self.advanced_panel = None;
+    // Return to launch picker if it was the previous focus, else List.
+    self.focus = if self.launch_picker.is_some() {
+      Focus::LaunchPicker
+    } else {
+      Focus::List
+    };
+  }
+
+  pub fn open_filter(&mut self) {
+    self.focus = Focus::Filter;
+  }
+
+  /// Esc clears + leaves filter mode.
+  pub fn clear_filter(&mut self) {
+    self.filter_buffer.clear();
+    self.focus = Focus::List;
+    self.clamp_cursor();
+  }
+
+  /// Apply a transient toast.
+  pub fn show_toast(&mut self, msg: impl Into<String>) {
+    self.toast = Some((msg.into(), Instant::now()));
+  }
+
+  /// Drop the toast if it's older than [`TOAST_TTL`].
+  pub fn expire_toast(&mut self) {
+    if let Some((_, at)) = &self.toast {
+      if at.elapsed() > TOAST_TTL {
+        self.toast = None;
+      }
+    }
+  }
+
+  pub fn toast_message(&self) -> Option<&str> {
+    self.toast.as_ref().map(|(s, _)| s.as_str())
+  }
+
+  /// Cycle to the next theme. Used by the `t` hotkey.
+  pub fn cycle_theme(&mut self) {
+    use strum::IntoEnumIterator;
+    let order: Vec<ThemeName> = ThemeName::iter().collect();
+    if let Some(pos) = order.iter().position(|t| *t == self.options.theme) {
+      let next = order[(pos + 1) % order.len()];
+      self.options.theme = next;
+    }
+  }
+}
+
+fn apply_filter(rows: &[ListRow], query: &str) -> Vec<ListRow> {
+  // Only model rows take part in the rank — headers regroup
+  // around the surviving models.
+  let model_idx: Vec<usize> = rows
+    .iter()
+    .enumerate()
+    .filter_map(|(i, r)| match r {
+      ListRow::Model { .. } => Some(i),
+      _ => None,
+    })
+    .collect();
+  let names: Vec<String> = model_idx
+    .iter()
+    .filter_map(|i| match &rows[*i] {
+      ListRow::Model {
+        name, arch, quant, ..
+      } => Some(format!("{name} {arch} {quant}")),
+      _ => None,
+    })
+    .collect();
+  let ranked = rank(query, &names);
+  let kept: std::collections::BTreeSet<usize> = ranked.into_iter().map(|i| model_idx[i]).collect();
+  // Reproduce the same section ordering, dropping headers whose
+  // groups have no surviving model rows.
+  let mut out: Vec<ListRow> = Vec::with_capacity(kept.len() + 4);
+  let mut i = 0;
+  while i < rows.len() {
+    match &rows[i] {
+      ListRow::Header { .. } => {
+        let header = rows[i].clone();
+        let mut j = i + 1;
+        let mut group: Vec<ListRow> = Vec::new();
+        while j < rows.len() {
+          if matches!(rows[j], ListRow::Header { .. }) {
+            break;
+          }
+          if kept.contains(&j) {
+            group.push(rows[j].clone());
+          }
+          j += 1;
+        }
+        if !group.is_empty() {
+          out.push(header);
+          out.extend(group);
+        }
+        i = j;
+      }
+      ListRow::Model { .. } => {
+        if kept.contains(&i) {
+          out.push(rows[i].clone());
+        }
+        i += 1;
+      }
+    }
+  }
+  out
+}
+
+fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
+  use crate::discovery::ModelSource;
+  use crate::gguf::metadata::{ModelMetadata, Quant};
+
+  let path = PathBuf::from(row.get("path")?.as_str()?);
+  let parent = PathBuf::from(row.get("parent")?.as_str()?);
+  let source = match row.get("source").and_then(Value::as_str)? {
+    "user" => ModelSource::UserPath,
+    "huggingface" => ModelSource::HuggingFace,
+    "ollama" => ModelSource::Ollama,
+    "lm-studio" => ModelSource::LmStudio,
+    _ => ModelSource::UserPath,
+  };
+  let metadata = row.get("metadata").and_then(|md| {
+    if md.is_null() {
+      None
+    } else {
+      Some(ModelMetadata {
+        arch: md.get("arch").and_then(Value::as_str).map(String::from),
+        total_parameters: md.get("total_parameters").and_then(Value::as_u64),
+        parameter_label: md
+          .get("parameter_label")
+          .and_then(Value::as_str)
+          .map(String::from),
+        quant: md
+          .get("quant")
+          .and_then(Value::as_str)
+          .map(parse_quant)
+          .unwrap_or_else(|| Quant::Unknown(0)),
+        native_ctx: md.get("native_ctx").and_then(Value::as_u64),
+        chat_template: None,
+        tokenizer_kind: md
+          .get("tokenizer_kind")
+          .and_then(Value::as_str)
+          .map(String::from),
+        reasoning_hint: None,
+        mode_hint: parse_mode_hint(md.get("mode_hint").and_then(Value::as_str)),
+      })
+    }
+  });
+  Some(DiscoveredModel {
+    path,
+    parent,
+    source,
+    metadata,
+    parse_error: row
+      .get("parse_error")
+      .and_then(Value::as_str)
+      .map(String::from),
+    split_siblings: Vec::new(),
+  })
+}
+
+fn parse_mode_hint(label: Option<&str>) -> crate::gguf::metadata::ModeHint {
+  use crate::gguf::metadata::ModeHint;
+  match label {
+    Some("chat") => ModeHint::Chat,
+    Some("embedding") => ModeHint::Embedding,
+    Some("rerank") => ModeHint::Rerank,
+    _ => ModeHint::Unknown,
+  }
+}
+
+fn parse_quant(label: &str) -> crate::gguf::metadata::Quant {
+  use crate::gguf::metadata::Quant;
+  // Accept the canonical labels emitted by `Quant::label`. Anything
+  // else lands as `Unknown(0)` so we don't crash on a future quant
+  // tag the daemon learns about before the TUI does. The `0`
+  // payload is just the "unknown ggml type" sentinel — we don't
+  // surface it back to the user.
+  match label {
+    "F32" => Quant::F32,
+    "F16" => Quant::F16,
+    "BF16" => Quant::BF16,
+    "Q4_0" => Quant::Q4_0,
+    "Q4_1" => Quant::Q4_1,
+    "Q5_0" => Quant::Q5_0,
+    "Q5_1" => Quant::Q5_1,
+    "Q8_0" => Quant::Q8_0,
+    "Q8_1" => Quant::Q8_1,
+    "Q2_K" => Quant::Q2_K,
+    "Q3_K" => Quant::Q3_K,
+    "Q4_K" => Quant::Q4_K,
+    "Q5_K" => Quant::Q5_K,
+    "Q6_K" => Quant::Q6_K,
+    "Q8_K" => Quant::Q8_K,
+    _ => Quant::Unknown(0),
+  }
+}
+
+fn parse_status_row(row: &Value) -> Option<ManagedRow> {
+  let launch_id = row.get("launch_id")?.as_str()?.to_string();
+  let port = row.get("port")?.as_u64()? as u16;
+  let path = row
+    .get("id")
+    .and_then(|id| id.get("path"))
+    .and_then(Value::as_str)
+    .map(PathBuf::from)?;
+  let state_label = row
+    .get("state")
+    .and_then(|s| s.get("state"))
+    .and_then(Value::as_str)
+    .unwrap_or("");
+  let state = match state_label {
+    "launching" => SurfaceState::Launching,
+    "loading" => SurfaceState::Loading,
+    "ready" => SurfaceState::Ready,
+    "error" => SurfaceState::Error,
+    "stopped" => SurfaceState::Stopped,
+    _ => SurfaceState::NotLaunched,
+  };
+  Some(ManagedRow {
+    launch_id,
+    path,
+    port,
+    state,
+  })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::discovery::ModelSource;
+  use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+  use serde_json::json;
+
+  fn fake(path: &str, parent: &str) -> DiscoveredModel {
+    DiscoveredModel {
+      path: PathBuf::from(path),
+      parent: PathBuf::from(parent),
+      source: ModelSource::UserPath,
+      metadata: Some(ModelMetadata {
+        arch: Some("llama".into()),
+        total_parameters: Some(7_000_000_000),
+        parameter_label: Some("7B".into()),
+        quant: Quant::Q4_K,
+        native_ctx: Some(8192),
+        chat_template: None,
+        tokenizer_kind: None,
+        reasoning_hint: None,
+        mode_hint: ModeHint::Chat,
+      }),
+      parse_error: None,
+      split_siblings: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn move_up_and_down_skip_section_headers() {
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/x/a.gguf", "/m/x"), fake("/m/y/b.gguf", "/m/y")];
+    let rows = app.rendered_rows();
+    // Layout: header(/m/x), model a, header(/m/y), model b
+    assert_eq!(rows.len(), 4);
+    app.list_cursor = 1; // model a
+    app.move_down();
+    assert_eq!(app.list_cursor, 3, "move_down skipped header to next model");
+    app.move_up();
+    assert_eq!(app.list_cursor, 1, "move_up went back past the header");
+  }
+
+  #[test]
+  fn cycle_theme_walks_round_robin() {
+    use strum::IntoEnumIterator;
+    let mut app = App::new(AppOptions::default());
+    let original = app.options.theme;
+    let total = ThemeName::iter().count();
+    for _ in 0..total {
+      app.cycle_theme();
+    }
+    assert_eq!(app.options.theme, original, "wraps after one full lap");
+  }
+
+  #[test]
+  fn ingest_list_models_round_trips_through_ipc_shape() {
+    let mut app = App::new(AppOptions::default());
+    let body = json!({
+      "models": [
+        {
+          "path": "/m/a.gguf",
+          "parent": "/m",
+          "source": "huggingface",
+          "metadata": {
+            "arch": "llama",
+            "quant": "Q4_K",
+            "native_ctx": 8192,
+            "mode_hint": "chat",
+            "parameter_label": "7B",
+          },
+          "parse_error": null,
+          "split_siblings": []
+        }
+      ]
+    });
+    app.ingest_list_models(&body);
+    assert_eq!(app.models.len(), 1);
+    assert_eq!(app.models[0].path, PathBuf::from("/m/a.gguf"));
+  }
+
+  #[test]
+  fn ingest_status_populates_managed_rows() {
+    let mut app = App::new(AppOptions::default());
+    let body = json!({
+      "models": [{
+        "launch_id": "L1",
+        "id": {"path": "/m/a.gguf", "header_blake3": "00".repeat(32)},
+        "port": 41100,
+        "mode": "chat",
+        "pid": 1234,
+        "ready_at": null,
+        "state": {"state": "ready"}
+      }],
+      "gpu": {"backend": "cpu_only"}
+    });
+    app.ingest_status(&body);
+    assert_eq!(app.managed.len(), 1);
+    assert_eq!(app.managed[0].launch_id, "L1");
+    assert_eq!(app.managed[0].state, SurfaceState::Ready);
+  }
+
+  #[test]
+  fn open_launch_picker_no_op_on_header_focus() {
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/a.gguf", "/m")];
+    app.list_cursor = 0; // header row
+    app.open_launch_picker();
+    assert!(
+      app.launch_picker.is_none(),
+      "header focus must not open a picker"
+    );
+  }
+
+  #[test]
+  fn open_launch_picker_carries_model_name() {
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/a.gguf", "/m")];
+    app.list_cursor = 1;
+    app.open_launch_picker();
+    let picker = app.launch_picker.as_ref().expect("picker open");
+    assert_eq!(picker.model_name, "a");
+    assert_eq!(app.focus, Focus::LaunchPicker);
+  }
+
+  #[test]
+  fn filter_keeps_matching_models_and_drops_empty_groups() {
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![
+      fake("/m/x/qwen.gguf", "/m/x"),
+      fake("/m/y/phi.gguf", "/m/y"),
+    ];
+    app.filter_buffer = "qwen".into();
+    let rows = app.rendered_rows();
+    let names: Vec<String> = rows
+      .iter()
+      .filter_map(|r| match r {
+        ListRow::Model { name, .. } => Some(name.clone()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(names, vec!["qwen".to_string()]);
+    let headers: Vec<String> = rows
+      .iter()
+      .filter_map(|r| match r {
+        ListRow::Header { label } => Some(label.clone()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(
+      headers,
+      vec!["/m/x".to_string()],
+      "empty groups must be dropped"
+    );
+  }
+
+  #[test]
+  fn toast_expires_after_ttl() {
+    let mut app = App::new(AppOptions::default());
+    app.show_toast("yanked");
+    assert!(app.toast_message().is_some());
+    // Backdate the toast to force expiry.
+    if let Some((_, ref mut at)) = app.toast {
+      *at = Instant::now() - Duration::from_secs(10);
+    }
+    app.expire_toast();
+    assert!(app.toast_message().is_none());
+  }
+}
