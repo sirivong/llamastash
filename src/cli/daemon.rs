@@ -16,6 +16,7 @@ use crate::daemon::discovery_task::DiscoveryOptions;
 use crate::daemon::{run_foreground, start_detached, DaemonOptions, StartOutcome};
 use crate::discovery::known_caches::{default_set, RootResolution};
 use crate::ipc::{Client, ClientError};
+use crate::launch::binary::{locate as locate_binary, LocateInputs};
 use crate::util::paths::{home_dir, runtime_socket_path};
 
 /// Top-level dispatch for `daemon <action>`. The full `Cli` and merged
@@ -108,6 +109,22 @@ fn build_options(
   }
   let scan_roots = resolve_scan_roots(cli, config, home_dir().as_deref());
   opts.discovery = DiscoveryOptions::new(scan_roots);
+  // Best-effort `llama-server` resolution. A miss leaves
+  // `opts.binary = None`; the daemon still starts and `start_model`
+  // surfaces an actionable error to the caller. We log so the user
+  // sees *why* a later launch fails.
+  opts.binary = match locate_binary(LocateInputs {
+    cli_flag: cli.llama_server.clone(),
+    env_var: std::env::var_os("LLAMATUI_LLAMA_SERVER"),
+    config_path: config.llama_server_path.clone(),
+  }) {
+    Ok(p) => Some(p),
+    Err(e) => {
+      log::warn!("llama-server lookup failed: {e}");
+      None
+    }
+  };
+  opts.port_range = config.port_range;
   Ok(opts)
 }
 

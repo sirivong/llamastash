@@ -85,9 +85,8 @@ async fn list_models_returns_seeded_fixtures() {
   fs::write(scan_root.join("b.gguf"), build_minimal_gguf("qwen3")).unwrap();
 
   let opts = DaemonOptions {
-    state_dir: state.clone(),
-    socket_path: state.join("daemon.sock"),
     discovery: fast_discovery_for(&scan_root),
+    ..DaemonOptions::rooted_at(state.clone())
   };
   let socket = opts.socket_path.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
@@ -134,9 +133,8 @@ async fn newly_dropped_gguf_appears_via_list_models_within_a_second() {
   fs::write(scan_root.join("seed.gguf"), build_minimal_gguf("llama")).unwrap();
 
   let opts = DaemonOptions {
-    state_dir: state.clone(),
-    socket_path: state.join("daemon.sock"),
     discovery: fast_discovery_for(&scan_root),
+    ..DaemonOptions::rooted_at(state.clone())
   };
   let socket = opts.socket_path.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });

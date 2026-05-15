@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use llamatui::daemon::discovery_task::DiscoveryOptions;
 use llamatui::daemon::probe::ProbeOptions;
 use llamatui::daemon::registry::SupervisorRegistry;
 use llamatui::daemon::supervisor::{spawn, ManagedSpawn, ManagedState};
@@ -88,11 +87,7 @@ async fn status_lists_active_supervised_model() {
   registry.insert(launch_id.clone(), model.clone()).await;
 
   // Start the daemon with that registry attached.
-  let opts = DaemonOptions {
-    state_dir: state.clone(),
-    socket_path: state.join("daemon.sock"),
-    discovery: DiscoveryOptions::new(Vec::new()),
-  };
+  let opts = DaemonOptions::rooted_at(state.clone());
   let socket = opts.socket_path.clone();
   let registry_for_daemon = registry.clone();
   let daemon =
@@ -166,11 +161,7 @@ async fn status_lists_active_supervised_model() {
 async fn stop_model_returns_error_for_unknown_launch_id() {
   let state = unique_temp("unknown");
   let registry = SupervisorRegistry::new();
-  let opts = DaemonOptions {
-    state_dir: state.clone(),
-    socket_path: state.join("daemon.sock"),
-    discovery: DiscoveryOptions::new(Vec::new()),
-  };
+  let opts = DaemonOptions::rooted_at(state.clone());
   let socket = opts.socket_path.clone();
   let registry_for_daemon = registry.clone();
   let daemon =

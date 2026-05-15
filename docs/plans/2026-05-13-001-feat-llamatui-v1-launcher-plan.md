@@ -430,6 +430,12 @@ Phased delivery. Within a phase units may be parallelisable; across phases they 
 - An end-to-end test launches the fake server via the daemon, smoke-tests a `/v1/models` query through the daemon (no separate llama.cpp install needed for CI), then stops it cleanly.
 - `state.json` is well-formed JSON after any of: success, error during launch, daemon SIGINT, daemon SIGKILL+restart.
 
+**TODO follow-ups from Unit 5 review:**
+- [x] **P1: Complete the Unit 5 daemon IPC surface.** `src/ipc/methods.rs` now exposes `start_model`, `presets_list/save/delete/show`, and `favorite_add/remove/list` alongside the earlier `status`, `stop_model`, `stop_all`, and `logs_tail`. `tests/start_model_ipc_test.rs` drives the full happy path through the production `run_foreground` (no pre-populated `ManagedModel`) and asserts `status`, logs, stop, persisted last-params, preset CRUD, and favorite toggle.
+- [x] **P1: Wire Unit 5 services into production daemon startup.** `run_foreground` now loads `state.json` (quarantining a corrupt file as `state.json.broken-<ts>`), runs `orphans::sweep` and persists the trimmed `running` list, probes the GPU once, attaches a shared `SupervisorRegistry` + `PersistedState`, and (when the binary resolves) attaches a `LaunchEnv` so `start_model` can launch. Per-launch persistence flushes on each mutation; per-model resource sampling stays a TUI-side follow-up since the IPC surface doesn't yet need it.
+- [x] **P1: Make orphan adoption validate the recorded port and model identity.** `orphans::sweep` is now async and applies three-factor confirmation: PID alive (sysinfo) + port listening (`/v1/models` GET) + body mentions the recorded model path (full path or basename match). Mismatches, dead PIDs, and silent ports all land in `stale`; unmanaged `llama-server` processes still surface in `external` read-only.
+- [x] **P2: Reject non-executable explicit `llama-server` paths during lookup.** `launch::binary::locate` now stats the canonicalised path and returns `LocateError::ExplicitPathNotExecutable(p)` (with a `chmod +x` hint) before the supervisor's spawn ever runs. Tests cover the flag, env, and config paths separately.
+
 ---
 
 ### Phase D — Frontends

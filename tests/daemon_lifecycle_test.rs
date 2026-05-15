@@ -7,7 +7,6 @@ use std::{
   time::Duration,
 };
 
-use llamatui::daemon::discovery_task::DiscoveryOptions;
 use llamatui::daemon::{run_foreground, start_detached_with_exe, DaemonOptions, StartOutcome};
 use llamatui::ipc::Client;
 use tokio::time::timeout;
@@ -26,13 +25,9 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 }
 
 fn opts_for(temp: &Path) -> DaemonOptions {
-  DaemonOptions {
-    state_dir: temp.to_path_buf(),
-    socket_path: temp.join("daemon.sock"),
-    // Daemon-lifecycle tests don't drive discovery; leave the catalog
-    // empty so the test focus stays on lockfile / socket / shutdown.
-    discovery: DiscoveryOptions::new(Vec::new()),
-  }
+  // Daemon-lifecycle tests don't drive discovery or supervisor;
+  // pin every path under the temp dir and accept defaults.
+  DaemonOptions::rooted_at(temp.to_path_buf())
 }
 
 /// Poll until a connection to `path` succeeds — file existence isn't

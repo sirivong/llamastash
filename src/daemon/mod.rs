@@ -31,10 +31,14 @@ use tokio::net::UnixListener;
 use self::{
   discovery_task::DiscoveryOptions,
   lockfile::{acquire, AcquireOutcome},
+  registry::SupervisorRegistry,
   shutdown::{install_signal_handlers, ShutdownToken},
+  state_store::{load as load_state, RunningSnapshot},
 };
+use crate::config::loader::PortRange;
+use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
-use crate::ipc::methods::MethodContext;
+use crate::ipc::methods::{LaunchEnv, MethodContext, PersistedState};
 
 /// Options for starting the daemon. `state_dir` holds the PID lockfile;
 /// `socket_path` is the Unix-domain socket the server binds to. Both
@@ -44,6 +48,18 @@ use crate::ipc::methods::MethodContext;
 pub struct DaemonOptions {
   pub state_dir: PathBuf,
   pub socket_path: PathBuf,
+  /// Per-launch log directory. Each `start_model` opens a file
+  /// under here so the supervisor's stdout/stderr tee + the
+  /// `logs_tail` IPC method have a durable backing store.
+  pub log_dir: PathBuf,
+  /// `llama-server` binary path. `None` defers resolution to
+  /// `start_model` time (current behaviour for tests that never
+  /// launch); production startup pre-resolves so the daemon fails
+  /// fast if the binary is missing.
+  pub binary: Option<PathBuf>,
+  /// Listening-port range Unit 5's allocator probes. Defaults to
+  /// the plan's `41100..=41300`.
+  pub port_range: PortRange,
   /// Discovery roots and scan tunables. An empty `scan_roots` list
   /// leaves the catalog empty until the user adds paths via the TUI
   /// or CLI; tests construct one of these with a temp dir seeded
@@ -52,15 +68,37 @@ pub struct DaemonOptions {
 }
 
 impl DaemonOptions {
+  /// Test/utility helper: pin every path under one root directory.
+  /// Production callers should prefer `from_defaults` plus the CLI's
+  /// `build_options` flow, which threads config-driven overrides
+  /// through.
+  pub fn rooted_at(root: PathBuf) -> Self {
+    let socket_path = root.join("daemon.sock");
+    let log_dir = root.join("logs");
+    Self {
+      state_dir: root,
+      socket_path,
+      log_dir,
+      binary: None,
+      port_range: PortRange::default(),
+      discovery: DiscoveryOptions::new(Vec::new()),
+    }
+  }
+
   /// Build options using the conventional XDG / macOS paths. Returns an
   /// error if the platform can't supply a state directory.
   pub fn from_defaults() -> Result<Self> {
     let state_dir = crate::util::paths::state_dir()
       .context("could not resolve a state directory for this platform")?;
     let socket_path = crate::util::paths::runtime_socket_path();
+    let log_dir = crate::util::paths::log_dir()
+      .context("could not resolve a cache/log directory for this platform")?;
     Ok(Self {
       state_dir,
       socket_path,
+      log_dir,
+      binary: None,
+      port_range: PortRange::default(),
       // Production-default discovery: no scan roots until a later
       // commit threads config + CLI flags through `handle_start`.
       // Empty roots still produce a working daemon — `list_models`
@@ -112,17 +150,103 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // returns `{"models": []}`.
   let catalog = ModelCatalog::new();
   let _discovery = discovery_task::spawn(catalog.clone(), opts.discovery.clone());
-  let ctx = MethodContext::with_catalog(token.clone(), catalog);
 
-  // 5. Accept loop until shutdown is triggered.
+  // 5. Persisted state — favorites, presets, last_params, running.
+  // A parse failure does NOT block daemon start: the file is moved
+  // to `state.json.broken-<ts>` and the daemon comes up with
+  // defaults. Same posture as the plan's
+  // `state.json corruption could brick the daemon` mitigation.
+  let persisted_state = match load_state(&opts.state_dir) {
+    Ok(s) => s,
+    Err(e) => {
+      log::warn!("state-store load failed; starting with defaults: {e}");
+      quarantine_broken_state(&opts.state_dir);
+      Default::default()
+    }
+  };
+
+  // 6. Orphan / external sweep. Live recorded PIDs that still answer
+  // `/v1/models` correctly are kept; the rest are dropped. We do
+  // not yet rebuild full `ManagedModel` instances for adopted
+  // entries — that requires re-attaching to the live child's
+  // stdout/stderr, which is a Phase 2 follow-up. For now the
+  // adopted snapshots survive in `state.running` so a future daemon
+  // restart still sees them, and the IPC `status` handler reflects
+  // the result.
+  let recorded_running: Vec<RunningSnapshot> = persisted_state.running.clone();
+  let sweep = orphans::sweep(orphans::SweepInputs::new(&recorded_running)).await;
+  let mut state_after_sweep = persisted_state;
+  state_after_sweep.running = sweep.adopted.clone();
+  if let Err(e) = state_store::save(&opts.state_dir, &state_after_sweep) {
+    log::warn!("state-store: failed to persist after orphan sweep: {e}");
+  }
+  log::info!(
+    "orphan sweep: {} adopted, {} stale, {} external",
+    sweep.adopted.len(),
+    sweep.stale.len(),
+    sweep.external.len()
+  );
+
+  // 7. GPU probe (best-effort). Always returns *some* `GpuInfo`,
+  // even if it's `CpuOnly`.
+  let gpu = crate::gpu::probe();
+
+  // 8. Wire the dispatcher context.
+  let supervisors = SupervisorRegistry::new();
+  let persisted = PersistedState::new(state_after_sweep, Some(opts.state_dir.clone()));
+  let mut ctx = MethodContext::with_catalog(token.clone(), catalog)
+    .with_supervisors(supervisors)
+    .with_gpu(gpu)
+    .with_state(persisted);
+  if let Some(binary) = opts.binary.clone() {
+    if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
+      log::warn!(
+        "could not create log dir {}: {e}; logs may fail to open",
+        opts.log_dir.display()
+      );
+    }
+    ctx = ctx.with_launch_env(LaunchEnv {
+      binary,
+      port_range: opts.port_range,
+      log_dir: opts.log_dir.clone(),
+      probe: ProbeOptions::default(),
+    });
+  } else {
+    log::info!(
+      "daemon started without `llama-server` binary resolved; `start_model` will return an error until one is configured"
+    );
+  }
+
+  // 9. Accept loop until shutdown is triggered.
   let result = server::serve(listener, ctx).await;
 
-  // 6. Cleanup. Lockfile cleans itself in Drop; the socket file is
+  // 10. Cleanup. Lockfile cleans itself in Drop; the socket file is
   // removed here. We let the listener drop naturally.
   let _ = fs::remove_file(&opts.socket_path);
   drop(lockfile);
 
   result.map(|()| StartOutcome::RanToCompletion)
+}
+
+/// Move a malformed `state.json` aside so the daemon can restart
+/// with defaults. The plan's `state-json corruption` mitigation
+/// — keeps the user's prior data on disk for inspection.
+fn quarantine_broken_state(state_dir: &Path) {
+  let src = state_dir.join("state.json");
+  if !src.exists() {
+    return;
+  }
+  let ts = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or_default();
+  let dst = state_dir.join(format!("state.json.broken-{ts}"));
+  if let Err(e) = std::fs::rename(&src, &dst) {
+    log::warn!(
+      "could not quarantine corrupt state.json to {}: {e}",
+      dst.display()
+    );
+  }
 }
 
 /// Re-exec the current binary as a detached daemon child and wait for it

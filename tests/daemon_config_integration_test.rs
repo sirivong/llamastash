@@ -97,13 +97,12 @@ async fn config_model_paths_populate_list_models() {
   assert_eq!(roots.len(), 1, "only the user path remains");
 
   let opts = DaemonOptions {
-    state_dir: state.clone(),
-    socket_path: state.join("daemon.sock"),
     discovery: DiscoveryOptions {
       scan_roots: roots,
       scan: ScanOptions::default(),
       watcher: fast_watcher(),
     },
+    ..DaemonOptions::rooted_at(state.clone())
   };
   let socket = opts.socket_path.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });
@@ -185,13 +184,12 @@ async fn ollama_default_cache_surfaces_through_list_models() {
   );
 
   let opts = DaemonOptions {
-    state_dir: state.clone(),
-    socket_path: state.join("daemon.sock"),
     discovery: DiscoveryOptions {
       scan_roots: roots,
       scan: ScanOptions::default(),
       watcher: fast_watcher(),
     },
+    ..DaemonOptions::rooted_at(state.clone())
   };
   let socket = opts.socket_path.clone();
   let handle = tokio::spawn(async move { run_foreground(opts).await });

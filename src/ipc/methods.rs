@@ -1,28 +1,42 @@
-//! Method dispatch for Unit 2.
+//! Method dispatch for the daemon's IPC layer.
 //!
-//! Unit 2 ships three methods: `ping`, `version`, and `shutdown`. Model
-//! methods (list_models, start, stop, …) land in later units; each will
-//! add a match arm in `dispatch_request` plus an optional helper on
-//! `MethodContext`. Keeping the registry as a `match` (rather than a
-//! `HashMap<&str, fn>`) avoids dynamic-dispatch plumbing for what is, in
-//! practice, a small fixed set of methods.
+//! Unit 2 shipped `ping` / `version` / `shutdown` and `list_models`.
+//! Unit 5 added the supervisor-touching methods: `status`,
+//! `stop_model`, `stop_all`, `logs_tail`, `start_model`, plus the
+//! state-store CRUD surfaces `presets_*` and `favorite_*`. Keeping
+//! the registry as a `match` (rather than a `HashMap<&str, fn>`)
+//! avoids dynamic-dispatch plumbing for what is, in practice, a
+//! small fixed set of methods.
 
 use std::{
+  collections::BTreeMap,
+  ffi::OsString,
+  path::PathBuf,
   sync::{atomic::Ordering, Arc},
-  time::Instant,
+  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
 use super::protocol::{ErrorCode, ErrorObject, Request, Response, JSONRPC_VERSION};
+use crate::config::loader::PortRange;
+use crate::daemon::probe::ProbeOptions;
 use crate::daemon::registry::{LaunchId, SupervisorRegistry};
 use crate::daemon::shutdown::ShutdownToken;
-use crate::daemon::supervisor::ManagedState;
+use crate::daemon::state_store::{self, DaemonState, RunningSnapshot};
+use crate::daemon::supervisor::{
+  spawn as supervisor_spawn, ManagedModel, ManagedSpawn, ManagedState,
+};
 use crate::discovery::ModelCatalog;
+use crate::gguf::header::{read_path as read_gguf_header, HeaderReadOptions};
+use crate::gguf::identity::{compute as compute_model_id, ModelId};
 use crate::gpu::GpuInfo;
+use crate::launch::favorites::FavoriteEntry;
+use crate::launch::mode::LaunchMode;
+use crate::launch::params::LaunchParams;
+use crate::launch::presets::{NamedPreset, Presets};
 
 /// Shared state that the daemon hands to each request handler. Cheap to
 /// clone (`Arc` inside).
@@ -49,6 +63,73 @@ pub struct MethodContext {
   /// reports it alongside per-model resources so the UI can render
   /// a GPU panel.
   pub gpu: Arc<GpuInfo>,
+  /// Persisted favorites / presets / last_params / running snapshots.
+  /// `start_model`, `presets_*`, and `favorite_*` mutate it and
+  /// flush to `state.json` after each change.
+  pub state: PersistedState,
+  /// Inputs the supervisor needs at launch time — binary path, port
+  /// range, log directory, probe tuning. Optional because catalog-only
+  /// IPC tests don't need to launch anything.
+  pub launch: Option<LaunchEnv>,
+}
+
+/// Wrapper around the in-memory `DaemonState` plus the directory
+/// `state.json` lives in. Mutations go through the wrapped
+/// `Mutex`; flushes are best-effort and just log on failure so a
+/// transient I/O error doesn't take the daemon down.
+#[derive(Clone)]
+pub struct PersistedState {
+  state: Arc<Mutex<DaemonState>>,
+  /// `None` disables persistence; mutations stay in-memory. Tests
+  /// that don't care about durability use this mode.
+  state_dir: Option<PathBuf>,
+}
+
+impl PersistedState {
+  pub fn new(state: DaemonState, state_dir: Option<PathBuf>) -> Self {
+    Self {
+      state: Arc::new(Mutex::new(state)),
+      state_dir,
+    }
+  }
+
+  pub fn ephemeral() -> Self {
+    Self::new(DaemonState::default(), None)
+  }
+
+  /// Snapshot — cheap clone of the inner state.
+  pub async fn snapshot(&self) -> DaemonState {
+    self.state.lock().await.clone()
+  }
+
+  /// Mutate under the lock and flush. The closure receives the
+  /// state mutably and returns a value the caller cares about.
+  /// `flush_after` short-circuits the write when persistence is
+  /// disabled.
+  pub async fn mutate<R, F>(&self, f: F) -> R
+  where
+    F: FnOnce(&mut DaemonState) -> R,
+  {
+    let mut guard = self.state.lock().await;
+    let out = f(&mut guard);
+    if let Some(dir) = self.state_dir.as_ref() {
+      if let Err(e) = state_store::save(dir, &guard) {
+        log::warn!("state-store: failed to persist after mutation: {e}");
+      }
+    }
+    out
+  }
+}
+
+/// Resources the supervisor needs to actually launch a child.
+/// Centralised here so `start_model` doesn't have to hand-roll five
+/// optional fields on `MethodContext`.
+#[derive(Clone)]
+pub struct LaunchEnv {
+  pub binary: PathBuf,
+  pub port_range: PortRange,
+  pub log_dir: PathBuf,
+  pub probe: ProbeOptions,
 }
 
 impl MethodContext {
@@ -67,6 +148,8 @@ impl MethodContext {
       catalog,
       supervisors: SupervisorRegistry::new(),
       gpu: Arc::new(GpuInfo::CpuOnly),
+      state: PersistedState::ephemeral(),
+      launch: None,
     }
   }
 
@@ -81,6 +164,20 @@ impl MethodContext {
   /// Builder helper: attach a probed GPU info snapshot.
   pub fn with_gpu(mut self, gpu: GpuInfo) -> Self {
     self.gpu = Arc::new(gpu);
+    self
+  }
+
+  /// Builder helper: attach the persisted state-store handle.
+  pub fn with_state(mut self, state: PersistedState) -> Self {
+    self.state = state;
+    self
+  }
+
+  /// Builder helper: attach the launch environment. `start_model`
+  /// requires this to be set; without it the handler returns an
+  /// `InvalidRequest`.
+  pub fn with_launch_env(mut self, env: LaunchEnv) -> Self {
+    self.launch = Some(env);
     self
   }
 }
@@ -121,12 +218,14 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
       Response::ok(id, json!({"shutdown": "scheduled"}))
     }
     "list_models" => {
-      // Read the latest catalog snapshot. The discovery task keeps
-      // this up-to-date; handlers never trigger a scan themselves.
       let body = ctx.catalog.to_list_response().await;
       Response::ok(id, body)
     }
     "status" => Response::ok(id, status_response(ctx).await),
+    "start_model" => match start_model_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
     "stop_model" => match stop_model_handler(ctx, req.params).await {
       Ok(v) => Response::ok(id, v),
       Err(e) => Response::err(id, e),
@@ -136,6 +235,34 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
       Err(e) => Response::err(id, e),
     },
     "logs_tail" => match logs_tail_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "presets_list" => match presets_list_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "presets_save" => match presets_save_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "presets_delete" => match presets_delete_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "presets_show" => match presets_show_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "favorite_add" => match favorite_add_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "favorite_remove" => match favorite_remove_handler(ctx, req.params).await {
+      Ok(v) => Response::ok(id, v),
+      Err(e) => Response::err(id, e),
+    },
+    "favorite_list" => match favorite_list_handler(ctx).await {
       Ok(v) => Response::ok(id, v),
       Err(e) => Response::err(id, e),
     },
@@ -202,6 +329,14 @@ async fn stop_model_handler(
     })?;
   let final_state = model.stop(Duration::from_secs(parsed.grace_secs)).await;
   ctx.supervisors.remove(&parsed.launch_id).await;
+  // Drop the running snapshot for this model so a daemon restart
+  // doesn't try to re-adopt a process we just stopped. Identified by
+  // ModelId — the supervisor's `id()` is the canonical anchor.
+  let stopped_id = model.id().clone();
+  ctx
+    .state
+    .mutate(|s| s.running.retain(|r| r.id != stopped_id))
+    .await;
   Ok(json!({
     "launch_id": parsed.launch_id,
     "state": final_state,
@@ -211,10 +346,18 @@ async fn stop_model_handler(
 async fn stop_all_handler(ctx: &MethodContext) -> Result<Value, ErrorObject> {
   let snap = ctx.supervisors.snapshot().await;
   let mut stopped: Vec<Value> = Vec::with_capacity(snap.len());
+  let mut stopped_ids: Vec<ModelId> = Vec::with_capacity(snap.len());
   for (launch_id, model) in snap {
     let s = model.stop(Duration::from_secs(default_grace_secs())).await;
     ctx.supervisors.remove(&launch_id).await;
+    stopped_ids.push(model.id().clone());
     stopped.push(json!({"launch_id": launch_id, "state": s}));
+  }
+  if !stopped_ids.is_empty() {
+    ctx
+      .state
+      .mutate(|s| s.running.retain(|r| !stopped_ids.contains(&r.id)))
+      .await;
   }
   Ok(json!({"stopped": stopped}))
 }
@@ -252,11 +395,408 @@ async fn logs_tail_handler(
   }))
 }
 
+#[derive(Deserialize)]
+struct StartParams {
+  /// Absolute path to the GGUF the user wants to launch. We compute
+  /// the canonical `ModelId` by reading its header on the daemon
+  /// side rather than trusting the caller — keeps the surface
+  /// minimal for CLI/TUI clients.
+  model_path: PathBuf,
+  #[serde(default)]
+  mode: Option<LaunchModeWire>,
+  #[serde(default)]
+  ctx: Option<u32>,
+  #[serde(default)]
+  port: Option<u16>,
+  #[serde(default)]
+  reasoning: Option<bool>,
+  /// Free-form passthrough flags appended after the bundled set.
+  #[serde(default)]
+  advanced: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum LaunchModeWire {
+  Chat,
+  Embedding,
+  Rerank,
+}
+
+impl From<LaunchModeWire> for LaunchMode {
+  fn from(m: LaunchModeWire) -> Self {
+    match m {
+      LaunchModeWire::Chat => LaunchMode::Chat,
+      LaunchModeWire::Embedding => LaunchMode::Embedding,
+      LaunchModeWire::Rerank => LaunchMode::Rerank,
+    }
+  }
+}
+
+async fn start_model_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: StartParams = parse_params(params)?;
+  let env = ctx.launch.as_ref().ok_or_else(|| {
+    ErrorObject::new(
+      ErrorCode::InternalError,
+      "daemon launch environment not configured (binary / port range / log dir missing)",
+    )
+  })?;
+
+  // Resolve canonical ModelId from the GGUF header.
+  let id = resolve_model_id(&parsed.model_path)?;
+
+  // Mode resolution: explicit override > catalog hint > default to chat.
+  // The CLI surface refuses to default silently when discovery says
+  // "Unknown" (cli_args.rs::StartArgs::mode comment), but the daemon
+  // is one layer down; a missing override here means the caller has
+  // already accepted the default.
+  let mode = parsed
+    .mode
+    .map(LaunchMode::from)
+    .unwrap_or(LaunchMode::Chat);
+
+  // Port allocation.
+  let in_use = collect_in_use_ports(ctx).await;
+  let port = match parsed.port {
+    Some(requested) => requested,
+    None => crate::daemon::ports::allocate(&env.port_range, &in_use).map_err(|e| {
+      ErrorObject::new(
+        ErrorCode::InternalError,
+        format!("port allocation failed: {e}"),
+      )
+    })?,
+  };
+
+  // Compose LaunchParams.
+  let mut launch_params = LaunchParams::new(parsed.model_path.clone(), mode);
+  launch_params.ctx = parsed.ctx;
+  launch_params.port = Some(port);
+  launch_params.reasoning = parsed.reasoning.unwrap_or(false);
+  launch_params.advanced = parsed.advanced.into_iter().map(OsString::from).collect();
+
+  // Per-launch log file under cache_dir/logs/<short-id>-<ts>.log.
+  let log_path = build_log_path(&env.log_dir, &id);
+
+  let model = supervisor_spawn(ManagedSpawn {
+    id: id.clone(),
+    binary: env.binary.clone(),
+    params: launch_params.clone(),
+    port,
+    mode,
+    log_path: log_path.clone(),
+    probe: env.probe,
+  })
+  .await
+  .map_err(|e| ErrorObject::new(ErrorCode::InternalError, format!("supervisor spawn: {e}")))?;
+
+  let launch_id = ctx.supervisors.next_id();
+  ctx
+    .supervisors
+    .insert(launch_id.clone(), model.clone())
+    .await;
+
+  // Persist running snapshot + watch for Ready to stamp last_params.
+  let pid = model.pid().await.unwrap_or(0) as i32;
+  let started_at = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or_default();
+  ctx
+    .state
+    .mutate(|s| {
+      s.running.retain(|r| r.id != id);
+      s.running.push(RunningSnapshot {
+        id: id.clone(),
+        pid,
+        port,
+        started_at,
+        params: launch_params.clone(),
+      });
+    })
+    .await;
+
+  // Background task: when the supervisor reaches Ready, stamp
+  // last_params (per the plan — only updated on a *successful*
+  // Loading → Ready transition). We poll because ManagedModel
+  // doesn't expose a transition channel yet.
+  spawn_last_params_recorder(ctx.state.clone(), model.clone(), id.clone(), launch_params);
+
+  Ok(json!({
+    "launch_id": launch_id,
+    "model_id": id,
+    "port": port,
+    "pid": model.pid().await,
+    "log_path": log_path,
+  }))
+}
+
+fn spawn_last_params_recorder(
+  state: PersistedState,
+  model: ManagedModel,
+  id: ModelId,
+  params: LaunchParams,
+) {
+  tokio::spawn(async move {
+    // The supervisor's probe runs with at most a 120s timeout in
+    // production. Cap our wait at the same horizon so we don't
+    // leak tasks for models that never come up.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+      match model.state().await {
+        ManagedState::Ready => {
+          state
+            .mutate(|s| s.upsert_last_params(id.clone(), params.clone()))
+            .await;
+          return;
+        }
+        ManagedState::Error { .. } | ManagedState::Stopped => return,
+        _ => {}
+      }
+      if Instant::now() > deadline {
+        return;
+      }
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+  });
+}
+
+async fn collect_in_use_ports(ctx: &MethodContext) -> Vec<u16> {
+  ctx
+    .supervisors
+    .snapshot()
+    .await
+    .into_iter()
+    .map(|(_, m)| m.port())
+    .collect()
+}
+
+fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorObject> {
+  let header = read_gguf_header(path, HeaderReadOptions::default()).map_err(|e| {
+    ErrorObject::new(
+      ErrorCode::InvalidParams,
+      format!("could not read GGUF header at {}: {e}", path.display()),
+    )
+  })?;
+  Ok(compute_model_id(path, &header.raw))
+}
+
+fn build_log_path(log_dir: &std::path::Path, id: &ModelId) -> PathBuf {
+  let stem = id
+    .path
+    .file_stem()
+    .and_then(|s| s.to_str())
+    .unwrap_or("model");
+  let ts = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or_default();
+  let short = id.short_fingerprint();
+  log_dir.join(format!("{stem}-{short}-{ts}.log"))
+}
+
+#[derive(Deserialize)]
+struct PresetsListParams {
+  model_path: PathBuf,
+}
+
+async fn presets_list_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: PresetsListParams = parse_params(params)?;
+  let id = resolve_model_id(&parsed.model_path)?;
+  let snapshot = ctx.state.snapshot().await;
+  let presets = snapshot.presets_map().get(&id).cloned().unwrap_or_default();
+  Ok(json!({
+    "model_id": id,
+    "presets": presets.iter().map(preset_row).collect::<Vec<_>>(),
+  }))
+}
+
+#[derive(Deserialize)]
+struct PresetsSaveParams {
+  model_path: PathBuf,
+  name: String,
+  #[serde(default)]
+  ctx: Option<u32>,
+  #[serde(default)]
+  port: Option<u16>,
+  #[serde(default)]
+  reasoning: Option<bool>,
+  #[serde(default)]
+  mode: Option<LaunchModeWire>,
+  #[serde(default)]
+  advanced: Vec<String>,
+}
+
+async fn presets_save_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: PresetsSaveParams = parse_params(params)?;
+  if parsed.name.trim().is_empty() {
+    return Err(ErrorObject::new(
+      ErrorCode::InvalidParams,
+      "preset name must not be empty",
+    ));
+  }
+  let id = resolve_model_id(&parsed.model_path)?;
+  let mut params_value = LaunchParams::new(
+    parsed.model_path.clone(),
+    parsed
+      .mode
+      .map(LaunchMode::from)
+      .unwrap_or(LaunchMode::Chat),
+  );
+  params_value.ctx = parsed.ctx;
+  params_value.port = parsed.port;
+  params_value.reasoning = parsed.reasoning.unwrap_or(false);
+  params_value.advanced = parsed.advanced.into_iter().map(OsString::from).collect();
+  let preset = NamedPreset {
+    name: parsed.name.clone(),
+    params: params_value.clone(),
+  };
+
+  let prev = ctx
+    .state
+    .mutate(|s| {
+      let mut presets = s.presets_map().get(&id).cloned().unwrap_or_default();
+      let prev = presets.upsert(preset.clone());
+      s.upsert_presets(id.clone(), presets);
+      prev
+    })
+    .await;
+
+  Ok(json!({
+    "model_id": id,
+    "saved": preset_row(&preset),
+    "replaced": prev.as_ref().map(preset_row),
+  }))
+}
+
+#[derive(Deserialize)]
+struct PresetsDeleteParams {
+  model_path: PathBuf,
+  name: String,
+}
+
+async fn presets_delete_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: PresetsDeleteParams = parse_params(params)?;
+  let id = resolve_model_id(&parsed.model_path)?;
+  let removed = ctx
+    .state
+    .mutate(|s| {
+      let mut presets = s.presets_map().get(&id).cloned().unwrap_or_default();
+      let removed = presets.remove(&parsed.name);
+      s.upsert_presets(id.clone(), presets);
+      removed
+    })
+    .await;
+  Ok(json!({
+    "model_id": id,
+    "removed": removed.as_ref().map(preset_row),
+  }))
+}
+
+#[derive(Deserialize)]
+struct PresetsShowParams {
+  model_path: PathBuf,
+  name: String,
+}
+
+async fn presets_show_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: PresetsShowParams = parse_params(params)?;
+  let id = resolve_model_id(&parsed.model_path)?;
+  let snapshot = ctx.state.snapshot().await;
+  let preset = snapshot
+    .presets_map()
+    .get(&id)
+    .and_then(|p| p.get(&parsed.name).cloned());
+  Ok(json!({
+    "model_id": id,
+    "preset": preset.as_ref().map(preset_row),
+  }))
+}
+
+fn preset_row(p: &NamedPreset) -> Value {
+  json!({
+    "name": p.name,
+    "params": launch_params_row(&p.params),
+  })
+}
+
+fn launch_params_row(p: &LaunchParams) -> Value {
+  json!({
+    "model_path": p.model_path,
+    "mode": p.mode.label(),
+    "ctx": p.ctx,
+    "port": p.port,
+    "reasoning": p.reasoning,
+    "advanced": p.advanced.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+  })
+}
+
+#[derive(Deserialize)]
+struct FavoriteParams {
+  model_path: PathBuf,
+}
+
+async fn favorite_add_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: FavoriteParams = parse_params(params)?;
+  let id = resolve_model_id(&parsed.model_path)?;
+  let added = ctx.state.mutate(|s| s.favorites.add(id.clone())).await;
+  Ok(json!({
+    "model_id": id,
+    "added": added,
+  }))
+}
+
+async fn favorite_remove_handler(
+  ctx: &MethodContext,
+  params: Option<Value>,
+) -> Result<Value, ErrorObject> {
+  let parsed: FavoriteParams = parse_params(params)?;
+  let id = resolve_model_id(&parsed.model_path)?;
+  let removed = ctx.state.mutate(|s| s.favorites.remove(&id)).await;
+  Ok(json!({
+    "model_id": id,
+    "removed": removed,
+  }))
+}
+
+async fn favorite_list_handler(ctx: &MethodContext) -> Result<Value, ErrorObject> {
+  let snapshot = ctx.state.snapshot().await;
+  let entries: Vec<&FavoriteEntry> = snapshot.favorites.iter().collect();
+  let body: Vec<Value> = entries.iter().map(|e| json!({"id": &e.id})).collect();
+  Ok(json!({"favorites": body}))
+}
+
 fn parse_params<T: serde::de::DeserializeOwned>(params: Option<Value>) -> Result<T, ErrorObject> {
   let raw = params.unwrap_or(Value::Null);
   serde_json::from_value(raw)
     .map_err(|e| ErrorObject::new(ErrorCode::InvalidParams, format!("params parse error: {e}")))
 }
+
+// Compile-time guard so future commits don't drop the BTreeMap import
+// silently (presets_map() returns a BTreeMap; the `unused_imports`
+// lint would otherwise fire if all callers happened to ignore the map
+// at once).
+#[allow(dead_code)]
+const _: fn() = || {
+  let _ = std::mem::size_of::<BTreeMap<ModelId, Presets>>();
+};
 
 // Silence the unused-state-import warning when no test exercises it.
 #[allow(dead_code)]
@@ -375,5 +915,64 @@ mod tests {
     let resp = dispatch_request(&ctx(), req).await;
     let err = resp.error.expect("wrong version must error");
     assert_eq!(err.code, ErrorCode::InvalidRequest.as_i32());
+  }
+
+  #[tokio::test]
+  async fn start_model_without_launch_env_returns_internal_error() {
+    let c = ctx();
+    let req = Request::new(
+      1,
+      "start_model",
+      Some(json!({"model_path": "/nonexistent.gguf"})),
+    );
+    let resp = dispatch_request(&c, req).await;
+    let err = resp.error.expect("must error without launch env");
+    assert_eq!(err.code, ErrorCode::InternalError.as_i32());
+  }
+
+  #[tokio::test]
+  async fn favorite_add_with_unreadable_path_returns_invalid_params() {
+    // No GGUF at this path → header-read fails → InvalidParams with
+    // an actionable message naming the path.
+    let c = ctx();
+    let req = Request::new(
+      1,
+      "favorite_add",
+      Some(json!({"model_path": "/no/such/path-9f3a.gguf"})),
+    );
+    let resp = dispatch_request(&c, req).await;
+    let err = resp.error.expect("missing path must error");
+    assert_eq!(err.code, ErrorCode::InvalidParams.as_i32());
+    assert!(
+      err.message.contains("/no/such/path-9f3a.gguf"),
+      "error message should name the missing path: {}",
+      err.message
+    );
+  }
+
+  #[tokio::test]
+  async fn favorite_list_returns_empty_array_when_state_is_empty() {
+    let c = ctx();
+    let resp = dispatch_request(&c, Request::new(1, "favorite_list", None)).await;
+    let body = resp.result.expect("favorite_list result body");
+    assert_eq!(body["favorites"], json!([]));
+  }
+
+  #[tokio::test]
+  async fn presets_save_with_empty_name_rejects() {
+    let c = ctx();
+    let req = Request::new(
+      1,
+      "presets_save",
+      Some(json!({"model_path": "/m/a.gguf", "name": ""})),
+    );
+    let resp = dispatch_request(&c, req).await;
+    let err = resp.error.expect("empty name must error");
+    assert_eq!(err.code, ErrorCode::InvalidParams.as_i32());
+    assert!(
+      err.message.to_lowercase().contains("preset name"),
+      "got: {}",
+      err.message
+    );
   }
 }

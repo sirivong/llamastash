@@ -2,10 +2,11 @@
 //!
 //! Two responsibilities:
 //! 1. **Re-adopt** entries from `state.json::running` whose PID is
-//!    still alive and whose recorded port answers `/v1/models` with
-//!    a matching model path. Re-adopted entries become "live"
-//!    managed models again so `status` and `stop` keep working
-//!    across daemon restarts (R42).
+//!    still alive, whose recorded port answers, and whose
+//!    `/v1/models` reports the same model file the supervisor
+//!    launched (R42). Three-factor confirmation guards against
+//!    PID-reuse: the kernel may have handed our recorded PID to an
+//!    unrelated process by the time we restart.
 //! 2. **Surface external** `llama-server` processes (started
 //!    outside the daemon — say, by the user typing
 //!    `llama-server -m ...` directly) so the TUI's `external` row
@@ -13,22 +14,26 @@
 //!    `stop` is permitted; no edit/restart path exists.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use crate::daemon::state_store::RunningSnapshot;
 
 /// What `sweep` found on this daemon restart.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 pub struct SweepReport {
-  /// PIDs from `running` whose probe confirmed they're still our
-  /// children. The supervisor rebuilds a `ManagedModel` for each.
+  /// Snapshots whose three-factor probe (PID alive, port listening,
+  /// `/v1/models` model path matches) all passed. The supervisor
+  /// rebuilds a `ManagedModel` for each.
   pub adopted: Vec<RunningSnapshot>,
-  /// PIDs from `running` whose owner has died (or whose port no
-  /// longer answers). The supervisor drops these from
-  /// `state.json::running` on next save.
+  /// Snapshots whose owner has died, whose port no longer answers,
+  /// or whose `/v1/models` reports a different model. The
+  /// supervisor drops these from `state.json::running` on next save.
   pub stale: Vec<RunningSnapshot>,
   /// `llama-server` processes the daemon doesn't own. Surfaced as
   /// `external` in the IPC `status` response.
@@ -55,27 +60,49 @@ pub struct SweepInputs<'a> {
   /// to "llama-server" in production; tests inject a unique
   /// substring so they don't trip on the real binary.
   pub external_marker: &'a str,
+  /// Per-probe network timeout. Each adoption candidate gets one
+  /// `/v1/models` call capped at this budget. Production defaults
+  /// to 1s; tests can shorten.
+  pub probe_timeout: Duration,
 }
 
-/// Run a sweep. Pure-ish modulo a `sysinfo` scan of process tables.
-pub fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
+impl<'a> SweepInputs<'a> {
+  pub fn new(recorded: &'a [RunningSnapshot]) -> Self {
+    Self {
+      recorded_running: recorded,
+      external_marker: "llama-server",
+      probe_timeout: Duration::from_secs(1),
+    }
+  }
+}
+
+/// Run a sweep. Pure-ish modulo a `sysinfo` scan of process tables
+/// and one short HTTP probe per adoption candidate.
+pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
   let mut sys = System::new_with_specifics(
     RefreshKind::new()
       .with_processes(ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always)),
   );
   sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-  let adopted_pids: BTreeSet<u32> = inputs
-    .recorded_running
-    .iter()
-    .filter(|r| pid_alive(&sys, r.pid))
-    .map(|r| r.pid as u32)
-    .collect();
-  let (adopted, stale): (Vec<_>, Vec<_>) = inputs
-    .recorded_running
-    .iter()
-    .cloned()
-    .partition(|r| adopted_pids.contains(&(r.pid as u32)));
+  let mut adopted: Vec<RunningSnapshot> = Vec::new();
+  let mut stale: Vec<RunningSnapshot> = Vec::new();
+  for snap in inputs.recorded_running.iter().cloned() {
+    if !pid_alive(&sys, snap.pid) {
+      stale.push(snap);
+      continue;
+    }
+    // Three-factor confirmation: PID alive (above), port listening,
+    // and `/v1/models` returns the recorded model path. Only then is
+    // it safe to claim ownership again — otherwise we may be looking
+    // at a recycled PID or an unrelated `llama-server` invocation.
+    if !models_endpoint_matches(snap.port, &snap.id.path, inputs.probe_timeout).await {
+      stale.push(snap);
+      continue;
+    }
+    adopted.push(snap);
+  }
+  let adopted_pids: BTreeSet<u32> = adopted.iter().map(|s| s.pid as u32).collect();
 
   let external: Vec<ExternalProcess> = sys
     .processes()
@@ -116,6 +143,88 @@ fn pid_alive(sys: &System, pid: i32) -> bool {
   sys.process(Pid::from_u32(pid as u32)).is_some()
 }
 
+/// Probe `/v1/models` on the recorded port and check that the
+/// reported model id matches the supervisor's recorded path. Any
+/// network error, non-200 response, malformed body, or mismatched
+/// id evaluates to `false` — the sweep treats those as stale.
+async fn models_endpoint_matches(port: u16, expected: &Path, timeout: Duration) -> bool {
+  match tokio::time::timeout(timeout, fetch_models_body(port)).await {
+    Ok(Ok((200, body))) => body_mentions_path(&body, expected),
+    _ => false,
+  }
+}
+
+/// Hand-rolled GET so the orphan path doesn't drag in a heavy HTTP
+/// client. We only need the response status + body bytes; the
+/// matcher is tolerant of any body shape that contains the model
+/// path.
+async fn fetch_models_body(port: u16) -> std::io::Result<(u16, Vec<u8>)> {
+  let mut sock = TcpStream::connect(("127.0.0.1", port)).await?;
+  let req = b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nAccept: application/json\r\n\r\n";
+  sock.write_all(req).await?;
+  let mut buf = Vec::with_capacity(4096);
+  // Cap the body we care about — `/v1/models` is small, but a
+  // misbehaving peer shouldn't be able to balloon our memory.
+  let mut chunk = [0u8; 1024];
+  let mut total = 0usize;
+  while total < 32 * 1024 {
+    let n = sock.read(&mut chunk).await?;
+    if n == 0 {
+      break;
+    }
+    buf.extend_from_slice(&chunk[..n]);
+    total += n;
+  }
+  let (status, body) = split_status_and_body(&buf)
+    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad HTTP framing"))?;
+  Ok((status, body.to_vec()))
+}
+
+/// Parse the status code + body out of an HTTP/1.1 response. Tolerant
+/// to LF-only and CRLF endings; finds the `\r\n\r\n` (or `\n\n`) header
+/// terminator and returns the body suffix verbatim.
+fn split_status_and_body(bytes: &[u8]) -> Option<(u16, &[u8])> {
+  let crlf = b"\r\n\r\n";
+  let lf = b"\n\n";
+  let header_end = bytes
+    .windows(crlf.len())
+    .position(|w| w == crlf)
+    .map(|i| (i, crlf.len()))
+    .or_else(|| {
+      bytes
+        .windows(lf.len())
+        .position(|w| w == lf)
+        .map(|i| (i, lf.len()))
+    })?;
+  let head = std::str::from_utf8(&bytes[..header_end.0]).ok()?;
+  let first = head.lines().next()?;
+  let mut parts = first.split_whitespace();
+  let _version = parts.next()?;
+  let status: u16 = parts.next()?.parse().ok()?;
+  let body = &bytes[header_end.0 + header_end.1..];
+  Some((status, body))
+}
+
+/// Permissive match: the body text must contain the expected
+/// canonical path *or* its trailing file name. `llama-server`
+/// reports the literal `-m <path>` argument the user supplied; we
+/// canonicalised on launch but the daemon may have been restarted
+/// after a `mv`, so we also accept a basename match as a fallback
+/// signal that a re-adopt is warranted.
+fn body_mentions_path(body: &[u8], expected: &Path) -> bool {
+  let Ok(text) = std::str::from_utf8(body) else {
+    return false;
+  };
+  let path_str = expected.to_string_lossy();
+  if !path_str.is_empty() && text.contains(path_str.as_ref()) {
+    return true;
+  }
+  match expected.file_name().and_then(|n| n.to_str()) {
+    Some(name) if !name.is_empty() => text.contains(name),
+    _ => false,
+  }
+}
+
 /// Lift `-m <path>` out of a llama-server cmdline. Returns the
 /// path the user passed (relative or absolute) without
 /// canonicalising — the orphan caller does that step itself.
@@ -138,22 +247,58 @@ mod tests {
   use super::*;
 
   use std::path::PathBuf;
+  use tokio::net::TcpListener;
 
   use crate::gguf::identity::ModelId;
   use crate::launch::mode::LaunchMode;
   use crate::launch::params::LaunchParams;
 
-  fn fake_snapshot(pid: i32, tag: u8) -> RunningSnapshot {
+  fn fake_snapshot(pid: i32, port: u16, path: &str, tag: u8) -> RunningSnapshot {
     RunningSnapshot {
       id: ModelId {
-        path: PathBuf::from(format!("/m/{tag}.gguf")),
+        path: PathBuf::from(path),
         header_blake3: [tag; 32],
       },
       pid,
-      port: 41100 + (tag as u16),
+      port,
       started_at: 1_700_000_000,
-      params: LaunchParams::new(PathBuf::from(format!("/m/{tag}.gguf")), LaunchMode::Chat),
+      params: LaunchParams::new(PathBuf::from(path), LaunchMode::Chat),
     }
+  }
+
+  fn allocate_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+  }
+
+  /// Spin up a tiny single-shot HTTP responder on `port` returning
+  /// the supplied (status, body) pair to one connection. Used by
+  /// the orphan probe tests so we don't need the full
+  /// `fake_llama_server` binary just to validate the matcher.
+  async fn spawn_one_shot(port: u16, status: u16, body: String) -> tokio::task::JoinHandle<()> {
+    let listener = TcpListener::bind(("127.0.0.1", port))
+      .await
+      .expect("bind probe responder");
+    tokio::spawn(async move {
+      if let Ok((mut sock, _)) = listener.accept().await {
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf).await;
+        let reason = match status {
+          200 => "OK",
+          404 => "Not Found",
+          _ => "Status",
+        };
+        let header = format!(
+          "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+          body.len()
+        );
+        let _ = sock.write_all(header.as_bytes()).await;
+        let _ = sock.write_all(body.as_bytes()).await;
+        let _ = sock.shutdown().await;
+      }
+    })
   }
 
   #[test]
@@ -187,59 +332,132 @@ mod tests {
   }
 
   #[test]
-  fn sweep_partitions_dead_pid_into_stale_and_keeps_live_pid() {
-    // PID 2^31 - 1 is the kernel pid_max ceiling and is never
-    // allocated to a real process. Use our own PID as the live
-    // adopted entry.
-    let live = std::process::id() as i32;
-    let dead = 2_147_483_646;
-    let recorded = vec![fake_snapshot(live, 1), fake_snapshot(dead, 2)];
-    let report = sweep(SweepInputs {
-      recorded_running: &recorded,
-      // Use a marker that won't match any real process so the
-      // external list stays empty for this test.
-      external_marker: "llamatui-sweep-marker-that-matches-nothing-9f3a",
-    });
-    let adopted_pids: Vec<i32> = report.adopted.iter().map(|r| r.pid).collect();
-    let stale_pids: Vec<i32> = report.stale.iter().map(|r| r.pid).collect();
-    assert_eq!(adopted_pids, vec![live]);
-    assert_eq!(stale_pids, vec![dead]);
+  fn split_status_and_body_handles_canonical_response() {
+    let raw =
+      b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".to_vec();
+    let (status, body) = split_status_and_body(&raw).expect("parse");
+    assert_eq!(status, 200);
+    assert_eq!(body, b"{}");
   }
 
   #[test]
-  fn sweep_finds_unmanaged_processes_via_cmdline_marker() {
-    // Spawn a long-lived dummy process whose cmdline contains our
-    // marker, sweep, then kill it. We use `sleep` and just check
-    // the cmdline matches the marker we passed.
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
+  fn body_mentions_path_matches_full_or_basename() {
+    let body = b"{\"data\":[{\"id\":\"/m/a.gguf\"}]}";
+    assert!(body_mentions_path(body, Path::new("/m/a.gguf")));
+    let body_renamed = b"{\"data\":[{\"id\":\"/different/dir/a.gguf\"}]}";
+    assert!(body_mentions_path(body_renamed, Path::new("/m/a.gguf")));
+    let body_other = b"{\"data\":[{\"id\":\"/m/other.gguf\"}]}";
+    assert!(!body_mentions_path(body_other, Path::new("/m/a.gguf")));
+  }
 
-    let marker = format!("llamatui-sweep-test-marker-{}", std::process::id());
-    // Run `sleep` with an arg that includes the marker, since
-    // sysinfo reports the full argv. `printenv` won't run on Mac;
-    // `sleep` is portable.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn dead_pid_lands_in_stale() {
+    let dead = 2_147_483_646;
+    let recorded = vec![fake_snapshot(dead, 41123, "/m/a.gguf", 1)];
+    let report = sweep(SweepInputs {
+      recorded_running: &recorded,
+      external_marker: "llamatui-sweep-marker-that-matches-nothing-9f3a",
+      probe_timeout: Duration::from_millis(100),
+    })
+    .await;
+    let stale_pids: Vec<i32> = report.stale.iter().map(|r| r.pid).collect();
+    assert_eq!(stale_pids, vec![dead]);
+    assert!(report.adopted.is_empty());
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn live_pid_with_port_silent_lands_in_stale() {
+    // PID is alive (us), but no one is listening on the recorded
+    // port. The three-factor probe must reject the adoption.
+    let live = std::process::id() as i32;
+    let port = allocate_port(); // released immediately, nothing listens
+    let recorded = vec![fake_snapshot(live, port, "/m/a.gguf", 1)];
+    let report = sweep(SweepInputs {
+      recorded_running: &recorded,
+      external_marker: "llamatui-sweep-marker-that-matches-nothing-9f3a",
+      probe_timeout: Duration::from_millis(100),
+    })
+    .await;
+    assert!(report.adopted.is_empty(), "no listener → must be stale");
+    assert_eq!(report.stale.len(), 1);
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn live_pid_with_matching_port_and_model_path_adopts() {
+    let live = std::process::id() as i32;
+    let port = allocate_port();
+    let body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "/m/match.gguf", "object": "model"}],
+    })
+    .to_string();
+    let _resp = spawn_one_shot(port, 200, body).await;
+
+    let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
+    let report = sweep(SweepInputs {
+      recorded_running: &recorded,
+      external_marker: "llamatui-sweep-marker-that-matches-nothing-9f3a",
+      probe_timeout: Duration::from_secs(1),
+    })
+    .await;
+    assert_eq!(report.adopted.len(), 1, "matching probe must adopt");
+    assert!(report.stale.is_empty());
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn live_pid_with_mismatched_model_path_is_stale_pid_reuse_guard() {
+    // Same PID + listening port, but the responder advertises a
+    // different model — the canonical PID-reuse case. Adopt would
+    // bind a stale `state.json::running` entry to an unrelated
+    // process. Three-factor confirmation rejects it.
+    let live = std::process::id() as i32;
+    let port = allocate_port();
+    let body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "/m/different.gguf", "object": "model"}],
+    })
+    .to_string();
+    let _resp = spawn_one_shot(port, 200, body).await;
+
+    let recorded = vec![fake_snapshot(live, port, "/m/expected.gguf", 1)];
+    let report = sweep(SweepInputs {
+      recorded_running: &recorded,
+      external_marker: "llamatui-sweep-marker-that-matches-nothing-9f3a",
+      probe_timeout: Duration::from_secs(1),
+    })
+    .await;
+    assert!(
+      report.adopted.is_empty(),
+      "mismatched model path must reject adoption"
+    );
+    assert_eq!(report.stale.len(), 1);
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn sweep_finds_unmanaged_processes_via_cmdline_marker() {
+    // Spawn a long-lived dummy process whose program name matches
+    // the marker, sweep, then kill it.
+    use std::process::{Command, Stdio};
+    use std::time::Duration as StdDuration;
+
     let mut child = Command::new("sleep")
       .arg("30")
-      .env("LLAMATUI_SWEEP_MARKER", &marker)
       .stdout(Stdio::null())
       .stderr(Stdio::null())
       .spawn()
       .expect("spawn sleep");
 
-    // The marker isn't in the cmdline (argv only includes "sleep" +
-    // "30"), so we instead match on the program name "sleep" —
-    // proves the cmdline-substring detection logic works without
-    // needing an obscure binary.
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(StdDuration::from_millis(100));
     let recorded: Vec<RunningSnapshot> = Vec::new();
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
       external_marker: "sleep",
-    });
+      probe_timeout: Duration::from_millis(100),
+    })
+    .await;
     let found = report.external.iter().any(|p| p.pid == child.id());
     let _ = child.kill();
     let _ = child.wait();
-    drop(marker);
     assert!(
       found,
       "sweep should have found the spawned `sleep` process by cmdline marker"
