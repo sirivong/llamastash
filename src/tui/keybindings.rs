@@ -107,7 +107,9 @@ pub enum Action {
   /// navigation focus. Bound to `Esc` in each input focus.
   ExitEdit,
   /// Kill the daemon entirely (after a confirmation popup). Bound
-  /// to `Q` (Shift+q) in the model list focus.
+  /// to `Ctrl+Q` in the model list focus. (Pre-2026-05 this lived on
+  /// `Shift+Q`; remapped so an accidental capital `Q` while typing
+  /// doesn't surface the kill prompt.)
   KillDaemon,
   /// Restart the daemon (after a confirmation popup): shut the
   /// current daemon down and re-spawn a fresh one with the same
@@ -201,10 +203,10 @@ const LIST_BINDINGS: &[Binding] = &[
     description: "restart daemon",
   },
   Binding {
-    key: KeyCode::Char('Q'),
-    mods: KeyModifiers::SHIFT,
+    key: KeyCode::Char('q'),
+    mods: KeyModifiers::CONTROL,
     action: Action::KillDaemon,
-    label: "Q",
+    label: "Ctrl+Q",
     description: "kill daemon",
   },
   Binding {

@@ -1899,9 +1899,9 @@ mod tests {
   }
 
   #[test]
-  fn capital_q_stages_kill_daemon_confirm() {
+  fn ctrl_q_stages_kill_daemon_confirm() {
     let mut app = App::new(Default::default());
-    pump_input(&mut app, key(KeyCode::Char('Q'), KeyModifiers::SHIFT));
+    pump_input(&mut app, key(KeyCode::Char('q'), KeyModifiers::CONTROL));
     assert!(matches!(
       app.confirm_dialog,
       Some(crate::tui::app::ConfirmAction::KillDaemon)
@@ -1914,7 +1914,7 @@ mod tests {
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(4);
     pump_input_with_writer(
       &mut app,
-      key(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+      key(KeyCode::Char('q'), KeyModifiers::CONTROL),
       Some(&tx),
     );
     pump_input_with_writer(&mut app, key(KeyCode::Enter, KeyModifiers::NONE), Some(&tx));

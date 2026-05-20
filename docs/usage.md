@@ -127,7 +127,7 @@ Override semantics mirror kdash: the action's existing default binding(s) are re
 | `toggle_help` | `?` | List, right pane |
 | `stop_model` | `s` | List |
 | `restart_daemon` | `Ctrl+R` | List, right pane — shuts the daemon down and re-spawns; triggers a confirmation popup |
-| `kill_daemon` | `Q` (shift+q) | List — triggers a confirmation popup |
+| `kill_daemon` | `Ctrl+Q` | List — triggers a confirmation popup |
 | `focus_list` | `Esc`, `Shift+M` | Right pane / tab inputs |
 | `focus_logs_tab` | `Shift+L` | List, right pane — gated on a running model |
 | `focus_chat_tab` | `Shift+C` | List, right pane — mode-appropriate (Chat / Embed / Rerank), gated on a running model |

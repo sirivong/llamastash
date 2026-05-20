@@ -53,21 +53,12 @@ const GLOBAL_CHIPS: &[GlobalChip] = &[
     focus: Focus::List,
     actions: &[Action::NextFocus, Action::PrevFocus],
   },
-  // Chip text kept short ("restart" rather than "restart daemon")
-  // so the title row's brand area still fits the version + theme
-  // label at the canonical 120-col render width. The help overlay
-  // pulls its longer "restart daemon" string from the keybinding's
-  // own description, so the full action remains discoverable.
-  GlobalChip {
-    description: "restart",
-    focus: Focus::List,
-    actions: &[Action::RestartDaemon],
-  },
-  GlobalChip {
-    description: "kill daemon",
-    focus: Focus::List,
-    actions: &[Action::KillDaemon],
-  },
+  // RestartDaemon (Ctrl+R) and KillDaemon (Ctrl+Q) intentionally
+  // do NOT appear in the global hint strip. Both are confirmation-
+  // gated destructive actions; surfacing them in the always-on chip
+  // row encourages muscle-memory misuse and crowds the title bar.
+  // They remain discoverable through the `?` help overlay, which
+  // walks every binding in the active KeyMap.
   GlobalChip {
     description: "theme",
     focus: Focus::List,
@@ -272,15 +263,18 @@ mod tests {
       !text.contains(":focus"),
       "stale `focus` chip must not reappear: {text}"
     );
-    assert!(text.contains("Ctrl+R:restart"), "got: {text}");
-    assert!(text.contains("Q:kill daemon"), "got: {text}");
-    // Ctrl+R:restart must appear before Q:kill daemon so the user sees
-    // the non-destructive option first.
-    let restart_idx = text.find("Ctrl+R:restart").expect("restart chip");
-    let kill_idx = text.find("Q:kill daemon").expect("kill chip");
+    // Restart-daemon and kill-daemon chips were intentionally removed
+    // from the global hint strip — both are confirmation-gated
+    // destructive actions and stay discoverable via the `?` help
+    // overlay. Pin the absence here so a future regression that
+    // re-adds them to the chip row fails loudly.
     assert!(
-      restart_idx < kill_idx,
-      "restart daemon must precede kill daemon: {text}"
+      !text.contains(":restart"),
+      "restart-daemon chip must not appear in the global strip: {text}"
+    );
+    assert!(
+      !text.contains(":kill daemon"),
+      "kill-daemon chip must not appear in the global strip: {text}"
     );
     assert!(text.contains("t:theme"), "got: {text}");
     assert!(text.contains("q:quit"), "got: {text}");
