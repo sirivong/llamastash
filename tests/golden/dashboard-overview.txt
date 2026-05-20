@@ -13,16 +13,16 @@
 │★ Favorites                                                           ││:41100  ● ready  4.2G RAM · 312% CPU          │
 │   ★  mistral-7b     llama    Q4_K    8.0k    4.0G   chat       —     ││──────────────────────────────────────────────│
 │──────────────────────────────────────────────────────────────────────││Running launch                                │
-│/m/x                                                                  ││  launch      L1                              │
-│   ★  mistral-7b     llama    Q4_K    8.0k    4.0G   chat       —     ││  port        :41100                          │
-│/m/y                                                                  ││  state       Ready                           │
-│      phi-3          phi      Q4_K    8.0k    3.9G   chat       —     ││  rss         4.2G                            │
-│                                                                      ││  cpu         312%                            │
+│/m/x                                                                  ││  launch          L1                          │
+│   ★  mistral-7b     llama    Q4_K    8.0k    4.0G   chat       —     ││  port            :41100                      │
+│/m/y                                                                  ││  state           Ready                       │
+│      phi-3          phi      Q4_K    8.0k    3.9G   chat       —     ││  rss             4.2G                        │
+│                                                                      ││  cpu             312%                        │
 │                                                                      ││                                              │
 │                                                                      ││Launch params                                 │
-│                                                                      ││  ctx         native                          │
-│                                                                      ││  reasoning   off                             │
-│                                                                      ││  advanced    (none)                          │
+│                                                                      ││  ctx             native                      │
+│                                                                      ││  reasoning       off                         │
+│                                                                      ││  extras          (none)                      │
 │                                                                      ││                                              │
 │                                                                      ││Press `e` to edit next-launch params, or `s`  │
 │                                                                      ││to stop and re-launch.                        │

@@ -98,6 +98,29 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   ));
   lines.push(kv("model", picker_view.model_name.clone(), palette));
 
+  // Duplicate-launch heads-up. Surfaces at the top of the panel so
+  // it remains visible even when the typed-knob list (12 rows) pushes
+  // the launch-chip footer below the viewport.
+  if picker_view.active_instances > 0 {
+    lines.push(
+      Span::styled(
+        format!(
+          "⚠ {n} instance{plural} already running — Enter launches a new one on a fresh port",
+          n = picker_view.active_instances,
+          plural = if picker_view.active_instances == 1 {
+            ""
+          } else {
+            "s"
+          }
+        ),
+        Style::default()
+          .fg(palette.warning)
+          .add_modifier(Modifier::BOLD),
+      )
+      .into(),
+    );
+  }
+
   let show_source = area.width >= 50;
   let row_for = |field: PickerField| picker_view.field == field;
 
@@ -199,26 +222,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   }
 
   lines.push(Line::default());
-  if picker_view.active_instances > 0 {
-    lines.push(
-      Span::styled(
-        format!(
-          "⚠ {n} instance{plural} already running — Enter launches a new one on a fresh port",
-          n = picker_view.active_instances,
-          plural = if picker_view.active_instances == 1 {
-            ""
-          } else {
-            "s"
-          }
-        ),
-        Style::default()
-          .fg(palette.warning)
-          .add_modifier(Modifier::BOLD),
-      )
-      .into(),
-    );
-    lines.push(Line::default());
-  }
   let launch_chip = app
     .hint_with(Focus::RightPane, Action::Submit, "launch")
     .map(|chip| {

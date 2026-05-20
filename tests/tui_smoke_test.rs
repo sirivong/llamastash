@@ -167,13 +167,16 @@ fn enter_on_model_opens_inline_launch_picker_in_settings_tab() {
   assert_eq!(app.focus, Focus::RightPane);
   assert_eq!(app.right_tab, RightTab::Settings);
   assert!(app.launch_picker.is_some(), "picker state must materialise");
-  let frame = render_to_string(&mut app, 120, 24);
+  // Bumped to 40 rows so the full inline picker (ctx, reasoning, the
+  // 12 typed-knob rows, extras, and the launch-chip footer) fits in a
+  // single frame without the bottom rows scrolling off-screen.
+  let frame = render_to_string(&mut app, 120, 40);
   assert!(
     frame.contains("Launch settings"),
     "Settings tab heading missing: {frame}"
   );
   assert!(
-    frame.contains("ctx") && frame.contains("reasoning") && frame.contains("advanced"),
+    frame.contains("ctx") && frame.contains("reasoning") && frame.contains("extras"),
     "inline picker fields missing: {frame}"
   );
 }
@@ -181,7 +184,7 @@ fn enter_on_model_opens_inline_launch_picker_in_settings_tab() {
 #[test]
 fn arrows_in_settings_tab_cycle_fields_and_values() {
   // Round-7 navigation model: ↑/↓ in the Settings tab cycle the
-  // form's fields (ctx → reasoning → advanced), and ←/→ cycle
+  // form's fields (ctx → reasoning → typed knobs → extras), and ←/→ cycle
   // the focused field's value. Tab cycles panes universally.
   use llamastash::tui::keybindings::Focus;
   use llamastash::tui::launch_picker::PickerField;
