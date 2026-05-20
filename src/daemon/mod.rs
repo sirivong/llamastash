@@ -71,12 +71,12 @@ pub struct DaemonOptions {
   /// passes through `Config::probe_timeout_secs` so users can raise
   /// it for very large models on slow disks.
   pub probe_timeout_secs: Option<u64>,
-  /// Per-architecture launch defaults from `Config.arch_defaults`
-  /// (R68). The daemon's `start_model` handler merges these into
-  /// `LaunchParams.advanced` only for flags the caller has not
-  /// already supplied (preset / last-params / explicit CLI outrank
-  /// these per R69 precedence). Default: empty map.
-  pub arch_defaults: std::collections::BTreeMap<String, crate::config::ArchDefaults>,
+  /// Per-architecture launch defaults from `Config.arch_defaults` —
+  /// user escape hatch over the built-in `(arch, gpu_backend)` table.
+  /// The daemon's `start_model` handler merges these into the
+  /// layered resolver with `LayerLabel::ArchDefault`, between
+  /// `LastUsed` and `BuiltIn`. Default: empty map.
+  pub arch_defaults: std::collections::BTreeMap<String, crate::config::TypedKnobs>,
   /// Extra CLI args to propagate to the re-exec'd child when
   /// `start_detached` spawns the daemon. Tests leave this empty;
   /// production builds it from the parent's `--model-path` /

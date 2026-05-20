@@ -189,7 +189,7 @@ async fn probe_timeout_triggers_error_state_and_releases_child() {
   let port = allocate_port();
   let params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
   let mut params = params;
-  params.advanced = vec![
+  params.extras = vec![
     std::ffi::OsString::from("--health-delay-ms"),
     std::ffi::OsString::from("5000"),
   ];
@@ -232,7 +232,7 @@ async fn sigterm_trapping_child_gets_sigkilled_after_grace() {
   let dir = unique_temp("trap-sigterm");
   let port = allocate_port();
   let mut params = LaunchParams::new(PathBuf::from("/fixture/m.gguf"), LaunchMode::Chat);
-  params.advanced = vec![std::ffi::OsString::from("--trap-sigterm")];
+  params.extras = vec![std::ffi::OsString::from("--trap-sigterm")];
   let model = spawn(ManagedSpawn {
     id: fake_id(5),
     binary: fake_binary(),

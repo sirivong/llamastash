@@ -14,7 +14,7 @@ use crate::launch::params::LaunchParams;
 
 /// One saved preset. `name` is unique within a single model's preset
 /// list and is the handle users type at the CLI / TUI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NamedPreset {
   pub name: String,
   pub params: LaunchParams,
@@ -22,7 +22,7 @@ pub struct NamedPreset {
 
 /// Per-model preset list. Wrapper around `Vec<NamedPreset>` so the
 /// state_store API stays clear about insertion / removal semantics.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Presets {
   entries: Vec<NamedPreset>,

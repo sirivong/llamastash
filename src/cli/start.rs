@@ -21,7 +21,8 @@ use crate::cli::cli_args::{Cli, LaunchMode as CliLaunchMode, ReasoningFlag, Star
 use crate::cli::client::connect_or_spawn;
 use crate::cli::exit_codes::{CliExit, CliResult, BINARY_NOT_FOUND, LAUNCH_FAILED, USAGE};
 use crate::cli::resolve::{fetch_catalog, resolve_model, CatalogRow};
-use crate::config::Config;
+use crate::cli::tail_args::parse_tail_args;
+use crate::config::{Config, TypedKnobs};
 use crate::ipc::Client;
 
 pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
@@ -50,9 +51,10 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     params.reasoning = Some(matches!(r, ReasoningFlag::On));
   }
   if !args.extra.is_empty() {
-    params.advanced = args
-      .extra
-      .iter()
+    let (knobs, extras) = parse_tail_args(&args.extra)?;
+    params.knobs = knobs;
+    params.extras = extras
+      .into_iter()
       .map(|s| s.to_string_lossy().into_owned())
       .collect();
   }
@@ -89,7 +91,8 @@ struct PartialParams {
   ctx: Option<u32>,
   port: Option<u16>,
   reasoning: Option<bool>,
-  advanced: Vec<String>,
+  knobs: TypedKnobs,
+  extras: Vec<String>,
 }
 
 fn resolve_mode(
@@ -138,19 +141,25 @@ async fn fetch_preset_params(
   }
   let preset = preset.unwrap();
   let p = preset.get("params").cloned().unwrap_or(Value::Null);
+  let knobs: TypedKnobs = p
+    .get("knobs")
+    .and_then(|v| serde_json::from_value(v.clone()).ok())
+    .unwrap_or_default();
+  let extras = p
+    .get("extras")
+    .and_then(Value::as_array)
+    .map(|a| {
+      a.iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+    })
+    .unwrap_or_default();
   Ok(PartialParams {
     ctx: p.get("ctx").and_then(Value::as_u64).map(|n| n as u32),
     port: p.get("port").and_then(Value::as_u64).map(|n| n as u16),
     reasoning: p.get("reasoning").and_then(Value::as_bool),
-    advanced: p
-      .get("advanced")
-      .and_then(Value::as_array)
-      .map(|a| {
-        a.iter()
-          .filter_map(|v| v.as_str().map(str::to_string))
-          .collect()
-      })
-      .unwrap_or_default(),
+    knobs,
+    extras,
   })
 }
 
@@ -170,10 +179,16 @@ fn build_payload(model_path: &str, mode: &str, p: &PartialParams) -> Value {
   if let Some(r) = p.reasoning {
     obj.insert("reasoning".into(), Value::from(r));
   }
-  if !p.advanced.is_empty() {
+  if p.knobs != TypedKnobs::default() {
     obj.insert(
-      "advanced".into(),
-      Value::Array(p.advanced.iter().cloned().map(Value::String).collect()),
+      "knobs".into(),
+      serde_json::to_value(&p.knobs).expect("TypedKnobs serialises cleanly"),
+    );
+  }
+  if !p.extras.is_empty() {
+    obj.insert(
+      "extras".into(),
+      Value::Array(p.extras.iter().cloned().map(Value::String).collect()),
     );
   }
   Value::Object(obj)
@@ -296,11 +311,16 @@ mod tests {
 
   #[test]
   fn build_payload_includes_only_set_fields() {
+    let knobs = TypedKnobs {
+      threads: Some(8),
+      ..TypedKnobs::default()
+    };
     let p = PartialParams {
       ctx: Some(32768),
       port: None,
       reasoning: Some(true),
-      advanced: vec!["--threads".into(), "8".into()],
+      knobs,
+      extras: vec!["--rope-freq-base".into(), "10000".into()],
     };
     let v = build_payload("/m/a.gguf", "chat", &p);
     assert_eq!(v["model_path"], serde_json::json!("/m/a.gguf"));
@@ -308,6 +328,7 @@ mod tests {
     assert_eq!(v["ctx"], serde_json::json!(32768));
     assert!(v.get("port").is_none(), "port unset must be absent");
     assert_eq!(v["reasoning"], serde_json::json!(true));
-    assert_eq!(v["advanced"], serde_json::json!(["--threads", "8"]));
+    assert_eq!(v["knobs"]["threads"], serde_json::json!(8));
+    assert_eq!(v["extras"], serde_json::json!(["--rope-freq-base", "10000"]));
   }
 }

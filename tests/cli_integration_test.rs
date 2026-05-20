@@ -717,15 +717,12 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
     if arr.iter().any(|row| {
       row["params"]["ctx"] == serde_json::json!(16384)
         && row["params"]["reasoning"] == serde_json::json!(true)
-        && row["params"]["advanced"]
-          .as_array()
-          .map(|a| a.iter().any(|v| v == "--threads"))
-          .unwrap_or(false)
+        && row["params"]["knobs"]["threads"] == serde_json::json!(8)
     }) {
       break;
     }
     if Instant::now() > deadline {
-      panic!("supervisor should have recorded preset ctx + reasoning + advanced: {arr:?}",);
+      panic!("supervisor should have recorded preset ctx + reasoning + knobs.threads: {arr:?}",);
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
   }

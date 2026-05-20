@@ -26,7 +26,7 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 /// when new fields are added (forward-compat). Unknown values within a known
 /// field (e.g. a non-existent theme name) still error, which is intentional —
 /// silent typo tolerance for theme names would mask a real user problem.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Config {
   pub theme: ThemeName,
@@ -49,23 +49,31 @@ pub struct Config {
   /// hit `health probe timeout (last status 503)` for legitimate
   /// loads.
   pub probe_timeout_secs: u64,
-  /// Per-architecture launch defaults (R68). Map keys are GGUF
-  /// `general.architecture` strings (`llama`, `qwen2`, `mistral`,
+  /// Per-architecture launch defaults — user escape hatch over the
+  /// built-in `(arch, gpu_backend) → TypedKnobs` table. Map keys are
+  /// GGUF `general.architecture` strings (`llama`, `qwen2`, `mistral`,
   /// `gemma`, `phi`, `qwen3`, …). At launch time the daemon merges
-  /// these into `LaunchParams.advanced` only when the caller has not
-  /// already supplied the corresponding flag — preset and last-params
-  /// outrank these defaults per R69 precedence.
-  pub arch_defaults: BTreeMap<String, ArchDefaults>,
+  /// these layers in precedence order — preset > last_params >
+  /// `arch_defaults` (this map) > built-in table > llama-server. The
+  /// wizard no longer writes this field; it remains as a hand-edited
+  /// escape hatch for users overriding a built-in row.
+  pub arch_defaults: BTreeMap<String, TypedKnobs>,
 }
 
-/// Per-architecture launch defaults the init wizard writes when it
-/// detects a hardware class that benefits from non-default flags
-/// (e.g. CUDA → `n_gpu_layers: 99`, Vulkan → `flash_attn: true`).
-/// Every field is optional so a partial entry only contributes the
-/// keys it supplies.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Typed launch knobs the supervisor argvifies into `llama-server`
+/// flags. Used everywhere a structured per-launch tuning surface is
+/// needed: persistence (`LaunchParams.knobs`), IPC wire shape, the
+/// built-in `(arch, gpu_backend)` defaults table, the YAML
+/// `arch_defaults` escape hatch, and the Settings-tab typed editor.
+///
+/// Every field is `Option<T>` so a partial entry only contributes the
+/// keys it supplies — `None` means "inherit from the next layer
+/// down" in the layered resolver. Field names mirror llama-server's
+/// flag names (snake-cased) so they're grep-able directly against
+/// the binary's log output.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct ArchDefaults {
+pub struct TypedKnobs {
   /// Layers offloaded to the GPU. Maps to `--n-gpu-layers`. Use 99
   /// for "all" (llama-server caps internally).
   pub n_gpu_layers: Option<u32>,
@@ -83,6 +91,14 @@ pub struct ArchDefaults {
   pub no_mmap: Option<bool>,
   /// Concurrent request slots. Maps to `--parallel`.
   pub parallel: Option<u32>,
+  /// Prompt batch size. Maps to `--batch-size`.
+  pub batch_size: Option<u32>,
+  /// Physical (ubatch) batch size. Maps to `--ubatch-size`.
+  pub ubatch_size: Option<u32>,
+  /// RoPE frequency scaling factor. Maps to `--rope-freq-scale`.
+  pub rope_freq_scale: Option<f32>,
+  /// Tokens to retain on context shift. Maps to `--keep`.
+  pub keep: Option<u32>,
 }
 
 impl Default for Config {
@@ -131,7 +147,7 @@ impl Default for PortRange {
 /// Returned by `load_config_from_path`. `warning` is non-`None` when the
 /// loader gracefully fell back to defaults but the user should be told why
 /// (e.g. malformed YAML).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LoadedConfig {
   pub config: Config,
   pub warning: Option<String>,

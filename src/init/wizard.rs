@@ -868,23 +868,11 @@ async fn run_config_step(
   if let Some(install) = install {
     bootstrap.llama_server_path = Some(install.path.display().to_string());
   }
-  if hardware.gpu.is_gpu() {
-    bootstrap.arch_defaults.insert(
-      "qwen2".to_string(),
-      crate::config::ArchDefaults {
-        n_gpu_layers: Some(99),
-        flash_attn: Some(true),
-        ..Default::default()
-      },
-    );
-    bootstrap.arch_defaults.insert(
-      "llama".to_string(),
-      crate::config::ArchDefaults {
-        n_gpu_layers: Some(99),
-        ..Default::default()
-      },
-    );
-  }
+  // Round-9: the wizard no longer seeds `arch_defaults` — the
+  // built-in `(arch, gpu_backend) → TypedKnobs` table supersedes
+  // it. The YAML `arch_defaults` block remains an unmanaged escape
+  // hatch users can hand-edit to override the built-in row.
+  let _ = hardware; // retained for downstream callers' arity
   let additions_value =
     serde_yaml::to_value(&bootstrap).expect("InitConfigAdditions serialises cleanly");
   // `composed` records `(dotted-path, value)` for every top-level
@@ -977,16 +965,13 @@ fn canonical_value_bytes(v: &serde_yaml::Value) -> Vec<u8> {
 }
 
 /// What `run_config_step` composes for the writer. Skipping empty
-/// fields keeps the on-disk diff minimal — e.g. a no-GPU host writes
-/// neither `arch_defaults` nor any unused leaf inside it. Each
+/// fields keeps the on-disk diff minimal. Each
 /// `#[serde(skip_serializing_if)]` mirrors the merge semantics
 /// `merge_and_write` already honours.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 struct InitConfigAdditions {
   #[serde(skip_serializing_if = "Option::is_none")]
   llama_server_path: Option<String>,
-  #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-  arch_defaults: std::collections::BTreeMap<String, crate::config::ArchDefaults>,
 }
 
 /// Advisory flock around `init_snapshot.json` writes so two concurrent

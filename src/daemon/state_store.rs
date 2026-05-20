@@ -34,7 +34,7 @@ use crate::launch::presets::PresetStore;
 /// hold this as a `BTreeMap` via [`DaemonState::last_params_map`] /
 /// [`DaemonState::presets_map`] for ergonomic look-ups; the on-disk
 /// shape stays an explicit array of pairs for compatibility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonState {
   #[serde(default)]
   pub favorites: Favorites,
@@ -53,14 +53,14 @@ pub struct DaemonState {
 /// One entry in `last_params`. `params` is the most recently
 /// *successful* launch params (R20) — the supervisor only stamps it
 /// on the Loading → Ready transition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LastParamsEntry {
   pub id: ModelId,
   pub params: LaunchParams,
 }
 
 /// One entry in `presets` — a model's named-preset list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresetsEntry {
   pub id: ModelId,
   pub presets: crate::launch::presets::Presets,
@@ -122,7 +122,7 @@ impl DaemonState {
 /// while it's running. Orphan sweep on the next start reads this and
 /// tries to re-adopt the live `pid` if the recorded `port` is still
 /// answering and the model file matches.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunningSnapshot {
   pub id: ModelId,
   pub pid: i32,

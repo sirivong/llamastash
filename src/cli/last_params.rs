@@ -69,7 +69,7 @@ fn render_last_params_human(rows: &[Value]) -> String {
     );
   }
   let tty = console::colors_enabled();
-  let header = ["MODEL", "CTX", "REASONING", "ADVANCED"];
+  let header = ["MODEL", "CTX", "REASONING", "KNOBS", "EXTRAS"];
   let table_rows: Vec<Vec<String>> = rows
     .iter()
     .map(|r| {
@@ -86,8 +86,19 @@ fn render_last_params_human(rows: &[Value]) -> String {
         .map(|b| if b { "on" } else { "off" }.to_string())
         .unwrap_or_else(|| "-".into());
       let reasoning = colors::reasoning_cell(&reasoning_raw);
-      let advanced = params
-        .and_then(|p| p.get("advanced"))
+      let knobs = params
+        .and_then(|p| p.get("knobs"))
+        .and_then(Value::as_object)
+        .map(|m| {
+          m.iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+        })
+        .unwrap_or_default();
+      let extras = params
+        .and_then(|p| p.get("extras"))
         .and_then(Value::as_array)
         .map(|a| {
           a.iter()
@@ -104,7 +115,8 @@ fn render_last_params_human(rows: &[Value]) -> String {
         },
         ctx,
         reasoning,
-        advanced,
+        knobs,
+        extras,
       ]
     })
     .collect();
@@ -144,7 +156,13 @@ mod tests {
     }
   }
 
-  fn row(path: &str, ctx: Option<u64>, reasoning: Option<bool>, advanced: &[&str]) -> Value {
+  fn row(
+    path: &str,
+    ctx: Option<u64>,
+    reasoning: Option<bool>,
+    knobs: &[(&str, Value)],
+    extras: &[&str],
+  ) -> Value {
     let mut params = serde_json::Map::new();
     if let Some(c) = ctx {
       params.insert("ctx".into(), json!(c));
@@ -152,10 +170,17 @@ mod tests {
     if let Some(r) = reasoning {
       params.insert("reasoning".into(), json!(r));
     }
-    if !advanced.is_empty() {
+    if !knobs.is_empty() {
+      let mut k = serde_json::Map::new();
+      for (key, val) in knobs {
+        k.insert((*key).into(), val.clone());
+      }
+      params.insert("knobs".into(), Value::Object(k));
+    }
+    if !extras.is_empty() {
       params.insert(
-        "advanced".into(),
-        Value::Array(advanced.iter().map(|s| json!(s)).collect()),
+        "extras".into(),
+        Value::Array(extras.iter().map(|s| json!(s)).collect()),
       );
     }
     json!({"id": {"path": path}, "params": Value::Object(params)})
@@ -175,22 +200,28 @@ mod tests {
   fn render_last_params_human_tsv_branch_is_byte_stable() {
     let _g = ColorGuard::set(false);
     let rows = vec![
-      row("/m/qwen.gguf", Some(32768), Some(true), &["--threads", "8"]),
-      row("/m/phi.gguf", None, Some(false), &[]),
+      row(
+        "/m/qwen.gguf",
+        Some(32768),
+        Some(true),
+        &[("threads", json!(8))],
+        &["--foo", "bar"],
+      ),
+      row("/m/phi.gguf", None, Some(false), &[], &[]),
     ];
     let out = render_last_params_human(&rows);
     assert_eq!(
       out,
-      "MODEL\tCTX\tREASONING\tADVANCED\n\
-       /m/qwen.gguf\t32768\ton\t--threads 8\n\
-       /m/phi.gguf\t-\toff\t\n"
+      "MODEL\tCTX\tREASONING\tKNOBS\tEXTRAS\n\
+       /m/qwen.gguf\t32768\ton\tthreads=8\t--foo bar\n\
+       /m/phi.gguf\t-\toff\t\t\n"
     );
   }
 
   #[test]
   fn render_last_params_human_tty_branch_pads_and_appends_count_footer() {
     let _g = ColorGuard::set(true);
-    let rows = vec![row("/m/qwen.gguf", Some(32768), Some(true), &[])];
+    let rows = vec![row("/m/qwen.gguf", Some(32768), Some(true), &[], &[])];
     let out = render_last_params_human(&rows);
     let plain = console::strip_ansi_codes(&out);
     assert!(plain.starts_with("MODEL"), "header missing: {plain:?}");

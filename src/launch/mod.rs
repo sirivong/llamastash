@@ -8,13 +8,16 @@
 //!   [`crate::daemon::state_store`].
 
 pub mod binary;
+pub mod defaults_table;
 pub mod favorites;
+pub mod flag_aliases;
 pub mod mode;
 pub mod params;
 pub mod presets;
 
 pub use binary::{locate as locate_binary, LocateError, LocateInputs};
+pub use defaults_table::lookup as lookup_defaults;
 pub use favorites::{FavoriteEntry, Favorites};
 pub use mode::LaunchMode;
-pub use params::{compose, LaunchParams};
+pub use params::{compose, resolve_layered, LaunchParams, LayerLabel, Resolved};
 pub use presets::{NamedPreset, Presets};

@@ -133,12 +133,23 @@ pub async fn handle(args: PresetsArgs, cli: &Cli, config: &Config) -> CliResult 
       if let Some(m) = mode {
         payload.insert("mode".into(), json!(m.as_label()));
       }
-      let extras: Vec<String> = extra
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect();
-      if !extras.is_empty() {
-        payload.insert("advanced".into(), json!(extras));
+      // Route tail-args through the same parser as `start --` so the
+      // typed-knob slots get populated when the user passes
+      // recognised flags. Unknown flags land in extras and are
+      // forwarded as a JSON array.
+      let (knobs, extras_os) = crate::cli::tail_args::parse_tail_args(&extra)?;
+      if knobs != crate::config::TypedKnobs::default() {
+        payload.insert(
+          "knobs".into(),
+          serde_json::to_value(&knobs).expect("TypedKnobs serialises cleanly"),
+        );
+      }
+      if !extras_os.is_empty() {
+        let extras_str: Vec<String> = extras_os
+          .into_iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect();
+        payload.insert("extras".into(), json!(extras_str));
       }
       let body = client
         .call("presets_save", Some(Value::Object(payload)))
@@ -175,7 +186,7 @@ fn render_presets_human(arr: &[Value], model_name: &str) -> String {
     );
   }
   let tty = console::colors_enabled();
-  let header = ["NAME", "CTX", "REASONING", "EXTRA"];
+  let header = ["NAME", "CTX", "REASONING", "KNOBS", "EXTRAS"];
   let table_rows: Vec<Vec<String>> = arr
     .iter()
     .map(|preset| {
@@ -192,8 +203,19 @@ fn render_presets_human(arr: &[Value], model_name: &str) -> String {
         .map(|b| if b { "on" } else { "off" }.to_string())
         .unwrap_or_else(|| "-".into());
       let reasoning = colors::reasoning_cell(&reasoning_raw);
-      let extra = p
-        .and_then(|p| p.get("advanced"))
+      let knobs = p
+        .and_then(|p| p.get("knobs"))
+        .and_then(Value::as_object)
+        .map(|m| {
+          m.iter()
+            .filter(|(_, v)| !v.is_null())
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+        })
+        .unwrap_or_default();
+      let extras = p
+        .and_then(|p| p.get("extras"))
         .and_then(Value::as_array)
         .map(|a| {
           a.iter()
@@ -202,7 +224,7 @@ fn render_presets_human(arr: &[Value], model_name: &str) -> String {
             .join(" ")
         })
         .unwrap_or_default();
-      vec![name.to_string(), ctx, reasoning, extra]
+      vec![name.to_string(), ctx, reasoning, knobs, extras]
     })
     .collect();
   let mut out = format::table(&header, &table_rows);
@@ -241,7 +263,13 @@ mod tests {
     }
   }
 
-  fn preset(name: &str, ctx: Option<u64>, reasoning: Option<bool>, advanced: &[&str]) -> Value {
+  fn preset(
+    name: &str,
+    ctx: Option<u64>,
+    reasoning: Option<bool>,
+    knobs: &[(&str, Value)],
+    extras: &[&str],
+  ) -> Value {
     let mut params = serde_json::Map::new();
     if let Some(c) = ctx {
       params.insert("ctx".into(), json!(c));
@@ -249,10 +277,17 @@ mod tests {
     if let Some(r) = reasoning {
       params.insert("reasoning".into(), json!(r));
     }
-    if !advanced.is_empty() {
+    if !knobs.is_empty() {
+      let mut k = serde_json::Map::new();
+      for (key, val) in knobs {
+        k.insert((*key).into(), val.clone());
+      }
+      params.insert("knobs".into(), Value::Object(k));
+    }
+    if !extras.is_empty() {
       params.insert(
-        "advanced".into(),
-        Value::Array(advanced.iter().map(|s| json!(s)).collect()),
+        "extras".into(),
+        Value::Array(extras.iter().map(|s| json!(s)).collect()),
       );
     }
     json!({"name": name, "params": Value::Object(params)})
@@ -269,22 +304,28 @@ mod tests {
   fn render_presets_human_tsv_branch_is_byte_stable() {
     let _g = ColorGuard::set(false);
     let arr = vec![
-      preset("coding", Some(32768), Some(true), &["--threads", "8"]),
-      preset("default", None, Some(false), &[]),
+      preset(
+        "coding",
+        Some(32768),
+        Some(true),
+        &[("threads", json!(8))],
+        &["--foo", "bar"],
+      ),
+      preset("default", None, Some(false), &[], &[]),
     ];
     let out = render_presets_human(&arr, "qwen-coder");
     assert_eq!(
       out,
-      "NAME\tCTX\tREASONING\tEXTRA\n\
-       coding\t32768\ton\t--threads 8\n\
-       default\t-\toff\t\n"
+      "NAME\tCTX\tREASONING\tKNOBS\tEXTRAS\n\
+       coding\t32768\ton\tthreads=8\t--foo bar\n\
+       default\t-\toff\t\t\n"
     );
   }
 
   #[test]
   fn render_presets_human_tty_branch_pads_and_appends_count_footer() {
     let _g = ColorGuard::set(true);
-    let arr = vec![preset("coding", Some(32768), Some(true), &[])];
+    let arr = vec![preset("coding", Some(32768), Some(true), &[], &[])];
     let out = render_presets_human(&arr, "qwen-coder");
     let plain = console::strip_ansi_codes(&out);
     assert!(plain.starts_with("NAME"), "header missing: {plain:?}");

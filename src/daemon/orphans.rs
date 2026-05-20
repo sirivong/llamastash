@@ -23,7 +23,7 @@ use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use crate::daemon::state_store::RunningSnapshot;
 
 /// What `sweep` found on this daemon restart.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct SweepReport {
   /// Snapshots whose three-factor probe (PID alive, port listening,
   /// `/v1/models` model path matches) all passed. The supervisor
