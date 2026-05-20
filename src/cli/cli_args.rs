@@ -127,15 +127,15 @@ pub enum Command {
   /// next `llamastash list` rescan finds it. `--json` emits the
   /// summary; otherwise progress streams to stderr.
   Pull(PullArgs),
-  /// Run the first-time setup / maintenance wizard (v2-R48).
+  /// Run the first-time setup / maintenance wizard.
   Init(InitArgs),
   /// Read-only diagnostic — compares current detection against the
-  /// recorded `init_snapshot` baseline (v2-R74).
+  /// recorded `init_snapshot` baseline.
   Doctor(DoctorArgs),
   /// Mark, unmark, and list favorite models.
   Favorites(FavoritesArgs),
-  /// Download the best-fit model for this hardware. Shortcut for
-  /// `init --only models --recommended` that lets users grab a
+  /// List and download the best-fit model for this hardware. Shortcut for
+  /// `init --only models` that lets users grab a
   /// recommended GGUF without walking through the full first-run
   /// wizard.
   Recommend(RecommendArgs),

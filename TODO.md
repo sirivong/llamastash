@@ -12,12 +12,15 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ## v2-GA blockers (must clear before v2 GA, not v2 launch)
 
-- [ ] **In progress**: ~~Remeasure per-backend VRAM overhead band on real CUDA / HIP / Vulkan / Metal hardware — [`docs/spikes/2026-05-19-vram-overhead-band.md`](docs/spikes/2026-05-19-vram-overhead-band.md) `todo:` frontmatter.~~ Harness ready: [`scripts/measure-overhead-band.sh`](scripts/measure-overhead-band.sh) + runbook at [`docs/runbooks/measure-vram-overhead-band.md`](docs/runbooks/measure-vram-overhead-band.md). Changing catalog of defaults shipped via [`docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md`](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md).
+- [x] **In progress**: ~~Remeasure per-backend VRAM overhead band on real CUDA / HIP / Vulkan / Metal hardware — [`docs/spikes/2026-05-19-vram-overhead-band.md`](docs/spikes/2026-05-19-vram-overhead-band.md) `todo:` frontmatter.~~ Harness ready: [`scripts/measure-overhead-band.sh`](scripts/measure-overhead-band.sh) + runbook at [`docs/runbooks/measure-vram-overhead-band.md`](docs/runbooks/measure-vram-overhead-band.md). Changing catalog of defaults shipped via [`docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md`](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md).
 - [ ] **Deferred (post-c80d638)**: Port whichllm's family-selection / lineage-demotion / generation-bonus logic so `init --only models --json` output matches `whichllm --json --top 10` byte-for-byte. Today 7/10 picks and 3/10 quants match — see [Post-plan refinements §Remaining gap](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md#remaining-gap-deliberately-not-closed) in plan 2026-05-20-001.
 - [ ] **Deferred (post-c80d638)**: Download-flow fallback for synthetic GGUF rows — when the catalog row's `gguf_publisher == "synthetic"` (official-org safetensors-only repo), try trusted converters (`bartowski/{name}-GGUF`, `unsloth/{name}-GGUF`, `lmstudio-community/{name}-GGUF`) before failing the download. Without this, `init --recommended` on a synthesized pick (e.g. Qwen3.6-27B) errors when the official repo doesn't ship GGUFs.
 
 ## v1+ release blockers
 
+- [ ] Download fails for many models in `init --only models` (for example -> init download: HF tree listing for `Qwen/Qwen3-Next-80B-A3B-Instruct` returned zero matching files)
+- [ ] Remap Shift+Q to Ctrl+Q for killing deamon.
+- [ ] Remove Ctrl+R, Ctrl+Q from top bar hints.
 - [x] **In progress**: init should show progress and text descriptions of what its doing (like installing llama.cpp via brew, Installed llama.cpp, downloading models, download complete, etc.) instead of just a blinking line.
 - [x] **In progress**: Init install method doesnt offer custom path as option.
 - [x] ~~Better/colorful/formatted CLI output for commands (daemon, list, status, presets, doctor etc).~~ Shipped via [`docs/plans/2026-05-20-002-feat-colorful-cli-output-plan.md`](docs/plans/2026-05-20-002-feat-colorful-cli-output-plan.md).
