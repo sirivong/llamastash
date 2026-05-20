@@ -126,6 +126,7 @@ Override semantics mirror kdash: the action's existing default binding(s) are re
 | `cycle_theme` | `t` | List |
 | `toggle_help` | `?` | List, right pane |
 | `stop_model` | `s` | List |
+| `restart_daemon` | `R` (shift+r) | List, right pane — shuts the daemon down and re-spawns; triggers a confirmation popup |
 | `kill_daemon` | `Q` (shift+q) | List — triggers a confirmation popup |
 | `focus_list` | `Esc`, `Shift+M` | Right pane / tab inputs |
 | `focus_logs_tab` | `Shift+L` | List, right pane — gated on a running model |
@@ -318,6 +319,21 @@ llamastash doctor [--json]
 `doctor` **always exits 0** — findings are informative, not a failure signal. Branch on a non-empty `findings` array (or filter for `severity == "error"`) to escalate, not on the exit code. This makes `doctor` safe to run unconditionally from health-check loops without `set -e` blowing up.
 
 Each `--json` finding carries `{id, severity, message, fix_hint, safe_to_log}`. `safe_to_log: true` on every v2 finding means the output is safe to paste into a public issue.
+
+### `llamastash recommend`
+
+Shortcut for `init --only models --recommended` that downloads the best-fit GGUF for this hardware without walking the full first-run wizard. Useful when `llama-server` is already installed and the user just wants weights.
+
+```
+llamastash recommend [--json] [--offline] [--model <CHOICE>] [--revision <SHA>]
+```
+
+| Flag | Effect |
+|---|---|
+| `--json` | Same `{"steps_ran": ["detect","models"], "model": {...}, "recommendations": [...], ...}` shape as `init --only models --json`. |
+| `--model <CHOICE>` | Override the recommender. Values: `recommended` (default), `none`, `<owner>/<repo>`. |
+| `--revision <SHA>` | Pin the HF revision; honored only on `<owner>/<repo>` paste branch. |
+| `--offline` | Refused — recommend always needs network. Kept for `init` parity. |
 
 ### `llamastash pull <repo>`
 

@@ -4,8 +4,15 @@ All notable changes to llamastash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- **`R:restart daemon` TUI hotkey.** A new global keybinding shuts the daemon down and re-spawns a fresh one with the same options the parent dispatcher resolved at startup — `--model-path`, `--no-scan`, and `--llama-server` all survive the restart. Triggers the same confirmation popup as `Q:kill daemon` and sits one slot to its left in the title-row hint strip. `R` previously aliased `C` / `E` for the chat/embed/rerank tab jump; the alias is dropped because `C` and `E` still cover that surface.
+- **`llamastash recommend` shortcut.** New top-level subcommand that wraps `init --only models --recommended` so users can download the best-fit GGUF for their hardware without walking through the full first-run wizard. Honors the same `--json` / `--offline` / `--model <CHOICE>` / `--revision <SHA>` flags as the underlying `init` step.
+- **Error launches surface the Logs tab.** When a managed launch transitions into `Error{cause}`, the right pane now exposes a Logs tab alongside Settings (previously only Settings was reachable), and the TUI auto-snaps the focused-launch right pane to Logs on the transition so the failure tail is visible without an extra keystroke.
+
 ### Changed
 
+- **`--llama-server <PATH>` is now sticky.** Passing the global flag writes the resolved path back into the user's `config.yaml` (`llama_server_path:` key) on every invocation, so the next launch picks it up without re-typing. Best-effort: a failed write logs and the command proceeds normally. No-op when the resolved path already matches the configured value.
 - **Renamed from LlamaDash to LlamaStash before the first public release.** Project, binary, crate, GH org (`llamastash`), brew tap (`llamastash/llamastash`), marketing site (`llamastash.cli.rs`), env-var prefix (`LLAMADASH_*` → `LLAMASTASH_*`), and on-disk paths (`$XDG_CONFIG_HOME/llamadash/` → `$XDG_CONFIG_HOME/llamastash/`, runtime socket dir, log dir, share dir) all updated in one sweep. No backwards-compatibility shims — pre-publish rename. Local dev installs need a one-shot `mv` of the old XDG directories; see `CONTRIBUTING.md`.
 
 ## [0.0.1] — 2026-05-20

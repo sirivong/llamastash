@@ -94,6 +94,11 @@ fn describe(action: &ConfirmAction) -> (&'static str, String) {
       "Kill daemon",
       "Shut down the llamastash daemon? All managed launches will be stopped.".to_string(),
     ),
+    ConfirmAction::RestartDaemon => (
+      "Restart daemon",
+      "Restart the llamastash daemon? Managed launches will be stopped and the daemon will re-spawn."
+        .to_string(),
+    ),
     ConfirmAction::LaunchDuplicate {
       name,
       active_instances,

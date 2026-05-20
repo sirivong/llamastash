@@ -20,14 +20,15 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 - [x] **In progress**: init should show progress and text descriptions of what its doing (like installing llama.cpp via brew, Installed llama.cpp, downloading models, download complete, etc.) instead of just a blinking line.
 - [x] **In progress**: Init install method doesnt offer custom path as option.
-- [ ] if `--llama-server` is passed, add it as fallback in config file and use it when llama-server is not on path.
 - [ ] **In progress** : Better/colorful/formatted CLI output for commands (daemon, list, status, presets, doctor etc)
-- [ ] best-model (find nicer alias) command. reuse `init --models` and just download the best model for current setup/hardware
-- [ ] `R:restart` daemon hotkey.
-- [ ] **In progress**: Built in architecture defaults for all popular architectures, a default for all others. Advanced modal - replace free-text editor with typed key/value fields like settings; Its should be populated with architecture defaults for the model. keys = advanced options for the model, values = last settings or architecture default; pre-populate from the model's last params or architecture defaults and let users edit before launch. Requires a refactor of the advanced modal to support dynamic fields. Consider showing this inline in settings pane instead of a modal dialog, unless you think thats not good idea. Also provide a free text fields where user can enter arbitrary extra params that we won't show in the UI, for power users who want to use features we don't yet support in the UI.
 - [ ] **In progress**: HuggingFace pull TUI dialog with search / sort / pagination (origin: R46, [`docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md`](docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md)).
+- [ ] **In progress**: Built in architecture defaults for all popular architectures, a default for all others. Advanced modal - replace free-text editor with typed key/value fields like settings; Its should be populated with architecture defaults for the model. keys = advanced options for the model, values = last settings or architecture default; pre-populate from the model's last params or architecture defaults and let users edit before launch. Requires a refactor of the advanced modal to support dynamic fields. Consider showing this inline in settings pane instead of a modal dialog, unless you think thats not good idea. Also provide a free text fields where user can enter arbitrary extra params that we won't show in the UI, for power users who want to use features we don't yet support in the UI.
   - [ ] **In progress**: Models downloaded from HF has cryptic names; we should rename them to something human friendly and show that in the UI instead of the HF ID.
+- [x] ~~if `--llama-server` is passed, add it as fallback in config file and use it when llama-server is not on path.~~ Shipped 2026-05-20 — `cli::dispatch` writes the resolved path to `config.yaml`'s `llama_server_path` key whenever the flag differs from the configured value (best-effort).
+- [x] ~~best-model (find nicer alias) command. reuse `init --models` and just download the best model for current setup/hardware~~ Shipped 2026-05-20 — `llamastash recommend` wraps `init --only models --recommended` with the same `--json` / `--offline` / `--model` / `--revision` surface.
+- [x] ~~`R:restart` daemon hotkey.~~ Shipped 2026-05-20 — `R` (Shift+r) triggers a confirmation popup, then the TUI's writer task issues `shutdown` and `start_detached`s a fresh daemon with the same `DaemonOptions` the parent CLI resolved.
 - [ ] **Need brainstorm/plan**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
+- [ ] **Need brainstorm/plan**: Benchmark against ollama, LMStudio and other popular options.
 - [x] ~~**Need brainstorm/plan**: Test strategy for Nvidia / AMD / Apple GPU support (origin: R34).~~ Shipped 2026-05-20 via [`docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md`](docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md).
 - [ ] `Hardware UAT report` GitHub issue template — deferred until first contributor wants to file one (origin §Acceptance checklist). Recreate the `uat-caught` label if it's ever deleted: `gh label create uat-caught --color B60205 --description "Release PR where UAT caught a regression that would otherwise have shipped"`.
 - [ ] Cloud-runner re-evaluation — gated on user-base trigger (>500 installs + 3 RC cycles silence) per [`docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md`](docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md) §Companion trigger.
@@ -36,14 +37,14 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [ ] Skills.
 - [ ] Readme and other docs sync.
 - [ ] Audit (binary size, dependencies, test coverage, security, etc.).
-- [ ] **Need brainstorm/plan**: Benchmark against ollama, LMStudio and other popular options.
-- [x] ~~Release setup: website, brew tap, etc. (KDash-style).~~ shipped via [`docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md`](docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md) + [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md). Org-admin bootstrap (creating repos, secrets, Pages) still pending — see runbook.
-- [x] ~~Release pipeline like Kdash~~ shipped in `.github/workflows/release.yml` (kdash cd.yml lineage).
+- [ ] Release setup validation (website/CI/CD etc)
 - [ ] Add llamastash to cli.rs https://github.com/zackify/cli.rs/pull/1/changes — Unit 7 cutover step, post-org-bootstrap.
 - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
 - [ ] **Need brainstorm/plan**: Migrate release pipeline secrets from PATs to a scoped GitHub App with OIDC. Eliminates `GH_BUMP_TOKEN` rotation and shrinks token blast radius. Deferred from 0.0.1 per the release-setup plan §"Token rotation surface".
 - [ ] **Need brainstorm/plan**: Release blog.
 - [ ] **Need brainstorm/research/plan**:Social promotion — research an approach for max reach.
+- [x] ~~Release setup: website, brew tap, etc. (KDash-style).~~ shipped via [`docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md`](docs/plans/2026-05-19-003-feat-0.2.0-release-setup-plan.md) + [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md). Org-admin bootstrap (creating repos, secrets, Pages) still pending — see runbook.
+- [x] ~~Release pipeline like Kdash~~ shipped in `.github/workflows/release.yml` (kdash cd.yml lineage).
 
 ## v2+ roadmap
 

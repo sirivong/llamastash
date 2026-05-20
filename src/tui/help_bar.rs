@@ -53,6 +53,16 @@ const GLOBAL_CHIPS: &[GlobalChip] = &[
     focus: Focus::List,
     actions: &[Action::NextFocus, Action::PrevFocus],
   },
+  // Chip text kept short ("restart" rather than "restart daemon")
+  // so the title row's brand area still fits the version + theme
+  // label at the canonical 120-col render width. The help overlay
+  // pulls its longer "restart daemon" string from the keybinding's
+  // own description, so the full action remains discoverable.
+  GlobalChip {
+    description: "restart",
+    focus: Focus::List,
+    actions: &[Action::RestartDaemon],
+  },
   GlobalChip {
     description: "kill daemon",
     focus: Focus::List,
@@ -262,7 +272,16 @@ mod tests {
       !text.contains(":focus"),
       "stale `focus` chip must not reappear: {text}"
     );
+    assert!(text.contains("R:restart"), "got: {text}");
     assert!(text.contains("Q:kill daemon"), "got: {text}");
+    // R:restart must appear before Q:kill daemon so the user sees
+    // the non-destructive option first.
+    let restart_idx = text.find("R:restart").expect("restart chip");
+    let kill_idx = text.find("Q:kill daemon").expect("kill chip");
+    assert!(
+      restart_idx < kill_idx,
+      "restart daemon must precede kill daemon: {text}"
+    );
     assert!(text.contains("t:theme"), "got: {text}");
     assert!(text.contains("q:quit"), "got: {text}");
     // `/:filter` is panel-scoped now (lives in the Models block
@@ -298,10 +317,12 @@ mod tests {
   #[test]
   fn global_hint_text_fits_typical_terminal_widths() {
     // The strip must stay scannable on a normal terminal. The
-    // default keymap produces ~55 cells of text; allow some slack
-    // for label rewording without losing the budget signal.
+    // default keymap produces ~78 cells with the restart-daemon
+    // chip in place; keep the budget under 90 so any future label
+    // additions still fit a typical 80-column dev terminal with
+    // the title taking the leftmost slot.
     let app = default_app();
-    assert!(global_hint_text(&app).chars().count() < 70);
+    assert!(global_hint_text(&app).chars().count() < 90);
   }
 
   #[test]

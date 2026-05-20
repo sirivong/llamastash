@@ -189,6 +189,9 @@ pub enum ConfirmAction {
   StopModel { launch_id: String, name: String },
   /// `Q:kill daemon` — issues a `shutdown` RPC to the daemon.
   KillDaemon,
+  /// `R:restart daemon` — shuts the daemon down and re-spawns
+  /// a fresh one. All managed launches are stopped in the process.
+  RestartDaemon,
   /// `Enter:launch` on a model that already has a managed launch
   /// (round-8). v1 supports duplicate launches on fresh ports, but
   /// we ask the user to confirm so a stray Enter doesn't silently
@@ -381,6 +384,27 @@ impl App {
       let next: Vec<ManagedRow> = arr.iter().filter_map(parse_status_row).collect();
       let prev_ids: std::collections::BTreeSet<String> =
         self.managed.iter().map(|m| m.launch_id.clone()).collect();
+      // Detect transitions into `Error` so we can auto-jump the
+      // right pane to Logs — the user explicitly wants to see the
+      // failure tail, not the static Settings form. Compare against
+      // the previous snapshot's state map (path-keyed because a
+      // failed re-launch may have a fresh launch_id).
+      let prev_state_by_id: BTreeMap<String, SurfaceState> = self
+        .managed
+        .iter()
+        .map(|m| (m.launch_id.clone(), m.state))
+        .collect();
+      let newly_errored: Vec<String> = next
+        .iter()
+        .filter(|m| m.state == SurfaceState::Error)
+        .filter(|m| {
+          prev_state_by_id
+            .get(&m.launch_id)
+            .map(|prev| *prev != SurfaceState::Error)
+            .unwrap_or(true)
+        })
+        .map(|m| m.launch_id.clone())
+        .collect();
       // Merge while preserving recency order:
       //   1. Launches that are new in this tick land at the top
       //      (newest first per the daemon's emission order).
@@ -412,6 +436,19 @@ impl App {
       // genuinely new launch_id appeared on this tick.
       if let Some(launch_id) = newest {
         self.snap_cursor_to_launch(&launch_id);
+      }
+      // If the focused launch just transitioned into Error, snap
+      // the right pane to Logs so the user sees the failure tail
+      // without an extra Tab keystroke. Other launches in the
+      // newly_errored set get picked up the moment the user focuses
+      // them — `ensure_right_tab_reachable` keeps Logs reachable
+      // for Error rows.
+      if !newly_errored.is_empty() {
+        if let Some(focused) = self.focused_managed() {
+          if newly_errored.contains(&focused.launch_id) {
+            self.right_tab = RightTab::Logs;
+          }
+        }
       }
     } else {
       self.managed.clear();
@@ -952,6 +989,12 @@ impl App {
       SurfaceState::Launching | SurfaceState::Loading => {
         vec![RightTab::Settings, RightTab::Logs]
       }
+      // Error: surface Logs alongside Settings so the user can
+      // read the failure tail without re-launching. The daemon
+      // keeps the per-launch log buffer around after the spawn
+      // fails, and the poller still hits it because the entry
+      // remains in `state.running` until the user clears it.
+      SurfaceState::Error => vec![RightTab::Settings, RightTab::Logs],
       _ => vec![RightTab::Settings],
     }
   }
@@ -1523,6 +1566,47 @@ mod tests {
       rss_bytes: None,
       cpu_pct: None,
     }
+  }
+
+  #[test]
+  fn ingest_status_snaps_right_tab_to_logs_on_error_transition() {
+    // When the focused launch transitions from Loading → Error, the
+    // right pane should auto-switch to Logs so the failure tail is
+    // visible without an extra keystroke. Settings tab is too far
+    // from the cause of failure for a user who just saw the launch
+    // fail.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/qwen.gguf", "/m")];
+    let loading = serde_json::json!({
+      "models": [{
+        "launch_id": "L1",
+        "id": { "path": "/m/qwen.gguf", "header_hash": "h" },
+        "port": 41100,
+        "state": { "state": "loading" },
+      }]
+    });
+    app.ingest_status(&loading);
+    app.right_tab = RightTab::Settings;
+    let errored = serde_json::json!({
+      "models": [{
+        "launch_id": "L1",
+        "id": { "path": "/m/qwen.gguf", "header_hash": "h" },
+        "port": 41100,
+        "state": { "state": "error", "cause": "probe timeout" },
+      }]
+    });
+    app.ingest_status(&errored);
+    assert_eq!(
+      app.right_tab,
+      RightTab::Logs,
+      "Error transition should snap the right pane to Logs"
+    );
+    // Logs is also reachable for an Error row going forward (so a
+    // user who arrives at the row later still sees the tab).
+    assert!(
+      app.available_right_tabs().contains(&RightTab::Logs),
+      "Error rows must expose the Logs tab"
+    );
   }
 
   #[test]

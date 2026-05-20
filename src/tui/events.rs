@@ -74,6 +74,10 @@ pub enum WriterCmd {
   /// `shutdown` — ask the daemon itself to exit. Dispatched by
   /// the `Q` hotkey after the user confirms the popup.
   Shutdown,
+  /// `R:restart daemon` — shut the running daemon down and re-spawn
+  /// a fresh one with the same options. Dispatched by the `R` hotkey
+  /// after the user confirms the popup.
+  RestartDaemon,
   /// `favorite_add` for the supplied model path. The TUI flips its
   /// local view optimistically; an RPC failure is surfaced via the
   /// writer task's `warn!` log and the next `favorite_list` refresh
@@ -336,6 +340,9 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::StopModel => apply_stop_model(app),
     Action::KillDaemon => {
       app.confirm_dialog = Some(ConfirmAction::KillDaemon);
+    }
+    Action::RestartDaemon => {
+      app.confirm_dialog = Some(ConfirmAction::RestartDaemon);
     }
     Action::EnterEdit => {
       // Tab-aware:
@@ -602,6 +609,16 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
         "daemon shutdown dispatched".into(),
         "daemon shutdown failed — writer offline",
         "daemon shutdown (no writer)".into(),
+      );
+    }
+    ConfirmAction::RestartDaemon => {
+      dispatch_writer(
+        app,
+        writer,
+        WriterCmd::RestartDaemon,
+        "daemon restart dispatched".into(),
+        "daemon restart failed — writer offline",
+        "daemon restart (no writer)".into(),
       );
     }
     ConfirmAction::LaunchDuplicate {
@@ -1069,13 +1086,26 @@ const WRITER_CHANNEL_CAPACITY: usize = 64;
 /// Unix socket makes that cheap and removes the "writer holds a
 /// stale client across a daemon restart" failure mode.
 ///
+/// `daemon_opts` is the spawn payload used when a `RestartDaemon`
+/// command lands — the writer task re-spawns the daemon with the
+/// same options the parent CLI dispatcher resolved at startup, so
+/// `--model-path`, `--no-scan`, port range, etc. survive the
+/// restart. `None` falls back to platform defaults.
+///
 /// The channel is bounded so a wedged daemon + scripted rapid input
 /// can't exhaust process memory. Callers using `try_send` get an
 /// `Err(Full)` and can either drop the action or surface a toast.
-pub fn spawn_writer(socket: PathBuf) -> mpsc::Sender<WriterCmd> {
+pub fn spawn_writer(
+  socket: PathBuf,
+  daemon_opts: Option<crate::daemon::DaemonOptions>,
+) -> mpsc::Sender<WriterCmd> {
   let (tx, mut rx) = mpsc::channel::<WriterCmd>(WRITER_CHANNEL_CAPACITY);
   tokio::spawn(async move {
     while let Some(cmd) = rx.recv().await {
+      if matches!(cmd, WriterCmd::RestartDaemon) {
+        handle_restart_daemon(&socket, daemon_opts.clone()).await;
+        continue;
+      }
       let mut client = match Client::connect(&socket).await {
         Ok(c) => c,
         Err(e) => {
@@ -1090,6 +1120,46 @@ pub fn spawn_writer(socket: PathBuf) -> mpsc::Sender<WriterCmd> {
     }
   });
   tx
+}
+
+/// Two-phase daemon restart: ask the running daemon to shut down,
+/// wait for the socket file to disappear, then `start_detached` a
+/// fresh daemon with the same options the parent dispatcher
+/// resolved. Best-effort throughout — every failure logs and the
+/// TUI keeps running so the user can retry from the keymap.
+async fn handle_restart_daemon(
+  socket: &std::path::Path,
+  daemon_opts: Option<crate::daemon::DaemonOptions>,
+) {
+  match Client::connect(socket).await {
+    Ok(mut client) => {
+      if let Err(e) = client.call("shutdown", None).await {
+        log::warn!("restart: shutdown call failed: {e}");
+      }
+    }
+    Err(e) => log::warn!("restart: connect-for-shutdown failed: {e}"),
+  }
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+  while std::time::Instant::now() < deadline {
+    if Client::connect(socket).await.is_err() {
+      break;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+  let opts = match daemon_opts {
+    Some(o) => o,
+    None => match crate::daemon::DaemonOptions::from_defaults() {
+      Ok(o) => o,
+      Err(e) => {
+        log::warn!("restart: default DaemonOptions: {e}");
+        return;
+      }
+    },
+  };
+  match crate::daemon::start_detached(opts) {
+    Ok(_) => log::info!("restart: daemon re-spawned"),
+    Err(e) => log::warn!("restart: start_detached failed: {e}"),
+  }
 }
 
 fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
@@ -1125,6 +1195,15 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
     }
     WriterCmd::StopModel { launch_id } => ("stop_model", json!({ "launch_id": launch_id })),
     WriterCmd::Shutdown => ("shutdown", json!({})),
+    // RestartDaemon is handled directly in `spawn_writer` (it's a
+    // two-phase shutdown + start_detached, not a single RPC). The
+    // dispatcher short-circuits before reaching this encoder, so
+    // hitting this arm is a programmer error — log and emit a
+    // no-op JSON-RPC `version` call as the safest fallback.
+    WriterCmd::RestartDaemon => {
+      log::warn!("encode_writer_cmd reached RestartDaemon (should be short-circuited)");
+      ("version", json!({}))
+    }
     WriterCmd::FavoriteAdd(p) => ("favorite_add", json!({ "model_path": p })),
     WriterCmd::FavoriteRemove(p) => ("favorite_remove", json!({ "model_path": p })),
   }
@@ -1132,7 +1211,11 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
 
 /// Fully-featured TUI run-loop. Drives the App from real crossterm
 /// events + a daemon refresher, rendering on each tick.
-pub async fn run(app: App, socket: PathBuf) -> Result<()> {
+pub async fn run(
+  app: App,
+  socket: PathBuf,
+  daemon_opts: Option<crate::daemon::DaemonOptions>,
+) -> Result<()> {
   use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
   };
@@ -1170,7 +1253,7 @@ pub async fn run(app: App, socket: PathBuf) -> Result<()> {
   let mut refresh_rx = spawn_refresher(socket.clone());
   let current_launch = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
   let mut logs_rx = spawn_logs_poller(socket.clone(), current_launch.clone());
-  let writer_tx = spawn_writer(socket);
+  let writer_tx = spawn_writer(socket, daemon_opts);
 
   loop {
     // Mirror the focused launch id to the logs poller so the next
@@ -1336,13 +1419,14 @@ pub async fn launch(
   custom_palette: Option<crate::theme::Palette>,
   keymap: crate::tui::keybindings::KeyMap,
   socket: &Path,
+  daemon_opts: Option<crate::daemon::DaemonOptions>,
 ) -> Result<()> {
   let app = App::new(crate::tui::app::AppOptions {
     theme,
     custom_palette,
     keymap,
   });
-  run(app, socket.to_path_buf()).await
+  run(app, socket.to_path_buf(), daemon_opts).await
 }
 
 /// Drain any pending [`ChatStreamMsg`] frames into `app.chat`.
@@ -1836,6 +1920,30 @@ mod tests {
   }
 
   #[test]
+  fn capital_r_stages_restart_daemon_confirm() {
+    let mut app = App::new(Default::default());
+    pump_input(&mut app, key(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    assert!(matches!(
+      app.confirm_dialog,
+      Some(crate::tui::app::ConfirmAction::RestartDaemon)
+    ));
+  }
+
+  #[test]
+  fn restart_daemon_confirm_dispatches_to_writer() {
+    let mut app = App::new(Default::default());
+    let (tx, mut rx) = mpsc::channel::<WriterCmd>(4);
+    pump_input_with_writer(
+      &mut app,
+      key(KeyCode::Char('R'), KeyModifiers::SHIFT),
+      Some(&tx),
+    );
+    pump_input_with_writer(&mut app, key(KeyCode::Enter, KeyModifiers::NONE), Some(&tx));
+    let cmd = rx.try_recv().expect("writer must receive restart");
+    assert!(matches!(cmd, WriterCmd::RestartDaemon));
+  }
+
+  #[test]
   fn tab_in_list_focus_walks_chain_into_right_pane_navigation_mode() {
     // Edit-mode rule: Tab lands on RightPane focus (not ChatInput),
     // even when the active tab is Chat. The user must press `e` to
@@ -1962,32 +2070,30 @@ mod tests {
   }
 
   #[test]
-  fn shift_r_and_shift_e_are_aliases_for_shift_c() {
-    // A model only ever exposes one of Chat/Embed/Rerank — the
-    // three shifted letters all map through `apply_focus_chat_tab`
-    // and land on whichever mode tab is reachable. Provides
-    // mnemonic muscle memory ("press E for embed") without
-    // mode-specific routing.
+  fn shift_e_is_alias_for_shift_c() {
+    // A model only ever exposes one of Chat/Embed/Rerank — `C` and
+    // `E` both map through `apply_focus_chat_tab` and land on
+    // whichever mode tab is reachable. (`R` used to be a third
+    // alias but moved to `RestartDaemon` — see
+    // `capital_r_stages_restart_daemon_confirm`.)
     use crate::tui::tabs::RightTab;
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
     app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
     app.go_top();
-    for letter in ['R', 'E'] {
-      app.focus = Focus::List;
-      app.right_tab = RightTab::Settings;
-      pump_input(&mut app, key(KeyCode::Char(letter), KeyModifiers::SHIFT));
-      assert_eq!(
-        app.focus,
-        Focus::RightPane,
-        "Shift+{letter} should park focus on the right pane"
-      );
-      assert_eq!(
-        app.right_tab,
-        RightTab::Chat,
-        "Shift+{letter} should land on whichever mode tab is live"
-      );
-    }
+    app.focus = Focus::List;
+    app.right_tab = RightTab::Settings;
+    pump_input(&mut app, key(KeyCode::Char('E'), KeyModifiers::SHIFT));
+    assert_eq!(
+      app.focus,
+      Focus::RightPane,
+      "Shift+E should park focus on the right pane"
+    );
+    assert_eq!(
+      app.right_tab,
+      RightTab::Chat,
+      "Shift+E should land on whichever mode tab is live"
+    );
   }
 
   #[test]

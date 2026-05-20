@@ -134,6 +134,11 @@ pub enum Command {
   Doctor(DoctorArgs),
   /// Mark, unmark, and list favorite models.
   Favorites(FavoritesArgs),
+  /// Download the best-fit model for this hardware. Shortcut for
+  /// `init --only models --recommended` that lets users grab a
+  /// recommended GGUF without walking through the full first-run
+  /// wizard.
+  Recommend(RecommendArgs),
   /// Inspect the last successful `start_model` params for one or
   /// every catalog model. Surfaces the daemon's `last_params_list`
   /// IPC so agents can answer "how did I launch this model last
@@ -570,6 +575,50 @@ pub enum InitStep {
   Models,
   /// Write `config.yaml` (step 4).
   Config,
+}
+
+/// Convert the `recommend` subcommand's args into the equivalent
+/// `init --only models --recommended` invocation. Centralised so the
+/// `recommend` surface and `init` stay in lock-step.
+pub fn recommend_to_init_args(args: RecommendArgs) -> InitArgs {
+  InitArgs {
+    recommended: true,
+    yes: false,
+    json: args.json,
+    offline: args.offline,
+    only: vec![InitStep::Models],
+    skip: Vec::new(),
+    install: None,
+    model: args.model.or(Some(ModelOverride::Recommended)),
+    config_choice: None,
+    revision: args.revision,
+  }
+}
+
+#[derive(Args, Debug)]
+pub struct RecommendArgs {
+  /// Emit a structured JSON summary on completion. Mirrors
+  /// `init --only models --json` so agents and scripts can consume
+  /// the same shape.
+  #[arg(long)]
+  pub json: bool,
+  /// Disable outbound network. Recommend always needs network to
+  /// fetch the model snapshot and download weights, so this exits
+  /// with `INIT_ABORTED` up-front — kept for parity with
+  /// `init --offline`.
+  #[arg(long, env = "LLAMASTASH_OFFLINE")]
+  pub offline: bool,
+  /// Pre-answer the model-pick. Defaults to `recommended` (the
+  /// recommender's top pick). Pass `<owner>/<repo>` to override with
+  /// a specific HuggingFace repo, or `none` to skip the download
+  /// (useful for `--json` dry-runs).
+  #[arg(long, value_name = "CHOICE", value_parser = parse_model_override)]
+  pub model: Option<ModelOverride>,
+  /// Pin the HuggingFace revision (commit SHA, branch, or tag) used
+  /// when downloading. Honored only on `--model owner/repo` paste
+  /// branch; recommender picks are branch-tracked.
+  #[arg(long, value_name = "SHA", value_parser = parse_revision)]
+  pub revision: Option<String>,
 }
 
 #[derive(Args, Debug)]

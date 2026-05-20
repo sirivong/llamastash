@@ -46,6 +46,11 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
   if let Some(warning) = &config.warning {
     log::warn!("{warning}");
   }
+  // Sticky `--llama-server`: when the user passes the flag explicitly,
+  // write the resolved path back into the YAML config so next launch
+  // picks it up without re-typing. Best-effort — a failed write logs
+  // a warning and the command proceeds normally.
+  persist_llama_server_override(&cli, &config.config);
   let command = cli.command.take();
   let resolved_config = &config.config;
   let outcome: CliResult = match command {
@@ -63,11 +68,68 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
     Some(Command::LastParams(args)) => last_params::handle(args, &cli, resolved_config).await,
     Some(Command::Pull(args)) => pull::handle(args, &cli, resolved_config).await,
     Some(Command::Init(args)) => init::handle(args, &cli, resolved_config).await,
+    Some(Command::Recommend(args)) => {
+      init::handle(
+        cli_args::recommend_to_init_args(args),
+        &cli,
+        resolved_config,
+      )
+      .await
+    }
     Some(Command::Doctor(args)) => doctor::handle(args, &cli, resolved_config).await,
     #[cfg(feature = "uat")]
     Some(Command::Uat(args)) => uat::handle(args, &cli, resolved_config).await,
   };
   Ok(report(outcome))
+}
+
+/// Persist `--llama-server <PATH>` back into the user's YAML config so
+/// subsequent launches pick it up without re-typing the flag. No-op
+/// when the flag is unset or the resolved path already matches the
+/// configured value. Best-effort: errors (no config dir, write failure,
+/// symlink target) downgrade to a `log::warn!` so the rest of the
+/// command runs unaffected.
+fn persist_llama_server_override(cli: &Cli, config: &crate::config::Config) {
+  let Some(raw) = cli.llama_server.as_ref() else {
+    return;
+  };
+  // Canonicalize so equivalent paths (relative vs absolute, symlinks)
+  // compare equal and don't trigger a rewrite each invocation. Fall
+  // back to the raw value when canonicalization fails so a missing
+  // file still gets persisted — the daemon's own locator will surface
+  // the path error later.
+  let resolved = std::fs::canonicalize(raw).unwrap_or_else(|_| raw.clone());
+  if config
+    .llama_server_path
+    .as_ref()
+    .map(|p| p == &resolved)
+    .unwrap_or(false)
+  {
+    return;
+  }
+  let Some(path) = crate::config::config_path(cli.config.clone()) else {
+    log::warn!("--llama-server: no writable config path; skipping persist");
+    return;
+  };
+  let additions = serde_yaml::Value::Mapping({
+    let mut m = serde_yaml::Mapping::new();
+    m.insert(
+      serde_yaml::Value::String("llama_server_path".into()),
+      serde_yaml::Value::String(resolved.display().to_string()),
+    );
+    m
+  });
+  match crate::config::writer::merge_and_write(&path, additions) {
+    Ok(_) => log::info!(
+      "persisted --llama-server {} to {}",
+      resolved.display(),
+      path.display()
+    ),
+    Err(e) => log::warn!(
+      "--llama-server: failed to persist to {}: {e}",
+      path.display()
+    ),
+  }
 }
 
 /// Translate an anyhow-bearing handler result into the CliResult
@@ -121,11 +183,19 @@ async fn handle_tui(cli: &Cli, config: &crate::config::Config) -> CliResult {
   drop(client);
   let socket = crate::util::paths::runtime_socket_path();
   let keymap = resolve_keymap(config);
+  // Resolve the same DaemonOptions the auto-spawn path would use,
+  // so the TUI's `R:restart daemon` hotkey re-spawns with matching
+  // `--model-path` / `--no-scan` / `--llama-server` settings rather
+  // than dropping back to bare platform defaults. A failure to
+  // resolve options is non-fatal: the writer task falls back to
+  // `from_defaults` and logs.
+  let daemon_opts = daemon::build_options(None, None, cli, config).ok();
   match crate::tui::events::launch(
     config.theme,
     resolve_custom_palette(config),
     keymap,
     &socket,
+    daemon_opts,
   )
   .await
   {

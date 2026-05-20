@@ -65,6 +65,10 @@ const GENERAL: &[Row] = &[
   },
   Row::Single {
     focus: Focus::List,
+    action: Action::RestartDaemon,
+  },
+  Row::Single {
+    focus: Focus::List,
     action: Action::KillDaemon,
   },
   Row::Single {
