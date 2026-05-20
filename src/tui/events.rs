@@ -1157,6 +1157,9 @@ async fn handle_restart_daemon(
     },
   };
   match crate::daemon::start_detached(opts) {
+    Ok(crate::daemon::StartOutcome::AlreadyRunning(_)) => {
+      log::warn!("restart: daemon is still running; restart did not spawn a new process");
+    }
     Ok(_) => log::info!("restart: daemon re-spawned"),
     Err(e) => log::warn!("restart: start_detached failed: {e}"),
   }
