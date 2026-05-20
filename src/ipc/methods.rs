@@ -920,8 +920,10 @@ async fn start_model_handler(
     )
   })?;
 
-  // Resolve canonical ModelId from the GGUF header.
-  let id = resolve_model_id(&parsed.model_path)?;
+  // Resolve canonical ModelId and architecture from the GGUF header
+  // in a single read so the layered-knob resolver below doesn't have
+  // to re-open the file.
+  let (id, arch) = resolve_model_id_and_arch(&parsed.model_path)?;
 
   // Mode resolution: explicit override > catalog hint > default to chat.
   // The CLI surface refuses to default silently when discovery says
@@ -1006,7 +1008,6 @@ async fn start_model_handler(
   launch_params.reasoning = parsed.reasoning.unwrap_or(false);
   launch_params.extras = parsed.extras.into_iter().map(OsString::from).collect();
 
-  let arch = read_gguf_architecture(&parsed.model_path);
   // Pull the model's last_params from persisted state so a returning
   // user inherits the knobs they last shipped (R20 precedence).
   let last_params_knobs = {
@@ -1181,23 +1182,27 @@ async fn collect_in_use_ports(ctx: &MethodContext) -> Vec<u16> {
 }
 
 fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorObject> {
+  let (id, _) = resolve_model_id_and_arch(path)?;
+  Ok(id)
+}
+
+/// One-pass GGUF header read that returns both the canonical model id
+/// and the architecture string. `start_model_handler` calls this so
+/// the layered-knob resolver lookup doesn't have to re-read the
+/// header to discover the arch. Arch is best-effort: a `None` here
+/// just means the `defaults_table` lookup falls back to the `*` row.
+fn resolve_model_id_and_arch(
+  path: &std::path::Path,
+) -> Result<(ModelId, Option<String>), ErrorObject> {
   let header = read_gguf_header(path, HeaderReadOptions::default()).map_err(|e| {
     ErrorObject::new(
       ErrorCode::InvalidParams,
       format!("could not read GGUF header at {}: {e}", path.display()),
     )
   })?;
-  Ok(compute_model_id(path, &header.raw))
-}
-
-/// Best-effort GGUF architecture lookup for the arch_defaults merge.
-/// Returns `None` on any I/O / parse / missing-key failure — the merge
-/// then becomes a no-op, which is the right default behaviour: an
-/// architecture we can't read shouldn't drag in defaults that may not
-/// apply.
-fn read_gguf_architecture(path: &std::path::Path) -> Option<String> {
-  let read = read_gguf_header(path, HeaderReadOptions::default()).ok()?;
-  crate::gguf::metadata::summarise(&read.header).arch
+  let id = compute_model_id(path, &header.raw);
+  let arch = crate::gguf::metadata::summarise(&header.header).arch;
+  Ok((id, arch))
 }
 
 /// Live GPU-backend flavor — keys the built-in defaults table.
