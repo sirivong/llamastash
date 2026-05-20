@@ -127,16 +127,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          cat > issue-body.txt <<'EOF'
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          The benchmark snapshot regen workflow failed. The previous Release asset stays live so users on the bundled snapshot are unaffected; this issue tracks the recalibration work.
+
+          Reproduce locally:
+
+          ```
+          python scripts/regenerate-benchmark-snapshot.py
+          ```
+          EOF
           gh issue create \
             --title "Snapshot regen failed on $(date -u +%F)" \
             --label snapshot-regression \
-            --body "Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-The benchmark snapshot regen workflow failed. The previous Release asset stays live so users on the bundled snapshot are unaffected; this issue tracks the recalibration work.
-
-Reproduce locally:
-
-\`\`\`
-python scripts/regenerate-benchmark-snapshot.py
-\`\`\`
-"
+            --body-file issue-body.txt

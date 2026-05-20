@@ -36,6 +36,16 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::{fs::MetadataExt, fs::OpenOptionsExt, io::AsRawFd};
 
+#[cfg(all(unix, target_vendor = "apple"))]
+const FILE_TYPE_MASK: u32 = libc::S_IFMT as u32;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const FILE_TYPE_MASK: u32 = libc::S_IFMT;
+
+#[cfg(all(unix, target_vendor = "apple"))]
+const REGULAR_FILE_MODE: u32 = libc::S_IFREG as u32;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const REGULAR_FILE_MODE: u32 = libc::S_IFREG;
+
 /// Result of `acquire`.
 #[derive(Debug)]
 pub enum AcquireOutcome {
@@ -126,8 +136,10 @@ pub fn acquire(state_dir: &Path) -> Result<AcquireOutcome, LockfileError> {
   #[cfg(unix)]
   {
     let meta = file.metadata()?;
-    let mode = meta.mode() & libc::S_IFMT;
-    if mode != libc::S_IFREG {
+    // `MetadataExt::mode()` is `u32`, while Apple's libc exposes these
+    // file-type constants as `u16`.
+    let mode = meta.mode() & FILE_TYPE_MASK;
+    if mode != REGULAR_FILE_MODE {
       return Err(LockfileError::CorruptLockfile {
         path: path.clone(),
         reason: format!("not a regular file (mode {mode:o})"),

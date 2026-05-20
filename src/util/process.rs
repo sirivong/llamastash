@@ -21,9 +21,12 @@
 
 use std::io;
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 /// Error kinds [`run_with_drain_and_timeout`] surfaces. Each caller
 /// maps these into its own domain error.
@@ -61,6 +64,17 @@ impl std::error::Error for RunError {}
 /// `cmd` stdio settings are overwritten so the drainer can attach
 /// readers reliably.
 pub fn run_with_drain_and_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, RunError> {
+  #[cfg(unix)]
+  unsafe {
+    // Put the spawned command in its own session/process group so a
+    // timeout can kill shell grandchildren that inherit the same pipes.
+    cmd.pre_exec(|| {
+      if libc::setsid() < 0 {
+        return Err(io::Error::last_os_error());
+      }
+      Ok(())
+    });
+  }
   cmd
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -85,8 +99,7 @@ pub fn run_with_drain_and_timeout(mut cmd: Command, timeout: Duration) -> Result
       Ok(Some(s)) => break s,
       Ok(None) => {
         if Instant::now() >= deadline {
-          let _ = child.kill();
-          let _ = child.wait();
+          kill_and_reap(&mut child);
           let _ = stdout_thread.join();
           let _ = stderr_thread.join();
           return Err(RunError::Timeout { after: timeout });
@@ -94,8 +107,7 @@ pub fn run_with_drain_and_timeout(mut cmd: Command, timeout: Duration) -> Result
         thread::sleep(Duration::from_millis(25));
       }
       Err(e) => {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_and_reap(&mut child);
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
         return Err(RunError::Wait(e));
@@ -110,6 +122,27 @@ pub fn run_with_drain_and_timeout(mut cmd: Command, timeout: Duration) -> Result
     stdout,
     stderr,
   })
+}
+
+fn kill_and_reap(child: &mut Child) {
+  terminate_child_tree(child);
+  let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn terminate_child_tree(child: &mut Child) {
+  let pid = child.id();
+  // `pre_exec(setsid)` made the child a process-group leader, so a
+  // negative pid signals the whole subtree, not just the shell wrapper.
+  unsafe {
+    libc::kill(-(pid as i32), libc::SIGKILL);
+  }
+  let _ = child.kill();
+}
+
+#[cfg(not(unix))]
+fn terminate_child_tree(child: &mut Child) {
+  let _ = child.kill();
 }
 
 #[cfg(test)]
