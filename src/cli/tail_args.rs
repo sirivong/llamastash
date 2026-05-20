@@ -9,8 +9,8 @@ use std::ffi::OsString;
 
 use crate::cli::exit_codes::{CliExit, USAGE};
 use crate::config::TypedKnobs;
-use crate::launch::flag_aliases::{recognise, ValueKind, KV_CACHE_TYPES};
 use crate::launch::flag_aliases::KnobField;
+use crate::launch::flag_aliases::{recognise, ValueKind, KV_CACHE_TYPES};
 
 /// Walk `tokens` and split into (TypedKnobs, extras). Last-occurrence
 /// wins for repeated knob flags.
@@ -52,7 +52,10 @@ where
     return Ok(v.to_string());
   }
   let next = iter.next().ok_or_else(|| {
-    CliExit::new(USAGE, format!("{flag}: missing value (expected an argument)"))
+    CliExit::new(
+      USAGE,
+      format!("{flag}: missing value (expected an argument)"),
+    )
   })?;
   Ok(next.to_string_lossy().into_owned())
 }
@@ -71,7 +74,9 @@ fn apply_knob(
     (KnobField::BatchSize, ValueKind::U32) => knobs.batch_size = Some(parse_u32(flag, value)?),
     (KnobField::UbatchSize, ValueKind::U32) => knobs.ubatch_size = Some(parse_u32(flag, value)?),
     (KnobField::Keep, ValueKind::U32) => knobs.keep = Some(parse_u32(flag, value)?),
-    (KnobField::RopeFreqScale, ValueKind::F32) => knobs.rope_freq_scale = Some(parse_f32(flag, value)?),
+    (KnobField::RopeFreqScale, ValueKind::F32) => {
+      knobs.rope_freq_scale = Some(parse_f32(flag, value)?)
+    }
     (KnobField::CacheTypeK, ValueKind::KvCacheType) => {
       knobs.cache_type_k = Some(parse_kv_cache(flag, value)?)
     }
@@ -94,16 +99,14 @@ fn apply_knob(
 
 fn parse_u32(flag: &str, value: Option<&str>) -> Result<u32, CliExit> {
   let v = value.ok_or_else(|| CliExit::new(USAGE, format!("{flag}: expected u32")))?;
-  v.parse::<u32>().map_err(|_| {
-    CliExit::new(USAGE, format!("{flag}: expected u32, got {v:?}"))
-  })
+  v.parse::<u32>()
+    .map_err(|_| CliExit::new(USAGE, format!("{flag}: expected u32, got {v:?}")))
 }
 
 fn parse_f32(flag: &str, value: Option<&str>) -> Result<f32, CliExit> {
   let v = value.ok_or_else(|| CliExit::new(USAGE, format!("{flag}: expected float")))?;
-  v.parse::<f32>().map_err(|_| {
-    CliExit::new(USAGE, format!("{flag}: expected float, got {v:?}"))
-  })
+  v.parse::<f32>()
+    .map_err(|_| CliExit::new(USAGE, format!("{flag}: expected float, got {v:?}")))
 }
 
 fn parse_kv_cache(flag: &str, value: Option<&str>) -> Result<String, CliExit> {

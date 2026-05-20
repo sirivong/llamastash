@@ -161,10 +161,6 @@ const MODELS: &[Row] = &[
   },
   Row::Single {
     focus: Focus::List,
-    action: Action::OpenAdvancedPanel,
-  },
-  Row::Single {
-    focus: Focus::List,
     action: Action::YankUrl,
   },
   Row::Single {
@@ -282,13 +278,8 @@ const CHAT_EMBED_RERANK: &[Row] = &[
   },
 ];
 
-/// Two Enter destinations across the Settings flow — launch the
-/// model from the inline form, save & close from the Advanced flags
-/// panel. User-facing summary collapses them as `launch/save`.
-const SETTINGS_ENTER: &[(Focus, Action)] = &[
-  (Focus::RightPane, Action::Submit),
-  (Focus::AdvancedPanel, Action::Submit),
-];
+/// Enter dispatches the launch from the inline Settings form.
+const SETTINGS_ENTER: &[(Focus, Action)] = &[(Focus::RightPane, Action::Submit)];
 
 /// `Action::MoveDown` / `MoveUp` on `Focus::RightPane` carry the
 /// description `scroll down/up` because that's their meaning on the
@@ -338,12 +329,6 @@ const SETTINGS: &[Row] = &[
   Row::Single {
     focus: Focus::RightPane,
     action: Action::CycleValuePrev,
-  },
-  // Esc on the Advanced flags panel discards edits and steps back
-  // to the Settings form.
-  Row::Single {
-    focus: Focus::AdvancedPanel,
-    action: Action::Cancel,
   },
 ];
 

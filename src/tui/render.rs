@@ -25,8 +25,8 @@ use crate::theme::Palette;
 use crate::tui::app::App;
 use crate::tui::keybindings::{Action, Focus};
 use crate::tui::{
-  advanced_panel, confirm_overlay, help_bar, help_overlay, host_stats_pane, info_pane, list_pane,
-  logo_pane, right_pane,
+  confirm_overlay, help_bar, help_overlay, host_stats_pane, info_pane, list_pane, logo_pane,
+  right_pane,
 };
 
 const INFO_ROW_HEIGHT: u16 = 7;
@@ -145,11 +145,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
   // form lives inline in the right pane's Settings tab. The
   // `launch_picker` module still owns the form state struct, but no
   // dedicated overlay is painted.
-  if app.focus == Focus::AdvancedPanel {
-    if let Some(state) = &app.advanced_panel {
-      advanced_panel::render(frame, area, state, &palette);
-    }
-  }
   if app.hf_dialog.is_some() {
     super::hf_dialog::render(frame, area, app, &palette);
   }

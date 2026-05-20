@@ -181,7 +181,11 @@ pub fn recognise(token: &str) -> Option<Recognised<'_>> {
 /// avoid duplicating a flag the caller already supplied in `extras`.
 #[allow(dead_code)]
 pub fn token_matches(token: &str, field: KnobField) -> bool {
-  let head = token.split('=').next().unwrap_or(token).to_ascii_lowercase();
+  let head = token
+    .split('=')
+    .next()
+    .unwrap_or(token)
+    .to_ascii_lowercase();
   let spec = spec_for(field);
   spec.canonical == head || spec.aliases.iter().any(|a| *a == head)
 }

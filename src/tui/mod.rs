@@ -5,10 +5,9 @@
 //! - [`events`] — input → state pump and the async run loop.
 //! - [`render`] — single-frame composition of every panel.
 //! - [`layout`], [`list_pane`], [`help_bar`], [`filter`],
-//!   [`launch_picker`], [`advanced_panel`], [`status_icons`],
-//!   [`keybindings`] — focused widgets and helpers.
+//!   [`launch_picker`], [`status_icons`], [`keybindings`] — focused
+//!   widgets and helpers.
 
-pub mod advanced_panel;
 pub mod app;
 pub mod confirm_overlay;
 pub mod download_strip;

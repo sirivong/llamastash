@@ -329,6 +329,9 @@ mod tests {
     assert!(v.get("port").is_none(), "port unset must be absent");
     assert_eq!(v["reasoning"], serde_json::json!(true));
     assert_eq!(v["knobs"]["threads"], serde_json::json!(8));
-    assert_eq!(v["extras"], serde_json::json!(["--rope-freq-base", "10000"]));
+    assert_eq!(
+      v["extras"],
+      serde_json::json!(["--rope-freq-base", "10000"])
+    );
   }
 }

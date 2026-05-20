@@ -400,7 +400,8 @@ fn launch_picker_seeds_from_persisted_last_params() {
         "mode": "chat",
         "ctx": 8192,
         "reasoning": true,
-        "advanced": ["--threads", "8"],
+        "knobs": {"threads": 8},
+        "extras": ["--rope-freq-base", "10000"],
       },
     }],
   }));
@@ -408,24 +409,20 @@ fn launch_picker_seeds_from_persisted_last_params() {
   app.open_launch_picker();
   let picker = app.launch_picker.as_ref().expect("picker open");
   assert_eq!(picker.ctx, Some(8192));
-  // Round-8: persisted `reasoning: true` lands on the explicit
-  // `On` tri-state, not on the `ModelDefault` neutral slot.
   use llamastash::tui::launch_picker::ReasoningSetting;
   assert_eq!(
     picker.reasoning,
     ReasoningSetting::On,
     "reasoning toggle must seed from last_params"
   );
-  let advanced = app
-    .advanced_panel
-    .as_ref()
-    .expect("advanced panel seeded")
-    .buffer
-    .buffer()
-    .to_string();
+  let extras: Vec<String> = picker
+    .extras
+    .iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
   assert!(
-    advanced.contains("--threads"),
-    "advanced flags must seed from last_params: {advanced}"
+    extras.iter().any(|s| s == "--rope-freq-base"),
+    "extras must seed from last_params: {extras:?}"
   );
 }
 

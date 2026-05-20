@@ -236,10 +236,6 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
             chips.push(chip);
           }
         }
-        push(
-          &mut chips,
-          app.hint(Focus::RightPane, Action::OpenAdvancedPanel),
-        );
         if let (Some(down), Some(up)) = (
           app.hint_with(Focus::RightPane, Action::MoveDown, "cycle fields"),
           app.hint_with(Focus::RightPane, Action::MoveUp, "cycle fields"),
@@ -618,12 +614,11 @@ mod tests {
       ]
     );
     // Open the picker — the user is now editing a staged launch.
-    // Chips switch to launch+cycle+advanced. u/c are intentionally
-    // omitted on the editable form.
+    // Chips switch to launch+cycle. u/c are intentionally omitted
+    // on the editable form.
     app.open_launch_picker();
     let chips = bottom_hint_chips(&app);
     assert!(chips.contains(&"Enter:launch".to_string()));
-    assert!(chips.contains(&"a:advanced".to_string()));
     assert!(chips.contains(&"↑↓:cycle fields".to_string()));
     assert!(chips.contains(&"←→:cycle value".to_string()));
     assert!(chips.contains(&"p:path".to_string()));
@@ -643,7 +638,6 @@ mod tests {
     app.right_tab = RightTab::Settings;
     let chips = bottom_hint_chips(&app);
     assert!(chips.contains(&"Enter:launch".to_string()));
-    assert!(chips.contains(&"a:advanced".to_string()));
     assert!(chips.contains(&"p:path".to_string()));
     assert!(!chips.iter().any(|c| c.contains("u:url")));
   }

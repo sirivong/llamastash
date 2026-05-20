@@ -25,8 +25,6 @@ pub enum Focus {
   /// Filter input is captured live; alphanumerics extend the filter
   /// buffer instead of triggering hotkeys.
   Filter,
-  /// Advanced flags panel.
-  AdvancedPanel,
   /// Right pane in a non-input mode (the Logs tab, primarily).
   /// Text-capture variants below cover the live input surfaces.
   RightPane,
@@ -74,7 +72,6 @@ pub enum Action {
   ClearFilter,
   ToggleFavorite,
   OpenLaunchPicker,
-  OpenAdvancedPanel,
   Submit,
   Cancel,
   YankUrl,
@@ -194,7 +191,6 @@ pub struct Binding {
 pub const DEFAULT_BINDINGS: &[(Focus, &[Binding])] = &[
   (Focus::List, LIST_BINDINGS),
   (Focus::Filter, FILTER_BINDINGS),
-  (Focus::AdvancedPanel, ADVANCED_BINDINGS),
   (Focus::RightPane, RIGHT_PANE_BINDINGS),
   (Focus::ChatInput, CHAT_INPUT_BINDINGS),
   (Focus::EmbedInput, EMBED_INPUT_BINDINGS),
@@ -329,13 +325,6 @@ const LIST_BINDINGS: &[Binding] = &[
     action: Action::OpenLaunchPicker,
     label: "Enter",
     description: "launch",
-  },
-  Binding {
-    key: KeyCode::Char('a'),
-    mods: KeyModifiers::NONE,
-    action: Action::OpenAdvancedPanel,
-    label: "a",
-    description: "advanced",
   },
   Binding {
     key: KeyCode::Char('u'),
@@ -558,30 +547,6 @@ const FILTER_BINDINGS: &[Binding] = &[
   },
 ];
 
-const ADVANCED_BINDINGS: &[Binding] = &[
-  Binding {
-    key: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-    action: Action::Cancel,
-    label: "Esc",
-    description: "back",
-  },
-  Binding {
-    key: KeyCode::Char('?'),
-    mods: KeyModifiers::NONE,
-    action: Action::ToggleHelp,
-    label: "?",
-    description: "help",
-  },
-  Binding {
-    key: KeyCode::Enter,
-    mods: KeyModifiers::NONE,
-    action: Action::Submit,
-    label: "Enter",
-    description: "save",
-  },
-];
-
 const RIGHT_PANE_BINDINGS: &[Binding] = &[
   Binding {
     key: KeyCode::Char('?'),
@@ -717,15 +682,8 @@ const RIGHT_PANE_BINDINGS: &[Binding] = &[
     label: "e",
     description: "edit",
   },
-  Binding {
-    key: KeyCode::Char('a'),
-    mods: KeyModifiers::NONE,
-    action: Action::OpenAdvancedPanel,
-    label: "a",
-    description: "advanced",
-  },
   // Arrows are the canonical surface — the Settings tab uses ↑/↓
-  // for field-cycle and the Logs tab uses them for scroll. Vi
+  // for row navigation and the Logs tab uses them for scroll. Vi
   // aliases `j`/`k` follow so home-row users have a fallback.
   // Ordering matters: `hint()` returns the first binding it finds,
   // so the chip strip surfaces the arrow glyphs.
@@ -1172,7 +1130,6 @@ impl Action {
     ("clear_filter", Action::ClearFilter),
     ("toggle_favorite", Action::ToggleFavorite),
     ("open_launch_picker", Action::OpenLaunchPicker),
-    ("open_advanced_panel", Action::OpenAdvancedPanel),
     ("submit", Action::Submit),
     ("cancel", Action::Cancel),
     ("yank_url", Action::YankUrl),
@@ -1419,7 +1376,6 @@ mod tests {
     use crate::tui::keybindings::Focus::*;
     for focus in [
       Filter,
-      AdvancedPanel,
       RightPane,
       ChatInput,
       EmbedInput,
@@ -1505,18 +1461,6 @@ mod tests {
       action_for(Focus::List, KeyCode::Tab, KeyModifiers::NONE),
       Some(Action::NextFocus),
       "Tab remains the canonical pane-cycle chord"
-    );
-  }
-
-  #[test]
-  fn right_pane_focus_can_open_advanced_from_settings_tab() {
-    // The Settings tab in the right pane hosts the launch form;
-    // `a` opens the Advanced flags editor without leaving Settings.
-    // (Previously this binding lived on the dead `Focus::LaunchPicker`
-    // modal — the assertion moved with the binding.)
-    assert_eq!(
-      action_for(Focus::RightPane, KeyCode::Char('a'), KeyModifiers::NONE),
-      Some(Action::OpenAdvancedPanel)
     );
   }
 
