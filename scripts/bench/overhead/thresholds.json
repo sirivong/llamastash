@@ -1,0 +1,26 @@
+{
+  "_schema": {
+    "_help": "Suite A two-tier overhead thresholds. Per-backend overrides nest under their backend name (cuda/rocm/metal/vulkan/cpu) and shadow the matching global key. Adjust after the first cross-host runs land observed variance.",
+    "advisory_meaning": "exit 0 with banner; worth a look",
+    "catastrophic_meaning": "exit 1; block the release"
+  },
+  "global": {
+    "advisory": {
+      "ttft_ms_delta": 30.0,
+      "decode_tps_delta_pct": 0.5,
+      "daemon_idle_rss_mb": 48.0
+    },
+    "catastrophic": {
+      "ttft_ms_delta": 200.0,
+      "decode_tps_delta_pct": 2.0,
+      "daemon_idle_rss_mb": 64.0
+    }
+  },
+  "per_backend": {
+    "metal": {
+      "advisory": {
+        "ttft_ms_delta": 50.0
+      }
+    }
+  }
+}
