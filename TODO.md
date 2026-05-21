@@ -24,6 +24,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ## v1+ release blockers
 
+- [ ] Init does not hand off to TUI
 - [ ] Make input filed a reusable component and use it for all text fields throughout the project. All text fields should have same behavior (e:edit, Esc:stop-edit, 2nd Esc:clear). The component need not have any styling (border etc) so that it can be styled as it is today for filter/chat/embed/rerank -> inputs, Advanced settings free text input (extras), HF search input etc. The component work can be done first in a separate commit.
 - [ ] Throughout the app, Esc should basically walk back on navigation tree unless an input is in edit mode. When input is in edit mode, Esc will switch it to non edit mode. The next Esc will clear the filed, the next Esc will walk back navigation (popups will close, panes will switch focus to last one). Change throughout app if needed for consistency. Make consistency work separate commit.
 - [ ] Download fails for many models in `init --only models` (for example -> init download: HF tree listing for `Qwen/Qwen3-Next-80B-A3B-Instruct` returned zero matching files)
