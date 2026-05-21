@@ -193,6 +193,28 @@ version = "1"
 default-features = false
 features = ["user-hooks"]
 
+# Criterion drives the proxy-overhead bench landed by Unit 7 of the
+# proxy-router plan. Default features pull in `rayon` + `plotters`
+# (the SVG plot backend) which would more than double the dev-dep
+# tree; `html_reports` is sufficient to produce the maintainer-
+# readable summary the runbook expects. The bench itself is feature-
+# gated under `test-fixtures` so plain `cargo build --benches`
+# without that feature is a no-op for downstream packagers.
+[dev-dependencies.criterion]
+version = "0.5"
+default-features = false
+features = ["html_reports"]
+
+# Bench harness for R160 latency validation. `harness = false` is
+# criterion's idiom: we hand-roll `main` in the bench file so
+# criterion's macros own the driver rather than libtest. See
+# `docs/runbooks/proxy-latency-bench.md` for the reproducible run
+# procedure.
+[[bench]]
+name = "proxy_overhead"
+harness = false
+required-features = ["test-fixtures"]
+
 [features]
 test-fixtures = []
 # Maintainer-only "user acceptance test" subcommand. Gates the
