@@ -22,7 +22,6 @@ import argparse
 import json
 import os
 import platform
-import shutil
 import socket
 import statistics
 import subprocess
@@ -31,6 +30,25 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+# The bench harness owns the per-backend GPU samplers; this script
+# imports them so both code paths sample through one implementation.
+# Add the repo root to sys.path so `scripts.bench.*` resolves when
+# this file is invoked as `python3 scripts/measure-overhead-band.py`
+# (the typical entry point — see scripts/measure-overhead-band.sh).
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
+
+from scripts.bench.end_to_end.gpu_sampler import (  # noqa: E402  pylint: disable=wrong-import-position
+  _sample_amd_rocm_smi,
+  _sample_amd_sysfs,
+  _sample_amd_total,
+  _sample_metal_proc,
+  _sample_nvidia_total,
+  autodetect_backend,
+  sample_for_backend,
+)
 
 # ---------------------------------------------------------------------
 # Constants — mirror ``src/init/recommender.rs``. Keep in sync if the
@@ -61,121 +79,12 @@ def estimate_peak_bytes(weights_bytes: int, ctx: int) -> int:
 
 
 # ---------------------------------------------------------------------
-# Backend samplers — each returns *total* GPU bytes in use right now
-# (per-process on Metal where unified-memory makes "total VRAM" useless).
-# Run loop takes deltas from baseline for the total-GPU samplers.
+# Backend samplers — extracted to scripts/bench/end_to_end/gpu_sampler.py
+# and re-imported above so this script and the cross-tool bench harness
+# share one implementation. The re-imported names are kept in scope so
+# the rest of this file's call sites (``sample_for_backend``,
+# ``autodetect_backend``) work unchanged.
 # ---------------------------------------------------------------------
-
-def _sample_nvidia_total(gpu_id: int) -> int:
-    out = subprocess.check_output(
-        [
-            "nvidia-smi",
-            "--query-gpu=memory.used",
-            "--format=csv,noheader,nounits",
-            f"--id={gpu_id}",
-        ],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    )
-    return int(out.strip()) * 1024 * 1024
-
-
-def _sample_amd_sysfs(gpu_id: int) -> int:
-    path = Path(f"/sys/class/drm/card{gpu_id}/device/mem_info_vram_used")
-    return int(path.read_text().strip())
-
-
-def _sample_amd_rocm_smi(gpu_id: int) -> int:
-    out = subprocess.check_output(
-        ["rocm-smi", "--showmeminfo", "vram", "--json"],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    )
-    data = json.loads(out)
-    # rocm-smi schema has varied across versions — try a few keys.
-    candidate_keys = (
-        "VRAM Total Used Memory (B)",
-        "VRAM Total Used Memory(B)",
-        "vram_used_memory",
-    )
-    target_card = f"card{gpu_id}"
-    for card, info in data.items():
-        if card.lower() != target_card:
-            continue
-        for key in candidate_keys:
-            if key in info:
-                return int(info[key])
-    raise RuntimeError(
-        f"rocm-smi: could not find VRAM-used field for {target_card}; "
-        f"keys seen: {list(data.get(target_card, {}).keys())}"
-    )
-
-
-def _sample_amd_total(gpu_id: int) -> int:
-    # Prefer sysfs — no root needed, immune to rocm-smi schema drift.
-    sysfs_path = Path(f"/sys/class/drm/card{gpu_id}/device/mem_info_vram_used")
-    if sysfs_path.exists():
-        return _sample_amd_sysfs(gpu_id)
-    if shutil.which("rocm-smi"):
-        return _sample_amd_rocm_smi(gpu_id)
-    raise RuntimeError(
-        "no AMD VRAM sampler available — install rocm-smi or run on Linux "
-        "with the AMDGPU driver loaded"
-    )
-
-
-def _sample_metal_proc(pid: int) -> int:
-    """RSS of the llama-server process — ≈ ``phys_footprint`` on macOS.
-
-    Unified memory means GPU-resident bytes show up in the process's
-    resident set, so the harness reads RSS directly via ``ps`` rather
-    than chasing a per-process VRAM counter (which doesn't exist).
-    """
-    out = subprocess.check_output(
-        ["ps", "-o", "rss=", "-p", str(pid)],
-        text=True,
-        stderr=subprocess.DEVNULL,
-    )
-    return int(out.strip()) * 1024  # ps reports KiB on macOS
-
-
-def sample_for_backend(backend: str, pid: int, gpu_id: int) -> int:
-    if backend == "cuda":
-        return _sample_nvidia_total(gpu_id)
-    if backend == "hip":
-        return _sample_amd_total(gpu_id)
-    if backend == "vulkan":
-        # Vulkan piggybacks on the vendor's accounting. Pick whichever
-        # sampler is wired up for the GPU under test.
-        if shutil.which("nvidia-smi"):
-            try:
-                return _sample_nvidia_total(gpu_id)
-            except subprocess.CalledProcessError:
-                pass
-        return _sample_amd_total(gpu_id)
-    if backend == "metal":
-        return _sample_metal_proc(pid)
-    raise ValueError(f"unknown backend: {backend}")
-
-
-def autodetect_backend() -> str:
-    if platform.system() == "Darwin":
-        return "metal"
-    if shutil.which("nvidia-smi"):
-        try:
-            subprocess.check_output(
-                ["nvidia-smi", "-L"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-            return "cuda"
-        except subprocess.CalledProcessError:
-            pass
-    if shutil.which("rocm-smi") or Path(
-        "/sys/class/drm/card0/device/mem_info_vram_used"
-    ).exists():
-        return "hip"
-    return "vulkan"
 
 
 # ---------------------------------------------------------------------
