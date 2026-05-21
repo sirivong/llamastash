@@ -110,6 +110,7 @@ fn model_row(m: &DiscoveredModel) -> Value {
       })
     }),
     "parse_error": m.parse_error,
+    "display_label": m.display_label,
   })
 }
 
@@ -148,6 +149,7 @@ mod tests {
       }),
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }
   }
 
@@ -247,6 +249,7 @@ mod tests {
       metadata: None,
       parse_error: Some("BadMagic".to_string()),
       split_siblings: Vec::new(),
+      display_label: None,
     };
     cat.upsert(m).await;
     let v = cat.to_list_response().await;

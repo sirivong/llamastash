@@ -272,6 +272,7 @@ async fn parse_into_model(
         metadata: hit.metadata,
         parse_error: hit.parse_error,
         split_siblings: siblings,
+        display_label: None,
       };
     }
   }
@@ -305,6 +306,7 @@ async fn parse_into_model(
     metadata: cached.metadata,
     parse_error: cached.parse_error,
     split_siblings: siblings,
+    display_label: None,
   }
 }
 

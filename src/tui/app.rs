@@ -1325,6 +1325,10 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
       .and_then(Value::as_str)
       .map(String::from),
     split_siblings: Vec::new(),
+    display_label: row
+      .get("display_label")
+      .and_then(Value::as_str)
+      .map(String::from),
   })
 }
 
@@ -1430,6 +1434,7 @@ mod tests {
       }),
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }
   }
 

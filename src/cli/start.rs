@@ -282,6 +282,7 @@ mod tests {
       mode_hint: mode_hint.map(str::to_string),
       parameter_label: Some("7B".into()),
       weights_bytes: Some(4_200_000_000),
+      display_label: None,
       parse_error: None,
     }
   }

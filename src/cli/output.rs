@@ -86,6 +86,7 @@ pub fn list_json(rows: &[CatalogRow]) -> Value {
         "mode_hint": r.mode_hint,
         "parameter_label": r.parameter_label,
         "weights_bytes": r.weights_bytes,
+        "display_label": r.display_label,
         "parse_error": r.parse_error,
       });
       if let Some(id) = &r.model_id {
@@ -422,6 +423,7 @@ mod tests {
       mode_hint: Some("chat".to_string()),
       parameter_label: Some("7B".to_string()),
       weights_bytes: Some(4_200_000_000),
+      display_label: None,
       parse_error: None,
     }
   }

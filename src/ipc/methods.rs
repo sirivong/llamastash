@@ -1556,6 +1556,7 @@ mod tests {
         }),
         parse_error: None,
         split_siblings: Vec::new(),
+      display_label: None,
       })
       .await;
 

@@ -55,6 +55,12 @@ pub struct DiscoveredModel {
   /// Sibling shards when this entry represents a split-GGUF set.
   /// Empty for a single-file model.
   pub split_siblings: Vec<PathBuf>,
+  /// Source-supplied human label preferred over `path.file_stem()` by
+  /// the TUI / CLI display layers. Ollama populates this with the
+  /// resolved `<name>:<tag>` so users see `gemma4:e2b` instead of the
+  /// content-addressed blob hash. `None` for sources where the file
+  /// stem is already meaningful (HF cache, LM Studio, user paths).
+  pub display_label: Option<String>,
 }
 
 /// Provenance label for a discovered model. The TUI groups by source

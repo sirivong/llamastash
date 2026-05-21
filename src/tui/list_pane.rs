@@ -328,6 +328,13 @@ fn surface_state_for(
 }
 
 fn display_name(m: &DiscoveredModel) -> String {
+  // `display_label` is populated by sources where the file basename
+  // is hostile (Ollama's content-addressed `sha256-<hex>` blobs). For
+  // every other source (HF cache, LM Studio, user paths) it stays
+  // `None` and we keep the historic file_stem rendering.
+  if let Some(label) = &m.display_label {
+    return label.clone();
+  }
   m.path
     .file_stem()
     .and_then(|s| s.to_str())
@@ -887,6 +894,7 @@ mod tests {
       }),
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }
   }
 

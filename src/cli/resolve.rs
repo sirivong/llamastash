@@ -39,12 +39,23 @@ pub struct CatalogRow {
   /// when the file is metadata-only or the header parse failed. Used
   /// by `list_human` for the SIZE column.
   pub weights_bytes: Option<u64>,
+  /// Source-supplied human label preferred over the path's basename
+  /// when set. Currently populated only for Ollama rows, where the
+  /// content-addressed blob filename (`sha256-<hex>`) is hostile to
+  /// scanning by eye.
+  pub display_label: Option<String>,
   pub parse_error: Option<String>,
 }
 
 impl CatalogRow {
-  /// File name (basename) used for human matching and table rendering.
+  /// Friendly label for human matching and table rendering.
+  /// `display_label` (Ollama's `<name>:<tag>`) wins when set; falls
+  /// back to the path basename so non-Ollama rows render exactly as
+  /// they did before R1.
   pub fn name(&self) -> String {
+    if let Some(label) = &self.display_label {
+      return label.clone();
+    }
     std::path::Path::new(&self.path)
       .file_name()
       .map(|s| s.to_string_lossy().into_owned())
@@ -145,6 +156,10 @@ fn parse_catalog_row(row: Value) -> CatalogRow {
     weights_bytes: metadata
       .and_then(|m| m.get("weights_bytes"))
       .and_then(Value::as_u64),
+    display_label: row
+      .get("display_label")
+      .and_then(Value::as_str)
+      .map(str::to_string),
     parse_error,
   }
 }
@@ -430,6 +445,7 @@ mod tests {
       mode_hint: Some("chat".to_string()),
       parameter_label: Some("7B".to_string()),
       weights_bytes: Some(4_200_000_000),
+      display_label: None,
       parse_error: None,
     }
   }

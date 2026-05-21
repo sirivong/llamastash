@@ -121,6 +121,7 @@ pub fn enumerate(root: PathBuf) -> mpsc::Receiver<DiscoveredModel> {
           metadata: Some(summarise_metadata(&read.header)),
           parse_error: None,
           split_siblings: Vec::new(),
+          display_label: Some(resolved_name_tag.clone()),
         },
         Ok(Err(e)) => DiscoveredModel {
           path: blob_path.clone(),
@@ -132,6 +133,7 @@ pub fn enumerate(root: PathBuf) -> mpsc::Receiver<DiscoveredModel> {
           metadata: None,
           parse_error: Some(format!("{resolved_name_tag}: {e}")),
           split_siblings: Vec::new(),
+          display_label: Some(resolved_name_tag.clone()),
         },
         Err(join_err) => {
           log::warn!("ollama parser task panicked: {join_err}");

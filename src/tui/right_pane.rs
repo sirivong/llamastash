@@ -633,6 +633,7 @@ mod tests {
       metadata: None,
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }
   }
 
@@ -930,6 +931,7 @@ mod tests {
       metadata: None,
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     // Row 0 is the table header, row 1 is the directory group
@@ -953,6 +955,7 @@ mod tests {
       metadata: None,
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }];
     // Row 0 is the table header, row 1 is the directory group
     // header, row 2 is the model.
@@ -1012,6 +1015,7 @@ mod tests {
       metadata: None,
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     app.list_cursor = 2;
@@ -1079,6 +1083,7 @@ mod tests {
       metadata: None,
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }];
     app.managed = vec![ready_managed("qwen", None, None)];
     app.list_cursor = 2;

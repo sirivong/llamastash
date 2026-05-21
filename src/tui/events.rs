@@ -3289,6 +3289,7 @@ mod tests {
       metadata: None,
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }];
     app.list_cursor = 2;
     let evt = Event::Mouse(MouseEvent {
@@ -3437,6 +3438,7 @@ mod tests {
       }),
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }];
     app.go_top();
     // Open picker and tweak ctx + reasoning so we can assert they
@@ -3501,6 +3503,7 @@ mod tests {
       }),
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }];
     app.go_top();
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
@@ -3548,6 +3551,7 @@ mod tests {
       }),
       parse_error: None,
       split_siblings: Vec::new(),
+      display_label: None,
     }
   }
 
