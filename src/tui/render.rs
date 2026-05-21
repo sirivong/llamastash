@@ -18,7 +18,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::theme::Palette;
@@ -141,6 +141,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
   }
   render_body(frame, chunks[idx], app, &palette);
 
+  // Transient toast bar — paints on top of the body so copy / theme /
+  // refusal confirmations are actually visible. The toast field has
+  // existed since Unit 6 but the kdash refactor (commit 5005b4c)
+  // removed the bottom help-bar slot that used to display it; this
+  // restores a single-line floating bar above the bottom edge.
+  // Drawn before the modal overlays so a confirm/help popup still
+  // wins focus while it is open.
+  render_toast(frame, area, app, &palette);
+
   // Overlays last. The launch picker no longer has a modal — the
   // form lives inline in the right pane's Settings tab. The
   // `launch_picker` module still owns the form state struct, but no
@@ -158,6 +167,42 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     confirm_overlay::render(frame, area, app, action, &palette);
   }
   app.clear_rows_cache();
+}
+
+/// Draw a single-line floating toast near the bottom of `area`,
+/// centered horizontally. No-op when no toast is set. The line is
+/// painted on the accent background so it pops over whatever panel
+/// it lands on; `Clear` wipes the underlying cells first so the
+/// panel borders don't bleed through.
+fn render_toast(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
+  let Some(msg) = app.toast_message() else {
+    return;
+  };
+  // Truncate aggressively rather than wrap — a multi-line toast
+  // would push the body content visibly upward. Reserve 4 cells of
+  // margin so the bar never butts against the edges.
+  let max_inner = area.width.saturating_sub(4) as usize;
+  if max_inner < 8 {
+    return;
+  }
+  let body: String = if msg.chars().count() > max_inner {
+    let mut truncated: String = msg.chars().take(max_inner.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+  } else {
+    msg.to_string()
+  };
+  let text = format!(" {body} ");
+  let w = text.chars().count() as u16;
+  let x = area.x + area.width.saturating_sub(w) / 2;
+  let y = area.y + area.height.saturating_sub(2);
+  let rect = Rect::new(x, y, w, 1);
+  frame.render_widget(Clear, rect);
+  let style = Style::default()
+    .bg(palette.accent)
+    .fg(palette.on_accent)
+    .add_modifier(Modifier::BOLD);
+  frame.render_widget(Paragraph::new(text).style(style), rect);
 }
 
 /// Placeholder shown when the terminal is below the `MIN_RENDER_*`

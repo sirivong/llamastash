@@ -608,6 +608,22 @@ fn narrow_terminal_does_not_crash_render() {
 }
 
 #[test]
+fn show_toast_paints_visible_bar_near_bottom() {
+  // Regression: the kdash refactor (5005b4c) removed the bottom
+  // help-bar toast slot and nothing else painted the field, so every
+  // copy / theme-cycle / refusal toast was silently invisible. The
+  // current renderer floats a single-line accent bar above the
+  // bottom edge — verify the text actually lands in the frame.
+  let mut app = App::new(AppOptions::default());
+  app.show_toast("copied URL via x11");
+  let frame = render_to_string(&mut app, 130, 24);
+  assert!(
+    frame.contains("copied URL via x11"),
+    "toast text missing from rendered frame:\n{frame}"
+  );
+}
+
+#[test]
 fn narrow_terminal_truncates_long_model_names_with_ellipsis() {
   // Plan edge case: a name wider than the list pane should render
   // with `…` rather than wrapping. We use a synthetic super-long

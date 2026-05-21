@@ -189,6 +189,13 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         &mut chips,
         app.hint(Focus::RightPane, Action::ToggleAutoScroll),
       );
+      // `c` is tab-aware: copies the full log buffer when the Logs
+      // tab is up, otherwise yanks the curl one-liner. Surface a
+      // `c:copy` chip so the binding is discoverable here.
+      push(
+        &mut chips,
+        app.hint_with(Focus::RightPane, Action::YankCurl, "copy"),
+      );
     }
     (_, RightTab::Chat | RightTab::Embed | RightTab::Rerank) => {
       push(&mut chips, app.hint(Focus::RightPane, Action::EnterEdit));
@@ -545,7 +552,7 @@ mod tests {
     // Navigation focuses surface the entry-point keystroke per tab.
     assert_eq!(
       bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Logs)),
-      vec!["s:auto-scroll".to_string()]
+      vec!["s:auto-scroll".to_string(), "c:copy".to_string()]
     );
     assert_eq!(
       bottom_hint_chips(&app_with_focus(Focus::RightPane, RightTab::Chat)),
