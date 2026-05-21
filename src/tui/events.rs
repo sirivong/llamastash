@@ -1544,6 +1544,16 @@ pub enum RefreshTick {
     lines: Vec<String>,
   },
   Disconnected,
+  /// Failure surfaced by the writer task after dispatching a
+  /// `WriterCmd`. The UI thread renders these as toasts with an
+  /// actionable hint where one is available. Without this signal a
+  /// failed `start_model` (e.g. `llama-server` not configured)
+  /// would only land in the daemon log — the user would see
+  /// "launch dispatched" and nothing else.
+  WriterError {
+    method: &'static str,
+    message: String,
+  },
 }
 
 pub fn spawn_refresher(socket: PathBuf) -> mpsc::Receiver<RefreshTick> {
@@ -1609,6 +1619,7 @@ const WRITER_CHANNEL_CAPACITY: usize = 64;
 pub fn spawn_writer(
   socket: PathBuf,
   daemon_opts: Option<crate::daemon::DaemonOptions>,
+  feedback: Option<mpsc::Sender<RefreshTick>>,
 ) -> mpsc::Sender<WriterCmd> {
   let (tx, mut rx) = mpsc::channel::<WriterCmd>(WRITER_CHANNEL_CAPACITY);
   tokio::spawn(async move {
@@ -1620,13 +1631,32 @@ pub fn spawn_writer(
       let mut client = match Client::connect(&socket).await {
         Ok(c) => c,
         Err(e) => {
-          log::warn!("writer connect failed: {e}");
+          let message = format!("writer connect failed: {e}");
+          log::warn!("{message}");
+          if let Some(fb) = &feedback {
+            // `cmd` is consumed by `encode_writer_cmd` below, but
+            // connect-time we never reached that — surface a generic
+            // method label so the toast still tells the user
+            // something happened.
+            let _ = fb
+              .send(RefreshTick::WriterError {
+                method: "connect",
+                message,
+              })
+              .await;
+          }
           continue;
         }
       };
       let (method, params) = encode_writer_cmd(cmd);
       if let Err(e) = client.call(method, Some(params)).await {
-        log::warn!("writer call {method} failed: {e}");
+        let message = format!("{e}");
+        log::warn!("writer call {method} failed: {message}");
+        if let Some(fb) = &feedback {
+          let _ = fb
+            .send(RefreshTick::WriterError { method, message })
+            .await;
+        }
       }
     }
   });
@@ -1765,7 +1795,13 @@ pub async fn run(
   let mut refresh_rx = spawn_refresher(socket.clone());
   let current_launch = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
   let mut logs_rx = spawn_logs_poller(socket.clone(), current_launch.clone());
-  let writer_tx = spawn_writer(socket, daemon_opts);
+  // Feedback channel for writer-task failures (e.g. `start_model`
+  // rejected because `llama-server` isn't configured). The writer
+  // sends `RefreshTick::WriterError` here; the run-loop drains it
+  // alongside `refresh_rx` / `logs_rx`.
+  let (writer_feedback_tx, mut writer_feedback_rx) =
+    mpsc::channel::<RefreshTick>(WRITER_CHANNEL_CAPACITY);
+  let writer_tx = spawn_writer(socket, daemon_opts, Some(writer_feedback_tx));
 
   loop {
     // Mirror the focused launch id to the logs poller so the next
@@ -1786,6 +1822,9 @@ pub async fn run(
       apply_refresh(&mut app, tick);
     }
     while let Ok(tick) = logs_rx.try_recv() {
+      apply_refresh(&mut app, tick);
+    }
+    while let Ok(tick) = writer_feedback_rx.try_recv() {
       apply_refresh(&mut app, tick);
     }
     drain_chat_stream(&mut app);
@@ -1848,6 +1887,26 @@ fn apply_refresh(app: &mut App, tick: RefreshTick) {
     RefreshTick::Disconnected => {
       app.daemon_connected = false;
     }
+    RefreshTick::WriterError { method, message } => {
+      app.show_toast(writer_error_toast(method, &message));
+    }
+  }
+}
+
+/// Build a user-facing toast for a writer-task failure. `start_model`
+/// gets a dedicated hint when the daemon reports the launch
+/// environment isn't configured — mirrors `cli::start`'s message so
+/// the TUI and CLI guide users to the same fix.
+fn writer_error_toast(method: &str, message: &str) -> String {
+  let lower = message.to_lowercase();
+  let needs_binary_hint = method == "start_model"
+    && (lower.contains("launch environment") || lower.contains("llama-server"));
+  if needs_binary_hint {
+    format!(
+      "launch failed: {message}\nhint: set LLAMASTASH_LLAMA_SERVER or pass --llama-server"
+    )
+  } else {
+    format!("{method} failed: {message}")
   }
 }
 
@@ -3316,6 +3375,45 @@ mod tests {
       msg.contains("nothing to yank") || msg.contains("clipboard"),
       "yank toast must explain why: {msg}"
     );
+  }
+
+  #[test]
+  fn writer_error_toast_adds_llama_server_hint_for_start_model_env_failure() {
+    let toast = writer_error_toast(
+      "start_model",
+      "daemon launch environment not configured (binary / port range / log dir missing)",
+    );
+    assert!(toast.starts_with("launch failed:"), "got {toast:?}");
+    assert!(
+      toast.contains("LLAMASTASH_LLAMA_SERVER"),
+      "missing env hint: {toast:?}"
+    );
+  }
+
+  #[test]
+  fn writer_error_toast_skips_llama_server_hint_for_unrelated_method() {
+    let toast = writer_error_toast("favorite_add", "permission denied");
+    assert_eq!(toast, "favorite_add failed: permission denied");
+  }
+
+  #[test]
+  fn writer_error_toast_skips_hint_for_start_model_failures_unrelated_to_binary() {
+    let toast = writer_error_toast("start_model", "port allocation exhausted");
+    assert_eq!(toast, "start_model failed: port allocation exhausted");
+  }
+
+  #[test]
+  fn apply_refresh_writer_error_renders_a_toast() {
+    let mut app = App::new(crate::tui::app::AppOptions::default());
+    apply_refresh(
+      &mut app,
+      RefreshTick::WriterError {
+        method: "start_model",
+        message: "daemon launch environment not configured".into(),
+      },
+    );
+    let toast = app.toast_message().expect("toast must be set");
+    assert!(toast.contains("launch failed"), "got {toast:?}");
   }
 
   #[test]
