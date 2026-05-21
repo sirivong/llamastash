@@ -51,54 +51,54 @@ impl PickerField {
   }
 }
 
-/// Inline edit state — set while the user is typing a value for the
-/// focused row. `commit` validates the buffer; on success the value
-/// lands on the appropriate `TypedKnobs` field and the edit closes.
+/// Inline-edit state owned by [`LaunchPickerState`].
+///
+/// The buffer and modal `editing` flag live in `inline_edit`
+/// ([`InputField`]) so the typed-knob editor shares the
+/// `e:edit / Esc:walk-back / Enter:Submit` contract with every
+/// other text input in the TUI. The wrapper carries the two extra
+/// pieces of state `InputField` doesn't model:
+///
+/// - `field` — which `PickerField` the open edit is editing (numeric
+///   / enum knob or the extras row), so `commit_inline_edit` knows
+///   where to write the parsed value.
+/// - `error` — the inline parse / validation error rendered under
+///   the row when commit fails.
+///
+/// Both reset when the edit closes (either via successful commit
+/// or `Esc` walk-back).
 #[derive(Debug, Clone, Default)]
 pub struct InlineEdit {
   pub field: Option<PickerField>,
-  pub buffer: String,
-  pub cursor: usize,
-  /// Inline error rendered under the row when commit fails.
+  pub input: crate::tui::input_field::InputField,
   pub error: Option<String>,
 }
 
 impl InlineEdit {
+  /// Open the edit on `field`, seed the buffer with `initial`, and
+  /// enter edit mode so subsequent keystrokes append to the buffer.
   pub fn open(&mut self, field: PickerField, initial: String) {
     self.field = Some(field);
-    self.cursor = initial.len();
-    self.buffer = initial;
+    self.input.set_text(initial);
+    self.input.enter_edit();
     self.error = None;
   }
 
+  /// Close the edit — clear the field marker, drop the buffer, exit
+  /// edit mode, and clear any stale error.
   pub fn close(&mut self) {
     self.field = None;
-    self.buffer.clear();
-    self.cursor = 0;
+    self.input.clear();
+    self.input.exit_edit();
     self.error = None;
   }
 
+  /// True while the user is actively typing into the buffer (the
+  /// edit is open *and* `InputField` reports edit mode). Used by
+  /// the event router to send keys to the input instead of the
+  /// outer keymap.
   pub fn is_open(&self) -> bool {
-    self.field.is_some()
-  }
-
-  pub fn insert(&mut self, ch: char) {
-    self.buffer.insert(self.cursor, ch);
-    self.cursor += ch.len_utf8();
-    self.error = None;
-  }
-
-  pub fn backspace(&mut self) {
-    if self.cursor == 0 {
-      return;
-    }
-    let mut new_cursor = self.cursor - 1;
-    while !self.buffer.is_char_boundary(new_cursor) {
-      new_cursor -= 1;
-    }
-    self.buffer.replace_range(new_cursor..self.cursor, "");
-    self.cursor = new_cursor;
-    self.error = None;
+    self.field.is_some() && self.input.is_editing()
   }
 }
 
@@ -118,11 +118,15 @@ pub struct LaunchPickerState {
   pub sources: BTreeMap<KnobField, LayerLabel>,
   /// Free-form argv tail forwarded to llama-server.
   pub extras: Vec<std::ffi::OsString>,
-  /// Edit buffer for the extras row when the user opens it via `e`.
-  pub extras_buffer: String,
-  pub extras_cursor: usize,
-  pub extras_editing: bool,
-  /// Inline edit state for numeric / enum rows.
+  /// Modal text-input for the extras row (`is_editing()` replaces
+  /// the bespoke `extras_editing` bool; `buffer()` replaces the raw
+  /// string + cursor pair). Shares the `e:edit / Esc:walk-back /
+  /// Enter:Submit` contract with every other text input in the TUI.
+  pub extras_input: crate::tui::input_field::InputField,
+  /// Inline edit state for numeric / enum rows. Wraps an
+  /// [`InputField`] plus the `PickerField` marker so the commit path
+  /// knows which row to write back to, and an optional parse-error
+  /// string rendered under the row.
   pub inline_edit: InlineEdit,
   pub field: PickerField,
   pub active_instances: usize,
@@ -143,9 +147,7 @@ impl LaunchPickerState {
       resolved: TypedKnobs::default(),
       sources: BTreeMap::new(),
       extras: Vec::new(),
-      extras_buffer: String::new(),
-      extras_cursor: 0,
-      extras_editing: false,
+      extras_input: crate::tui::input_field::InputField::default(),
       inline_edit: InlineEdit::default(),
       field: PickerField::Knob(KnobField::Ctx),
       active_instances: 0,

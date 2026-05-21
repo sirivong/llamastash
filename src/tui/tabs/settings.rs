@@ -145,7 +145,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     {
       lines.push(inline_edit_row(
         knob_label(field),
-        &picker_view.inline_edit.buffer,
+        picker_view.inline_edit.input.buffer(),
         focused,
         palette,
       ));
@@ -172,10 +172,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   if extras_focused {
     focused_line = Some(lines.len() as u16);
   }
-  if picker_view.extras_editing {
+  if picker_view.extras_input.is_editing() {
     lines.push(inline_edit_row(
       "extras",
-      &picker_view.extras_buffer,
+      picker_view.extras_input.buffer(),
       extras_focused,
       palette,
     ));

@@ -237,14 +237,14 @@ fn open_focused_inline_edit(app: &mut App) {
       picker.inline_edit.open(PickerField::Knob(field), initial);
     }
     PickerField::Extras => {
-      picker.extras_buffer = picker
+      let joined = picker
         .extras
         .iter()
         .map(|s| s.to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join(" ");
-      picker.extras_cursor = picker.extras_buffer.len();
-      picker.extras_editing = true;
+      picker.extras_input.set_text(joined);
+      picker.extras_input.enter_edit();
     }
   }
 }
@@ -257,22 +257,22 @@ fn commit_inline_edit(app: &mut App) -> bool {
   let Some(picker) = app.launch_picker.as_mut() else {
     return false;
   };
-  if picker.extras_editing {
+  if picker.extras_input.is_editing() {
     let extras: Vec<std::ffi::OsString> = picker
-      .extras_buffer
+      .extras_input
+      .buffer()
       .split_whitespace()
       .map(std::ffi::OsString::from)
       .collect();
     picker.extras = extras;
-    picker.extras_editing = false;
-    picker.extras_buffer.clear();
-    picker.extras_cursor = 0;
+    picker.extras_input.clear();
+    picker.extras_input.exit_edit();
     return true;
   }
   let Some(field) = picker.inline_edit.field else {
     return false;
   };
-  let buffer = picker.inline_edit.buffer.trim().to_string();
+  let buffer = picker.inline_edit.input.buffer().trim().to_string();
   // Empty buffer == "reset this row to inherit from the resolver
   // chain" — the same semantics as Backspace on the row, just reached
   // through `e → delete → Enter` instead of a single keypress. We
@@ -339,63 +339,53 @@ fn settings_inline_edit_open(app: &App) -> bool {
     && app
       .launch_picker
       .as_ref()
-      .map(|p| p.inline_edit.is_open() || p.extras_editing)
+      .map(|p| p.inline_edit.is_open() || p.extras_input.is_editing())
       .unwrap_or(false)
 }
 
 fn handle_settings_inline_edit(app: &mut App, key: KeyEvent) {
-  // Resolve the cancel key through the chat-input bindings so custom
-  // `exit_edit` overrides (the same lever the chip strip surfaces)
-  // flow through to behaviour here too. Default keymap binds
-  // `ChatInput::ExitEdit` to `Esc`, matching the legacy hardcode.
-  let is_exit_edit = matches!(
-    app.action_for(Focus::ChatInput, key.code, key.modifiers),
-    Some(Action::ExitEdit)
-  );
+  use crate::tui::input_field::InputOutcome;
   let Some(picker) = app.launch_picker.as_mut() else {
     return;
   };
-  if is_exit_edit {
-    if picker.extras_editing {
-      picker.extras_editing = false;
-      picker.extras_buffer.clear();
-      picker.extras_cursor = 0;
-    } else {
-      picker.inline_edit.close();
+  // Route the key through the same `InputField` modal state machine
+  // that drives chat / embed / rerank / HF search / filter — so the
+  // typed-knob inline edit honours the same `e:edit / Esc:walk-back /
+  // Enter:Submit` contract uniformly.
+  //
+  // The error field is sticky from the previous commit attempt;
+  // any keystroke that the input handles (a fresh char, backspace,
+  // exit-edit) clears it so the user sees their next attempt
+  // unobstructed.
+  let outcome = if picker.extras_input.is_editing() {
+    picker.extras_input.handle_key(key)
+  } else {
+    let r = picker.inline_edit.input.handle_key(key);
+    if matches!(r, InputOutcome::Handled) {
+      picker.inline_edit.error = None;
     }
-    return;
-  }
-  // Backspace deletes; Char inserts. Other keys are swallowed so the
-  // buffer doesn't see global hotkeys like arrows.
-  match key.code {
-    KeyCode::Backspace => {
-      if picker.extras_editing {
-        if picker.extras_cursor > 0 {
-          let mut nc = picker.extras_cursor - 1;
-          while !picker.extras_buffer.is_char_boundary(nc) {
-            nc -= 1;
-          }
-          picker
-            .extras_buffer
-            .replace_range(nc..picker.extras_cursor, "");
-          picker.extras_cursor = nc;
+    r
+  };
+  match outcome {
+    InputOutcome::Handled => {}
+    InputOutcome::Submit => {
+      commit_inline_edit(app);
+    }
+    InputOutcome::PassThrough => {
+      // `InputField` reports PassThrough for `Esc` once the buffer
+      // is empty / edit mode is already off — for the picker that
+      // means "close the inline edit entirely". The extras row also
+      // walks back to the picker, not to the model list, since the
+      // picker is still staged.
+      if matches!(key.code, KeyCode::Esc) {
+        if picker.extras_input.is_editing() {
+          picker.extras_input.exit_edit();
+          picker.extras_input.clear();
+        } else {
+          picker.inline_edit.close();
         }
-      } else {
-        picker.inline_edit.backspace();
       }
     }
-    KeyCode::Char(ch) => {
-      if picker.extras_editing {
-        // Soft cap to keep the buffer manageable.
-        if picker.extras_buffer.len() < 512 {
-          picker.extras_buffer.insert(picker.extras_cursor, ch);
-          picker.extras_cursor += ch.len_utf8();
-        }
-      } else {
-        picker.inline_edit.insert(ch);
-      }
-    }
-    _ => {}
   }
 }
 

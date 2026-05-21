@@ -260,7 +260,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<String> {
         let inline_editing = app
           .launch_picker
           .as_ref()
-          .map(|p| p.inline_edit.is_open() || p.extras_editing)
+          .map(|p| p.inline_edit.is_open() || p.extras_input.is_editing())
           .unwrap_or(false);
         if inline_editing {
           push(
@@ -703,7 +703,7 @@ mod tests {
     {
       let picker = app.launch_picker.as_mut().unwrap();
       picker.inline_edit.close();
-      picker.extras_editing = true;
+      picker.extras_input.enter_edit();
     }
     let extras = bottom_hint_chips(&app);
     assert!(extras.contains(&"Esc:clear".to_string()));
