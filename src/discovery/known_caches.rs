@@ -127,12 +127,30 @@ pub fn default_huggingface_paths(home: &Path) -> Vec<PathBuf> {
   paths
 }
 
-/// Ollama stores models under `$HOME/.ollama/models` by default. The
-/// blob files are content-addressed (hash-named); the scanner won't
-/// pick those up under a `.gguf` extension filter on its own — the
-/// dedicated `ollama` enumerator handles that wiring.
+/// Ollama stores models under `$HOME/.ollama/models` by default; the
+/// `OLLAMA_MODELS` env var (documented at
+/// <https://github.com/ollama/ollama/blob/main/docs/faq.md#how-do-i-set-them-to-a-different-location>)
+/// lets users relocate the cache to a roomier disk. We honour the env
+/// var ahead of the default so a user with `OLLAMA_MODELS=/mnt/work/
+/// ollama-models` (and no `~/.ollama/models`) sees their Ollama models
+/// in the catalog.
+///
+/// Both paths are returned when set so a user who switched mid-flight
+/// (leaving stale models in the home location) still sees the
+/// historic set. `default_set`'s dedup keeps order stable.
+///
+/// The blob files are content-addressed (hash-named); the scanner
+/// won't pick them up under a `.gguf` extension filter on its own —
+/// the dedicated `ollama` enumerator handles that wiring.
 pub fn default_ollama_paths(home: &Path) -> Vec<PathBuf> {
-  vec![home.join(".ollama/models")]
+  let mut paths = Vec::with_capacity(2);
+  if let Some(env) = std::env::var_os("OLLAMA_MODELS") {
+    if !env.is_empty() {
+      paths.push(PathBuf::from(env));
+    }
+  }
+  paths.push(home.join(".ollama/models"));
+  paths
 }
 
 /// LM Studio's defaults across platforms. Plan: probe `~/.lmstudio/
@@ -218,6 +236,49 @@ mod tests {
     assert!(sources.contains(&ModelSource::HuggingFace));
     assert!(!sources.contains(&ModelSource::Ollama), "ollama disabled");
     assert!(sources.contains(&ModelSource::LmStudio));
+  }
+
+  #[test]
+  fn ollama_paths_honor_env_var_with_home_default_as_fallback() {
+    // Single test for both scenarios so two parallel test threads
+    // don't race on the shared OLLAMA_MODELS env var. Serialised
+    // through `cli::test_lock` so other env-mutating tests in the
+    // suite don't trample this one mid-flight either.
+    let _lock = crate::cli::test_lock::serialize();
+    let saved = std::env::var_os("OLLAMA_MODELS");
+
+    // Env set → env path comes first, home default still appears
+    // (so a user mid-migration with stale models in `~/.ollama/models`
+    // doesn't lose visibility).
+    std::env::set_var("OLLAMA_MODELS", "/mnt/ollama-models");
+    let paths = default_ollama_paths(Path::new("/home/user"));
+    assert_eq!(
+      paths.first().map(PathBuf::as_path),
+      Some(Path::new("/mnt/ollama-models"))
+    );
+    assert!(
+      paths.contains(&PathBuf::from("/home/user/.ollama/models")),
+      "home default must still appear: {paths:?}"
+    );
+
+    // Env unset → home default only.
+    std::env::remove_var("OLLAMA_MODELS");
+    assert_eq!(
+      default_ollama_paths(Path::new("/home/user")),
+      vec![PathBuf::from("/home/user/.ollama/models")]
+    );
+
+    // Env present but empty → treated as unset.
+    std::env::set_var("OLLAMA_MODELS", "");
+    assert_eq!(
+      default_ollama_paths(Path::new("/home/user")),
+      vec![PathBuf::from("/home/user/.ollama/models")]
+    );
+
+    match saved {
+      Some(s) => std::env::set_var("OLLAMA_MODELS", s),
+      None => std::env::remove_var("OLLAMA_MODELS"),
+    }
   }
 
   #[test]

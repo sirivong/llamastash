@@ -1653,9 +1653,7 @@ pub fn spawn_writer(
         let message = format!("{e}");
         log::warn!("writer call {method} failed: {message}");
         if let Some(fb) = &feedback {
-          let _ = fb
-            .send(RefreshTick::WriterError { method, message })
-            .await;
+          let _ = fb.send(RefreshTick::WriterError { method, message }).await;
         }
       }
     }
@@ -1902,9 +1900,7 @@ fn writer_error_toast(method: &str, message: &str) -> String {
   let needs_binary_hint = method == "start_model"
     && (lower.contains("launch environment") || lower.contains("llama-server"));
   if needs_binary_hint {
-    format!(
-      "launch failed: {message}\nhint: set LLAMASTASH_LLAMA_SERVER or pass --llama-server"
-    )
+    format!("launch failed: {message}\nhint: set LLAMASTASH_LLAMA_SERVER or pass --llama-server")
   } else {
     format!("{method} failed: {message}")
   }

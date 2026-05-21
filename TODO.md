@@ -24,7 +24,6 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 - [ ] Init does not hand off to TUI after all steps.
 - [ ] Some HF downloaded models fail to start.
-- [ ] Ollama models dont show up
 
 ### Release checklist
 
