@@ -298,9 +298,15 @@ fn commit_inline_edit(app: &mut App) -> bool {
     picker.inline_edit.close();
     return true;
   }
+  // Exhaustive on `KnobField` (no wildcard) so adding a new knob
+  // fails to compile here instead of silently swallowing commits
+  // through a `_ => Ok(())` arm — the bug `ctx` hit before this
+  // refactor, where the u32 list missed `Ctx` and Enter quietly
+  // dropped the typed value.
   let result: Result<(), String> = match field {
     PickerField::Knob(k) => match k {
-      KnobField::NGpuLayers
+      KnobField::Ctx
+      | KnobField::NGpuLayers
       | KnobField::Threads
       | KnobField::Parallel
       | KnobField::BatchSize
@@ -327,9 +333,18 @@ fn commit_inline_edit(app: &mut App) -> bool {
           Err(format!("expected one of {}", KV_CACHE_TYPES.join(", ")))
         }
       }
-      _ => Ok(()),
+      // Booleans don't have an editable buffer (the `is_editable()`
+      // guard in `open_focused_inline_edit` blocks `e:edit` on these
+      // rows). Reaching here means that guard drifted out of sync.
+      KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
+        debug_assert!(
+          false,
+          "boolean knob {k:?} reached commit_inline_edit despite is_editable() guard"
+        );
+        Ok(())
+      }
     },
-    _ => Ok(()),
+    PickerField::Extras => Ok(()),
   };
   match result {
     Ok(()) => {
@@ -3911,6 +3926,46 @@ mod tests {
       "`e` on Settings must stage the launch picker over a running launch"
     );
     assert_eq!(app.focus, Focus::RightPane, "focus must stay on the pane");
+  }
+
+  #[test]
+  fn enter_after_editing_ctx_writes_typed_value_to_user_knobs() {
+    // Regression: ctx commit silently dropped the typed value because
+    // the u32 parse arm in `commit_inline_edit` missed `KnobField::Ctx`
+    // — it fell through to the catch-all `_ => Ok(())` arm, the edit
+    // closed, and the picker re-rendered the resolved (default) value.
+    // The fix makes the inner match exhaustive on `KnobField` so a
+    // future drift fails to compile rather than silently swallowing
+    // user input.
+    use crate::tui::launch_picker::PickerField;
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+      app.launch_picker.as_ref().expect("picker").field,
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
+      "default focus lands on the ctx row"
+    );
+    // `e` opens inline edit; type a fresh value; Enter commits.
+    pump_input(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE));
+    {
+      let edit = &mut app.launch_picker.as_mut().expect("picker open").inline_edit;
+      edit.input.clear();
+      edit.input.set_text("65536");
+      edit.input.enter_edit();
+    }
+    pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
+    let committed = app.launch_picker.as_ref().expect("picker still staged");
+    assert_eq!(
+      committed.user_knobs.ctx,
+      Some(65536),
+      "ctx commit must write the typed value to user_knobs, not silently drop it"
+    );
+    assert!(
+      !committed.inline_edit.is_open(),
+      "successful commit closes the inline edit"
+    );
   }
 
   #[test]
