@@ -236,7 +236,10 @@ fn open_focused_inline_edit(app: &mut App) {
         // The match has to stay exhaustive on `KnobField`; reaching
         // this arm means `is_editable` and `KnobField` drifted apart.
         KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
-          debug_assert!(false, "boolean knob {field:?} reached open_focused_inline_edit despite is_editable() guard");
+          debug_assert!(
+            false,
+            "boolean knob {field:?} reached open_focused_inline_edit despite is_editable() guard"
+          );
           return;
         }
       };

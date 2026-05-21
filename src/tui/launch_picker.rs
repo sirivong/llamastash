@@ -66,10 +66,7 @@ impl PickerField {
     match self {
       PickerField::Extras => true,
       PickerField::Knob(k) => match k {
-        KnobField::Reasoning
-        | KnobField::FlashAttn
-        | KnobField::Mlock
-        | KnobField::NoMmap => false,
+        KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => false,
         KnobField::Ctx
         | KnobField::NGpuLayers
         | KnobField::Threads
