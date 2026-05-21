@@ -281,6 +281,7 @@ mod tests {
       native_ctx: Some(8192),
       mode_hint: mode_hint.map(str::to_string),
       parameter_label: Some("7B".into()),
+      weights_bytes: Some(4_200_000_000),
       parse_error: None,
     }
   }

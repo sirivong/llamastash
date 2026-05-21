@@ -35,6 +35,10 @@ pub struct CatalogRow {
   pub native_ctx: Option<u64>,
   pub mode_hint: Option<String>,
   pub parameter_label: Option<String>,
+  /// GGUF weights footprint (sum of per-tensor storage bytes). `None`
+  /// when the file is metadata-only or the header parse failed. Used
+  /// by `list_human` for the SIZE column.
+  pub weights_bytes: Option<u64>,
   pub parse_error: Option<String>,
 }
 
@@ -138,6 +142,9 @@ fn parse_catalog_row(row: Value) -> CatalogRow {
       .and_then(|m| m.get("parameter_label"))
       .and_then(Value::as_str)
       .map(str::to_string),
+    weights_bytes: metadata
+      .and_then(|m| m.get("weights_bytes"))
+      .and_then(Value::as_u64),
     parse_error,
   }
 }
@@ -427,6 +434,7 @@ mod tests {
       native_ctx: Some(8192),
       mode_hint: Some("chat".to_string()),
       parameter_label: Some("7B".to_string()),
+      weights_bytes: Some(4_200_000_000),
       parse_error: None,
     }
   }

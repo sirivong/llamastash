@@ -24,17 +24,21 @@ pub fn row_path(v: &Value) -> Option<&str> {
 
 /// Render `list_models` rows as a padded table on TTY, or
 /// tab-separated rows when colors are disabled (piped / `--no-colors` /
-/// `NO_COLOR`). Columns: NAME, ARCH, QUANT, CTX, PATH.
+/// `NO_COLOR`). Columns: NAME, ARCH, QUANT, CTX, SIZE.
+///
+/// SIZE displays the GGUF weights footprint (matches the TUI list
+/// pane's SIZE column) — PATH was dropped because the canonical paths
+/// dominated line width on real caches. `--json` still carries `path`
+/// for agent consumers.
 ///
 /// Footer line `(N models)` is appended on TTY only — the piped form
-/// stays byte-identical to today's TSV so existing `awk -F\t` /
-/// `column -t` pipelines keep working.
+/// stays byte-stable for `awk -F\t` / `column -t` pipelines.
 pub fn list_human(rows: &[CatalogRow]) -> String {
   use crate::cli::{colors, format};
   if rows.is_empty() {
     return format!("{}\n", colors::dim("(no models discovered)"));
   }
-  let header = ["NAME", "ARCH", "QUANT", "CTX", "PATH"];
+  let header = ["NAME", "ARCH", "QUANT", "CTX", "SIZE"];
   let body: Vec<Vec<String>> = rows
     .iter()
     .map(|r| {
@@ -44,14 +48,16 @@ pub fn list_human(rows: &[CatalogRow]) -> String {
         .native_ctx
         .map(|n| n.to_string())
         .unwrap_or_else(|| "?".to_string());
+      let size = r
+        .weights_bytes
+        .map(crate::tui::fmt::format_bytes)
+        .unwrap_or_else(|| "?".to_string());
       vec![
         r.name(),
         arch.to_string(),
         quant.to_string(),
         ctx,
-        // Path styling is deliberately a no-op when colors are off,
-        // so the TSV branch stays byte-stable for piped consumers.
-        colors::path(&r.path),
+        size,
       ]
     })
     .collect();
@@ -85,6 +91,7 @@ pub fn list_json(rows: &[CatalogRow]) -> Value {
         "native_ctx": r.native_ctx,
         "mode_hint": r.mode_hint,
         "parameter_label": r.parameter_label,
+        "weights_bytes": r.weights_bytes,
         "parse_error": r.parse_error,
       });
       if let Some(id) = &r.model_id {
@@ -420,6 +427,7 @@ mod tests {
       native_ctx: Some(ctx),
       mode_hint: Some("chat".to_string()),
       parameter_label: Some("7B".to_string()),
+      weights_bytes: Some(4_200_000_000),
       parse_error: None,
     }
   }
@@ -434,7 +442,7 @@ mod tests {
     let s = list_human(&rows);
     assert_eq!(
       s,
-      "NAME\tARCH\tQUANT\tCTX\tPATH\nqwen.gguf\tqwen2\tQ4_K\t8192\t/m/qwen.gguf\n"
+      "NAME\tARCH\tQUANT\tCTX\tSIZE\nqwen.gguf\tqwen2\tQ4_K\t8192\t3.9G\n"
     );
   }
 
