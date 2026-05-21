@@ -15,9 +15,17 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [x] **In progress**: ~~Remeasure per-backend VRAM overhead band on real CUDA / HIP / Vulkan / Metal hardware — [`docs/spikes/2026-05-19-vram-overhead-band.md`](docs/spikes/2026-05-19-vram-overhead-band.md) `todo:` frontmatter.~~ Harness ready: [`scripts/measure-overhead-band.sh`](scripts/measure-overhead-band.sh) + runbook at [`docs/runbooks/measure-vram-overhead-band.md`](docs/runbooks/measure-vram-overhead-band.md). Changing catalog of defaults shipped via [`docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md`](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md).
 - [ ] **Deferred (post-c80d638)**: Port whichllm's family-selection / lineage-demotion / generation-bonus logic so `init --only models --json` output matches `whichllm --json --top 10` byte-for-byte. Today 7/10 picks and 3/10 quants match — see [Post-plan refinements §Remaining gap](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md#remaining-gap-deliberately-not-closed) in plan 2026-05-20-001.
 - [ ] **Deferred (post-c80d638)**: Download-flow fallback for synthetic GGUF rows — when the catalog row's `gguf_publisher == "synthetic"` (official-org safetensors-only repo), try trusted converters (`bartowski/{name}-GGUF`, `unsloth/{name}-GGUF`, `lmstudio-community/{name}-GGUF`) before failing the download. Without this, `init --recommended` on a synthesized pick (e.g. Qwen3.6-27B) errors when the official repo doesn't ship GGUFs.
+  - HF tree listing for Qwen/Qwen3-Next-80B-A3B-Instruct returned zero matching files — The snapshot has 6 synthetic rows for that repo
+    (gguf_publisher: "synthetic"); the official Qwen org repo only hosts safetensors. The planned fix
+    is the download-flow fallback to trusted converters (bartowski/{name}-GGUF, unsloth/{name}-GGUF,
+    lmstudio-community/{name}-GGUF) before failing. The same repo's Thinking variant works fine
+    because all six of those rows already point at bartowski/Qwen_Qwen3-Next-80B-A3B-Thinking-GGUF.
+    Want me to draft the synthetic-row fallback now, or keep it deferred under the existing TODO?
 
 ## v1+ release blockers
 
+- [ ] Make input filed a reusable component and use it for all text fields throughout the project. All text fields should have same behavior (e:edit, Esc:stop-edit, 2nd Esc:clear). The component need not have any styling (border etc) so that it can be styled as it is today for filter/chat/embed/rerank -> inputs, Advanced settings free text input (extras), HF search input etc. The component work can be done first in a separate commit.
+- [ ] Throughout the app, Esc should basically walk back on navigation tree unless an input is in edit mode. When input is in edit mode, Esc will switch it to non edit mode. The next Esc will clear the filed, the next Esc will walk back navigation (popups will close, panes will switch focus to last one). Change throughout app if needed for consistency. Make consistency work separate commit.
 - [ ] Download fails for many models in `init --only models` (for example -> init download: HF tree listing for `Qwen/Qwen3-Next-80B-A3B-Instruct` returned zero matching files)
 - [x] Remap Shift+Q to Ctrl+Q for killing deamon.
 - [x] Remove Ctrl+R, Ctrl+Q from top bar hints.
@@ -53,7 +61,9 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 ## v2+ roadmap
 
 - [ ] **Need brainstorm/plan**: Migrate release pipeline secrets from PATs to a scoped GitHub App with OIDC. Eliminates `GH_BUMP_TOKEN` rotation and shrinks token blast radius. Deferred from 0.0.1 per the release-setup plan §"Token rotation surface".
+- [ ] gpu/cpu offload split.
 - [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.
+- [ ] Make custom UI components reusable and consistent.
 - [ ] **Need brainstorm/plan**: Windows support.
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
 - [ ] **Need brainstorm/plan**: Anthropic API compatibility.

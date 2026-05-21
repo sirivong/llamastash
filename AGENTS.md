@@ -41,9 +41,13 @@ touch, but check before assuming:
   table when present.
 - `AGENTS.md` (this file) — scope boundaries, exit-code table, CLI agent
   surface, `status` IPC fields, build/test/lint, common gotchas.
-- `CHANGELOG.md` — every user-visible change lands an entry under
+- `CHANGELOG.md` — noteworthy user-visible changes land an entry under
   `[Unreleased]` (or the active release section). Internal-only refactors
-  can be omitted.
+  can be omitted. Entries must be **short, human-scannable one-liners** —
+  not every small change earns a bullet, and bullets must not carry
+  implementation detail or noise. Bundle related small changes into a
+  single entry where it reads better, and link to the PR / commit (e.g.
+  `(#123)` or short SHA) for anyone who wants the full story.
 - `CONTRIBUTING.md` — workflow / contribution rules when they shift.
 - `SECURITY.md` — only when the threat model or hardening surface shifts.
 - `docs/architecture.md` — when modules, the IPC shape, lifecycle states,
@@ -178,6 +182,7 @@ All of these fields land in the CLI's `status --json` output too (`src/cli/outpu
 - Inline `#[cfg(test)] mod tests` per file is the default; integration tests under `tests/` for daemon-spawning scenarios.
 - Comments explain **why**, not **what**. No multi-paragraph doc blocks unless the constraint is genuinely non-obvious. Don't reference task IDs or PR numbers in comments — those rot.
 - No `#[allow(...)]` without a one-line reason.
+- **Keybinding labels are never hardcoded in UI.** Help bars, footers, hints, popup affordances ("Press `q` to quit", `[Ctrl+S] save`, etc.) must derive their key text from the active `KeyMap` (`src/tui/keybindings.rs` — `Binding::label` / `Binding::description`), never from inline string literals. The keymap is the single source of truth so that user overrides from the config file are reflected everywhere the binding is surfaced. When adding a new action: add it to the `Action` enum and the appropriate `*_BINDINGS` slice with a `label`/`description`, then look that binding up at render time (e.g. via `KeyMap::bindings_for(Focus)` or a focused helper) — do not duplicate the literal key string in the widget.
 
 ## Protected artifacts
 
