@@ -523,7 +523,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, palette: &Palette, input: Rende
       render_row(r, palette, name_w, content_w, is_selected)
     })
     .collect();
-  let title_line = build_block_title(input.title, input.filter_chip_label, palette);
+  let title_line = build_block_title(input.title, input.filter_chip_label, palette, input.focused);
   let legend = build_status_legend(palette);
   let border_color = border_color(palette, input.focused);
   let list = List::new(items)
@@ -593,6 +593,7 @@ pub(crate) fn build_block_title(
   input: TitleInputs<'_>,
   filter_chip_label: &str,
   palette: &Palette,
+  pane_focused: bool,
 ) -> Line<'static> {
   // The full title strip including borders consumes the whole top
   // edge. ratatui leaves 1 cell on each side for the corner glyphs.
@@ -638,10 +639,15 @@ pub(crate) fn build_block_title(
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
   spans.push(Span::raw(" "));
   // Underline the leading `M` of `Models` so it reads as a
-  // press-this-letter shortcut (Shift+M re-focuses the list). The
-  // title_style already calls focus through bold; the underline
-  // adds the mnemonic affordance without competing with it.
-  let title_style = palette.title_style();
+  // press-this-letter shortcut (Shift+M re-focuses the list). When
+  // the pane is unfocused, drop to `muted_style` so the heading
+  // recedes — the active pane (right) wears the bold panel_title
+  // tone. Matches the inactive-tab treatment in `right_pane`.
+  let title_style = if pane_focused {
+    palette.title_style()
+  } else {
+    palette.muted_style()
+  };
   let mut count_chars = count.chars();
   match count_chars.next() {
     Some(first) => {
@@ -1327,6 +1333,7 @@ mod tests {
       },
       "/:filter",
       macchiato(),
+      true,
     );
     let text = title_text(&title);
     let filter_at = text.find("/:filter").expect("filter chip");
@@ -1348,6 +1355,7 @@ mod tests {
       },
       "/:filter",
       macchiato(),
+      true,
     );
     let text = title_text(&title);
     assert!(text.contains("Models [127]"));
@@ -1378,6 +1386,7 @@ mod tests {
       },
       "/:filter",
       macchiato(),
+      true,
     );
     let text = title_text(&title);
     assert!(
@@ -1414,6 +1423,7 @@ mod tests {
       },
       "/:filter",
       macchiato(),
+      true,
     );
     let text = title_text(&title);
     assert!(
@@ -1443,6 +1453,7 @@ mod tests {
       },
       "/:filter",
       macchiato(),
+      true,
     );
     let text = title_text(&title);
     // The cursor span is a single block glyph appended after the
@@ -1469,6 +1480,7 @@ mod tests {
       },
       "/:filter",
       macchiato(),
+      true,
     );
     let text = title_text(&title);
     assert!(
@@ -1495,6 +1507,7 @@ mod tests {
       },
       "/:filter",
       macchiato(),
+      true,
     );
     let text = title_text(&title);
     assert!(
@@ -1609,6 +1622,7 @@ mod tests {
       },
       ":filter",
       palette,
+      true,
     );
     let m_span = line
       .spans
@@ -1619,6 +1633,51 @@ mod tests {
       m_span.style.add_modifier.contains(Modifier::UNDERLINED),
       "leading M must be underlined as a mnemonic"
     );
+  }
+
+  #[test]
+  fn models_title_drops_to_muted_when_pane_is_not_focused() {
+    // When the right pane owns focus, the `Models [N]` heading
+    // should recede to muted (no bold panel_title) so the active
+    // pane carries the visual weight. Mirrors right_pane's
+    // inactive-tab treatment.
+    use crate::theme::{palette_for, ThemeName};
+    let palette = palette_for(ThemeName::Macchiato);
+    let inputs = || TitleInputs {
+      area_width: 80,
+      total: 3,
+      filter: FilterTitle::Inactive,
+      hints: vec!["Enter:launch".to_string()],
+    };
+    let focused = build_block_title(inputs(), "/:filter", palette, true);
+    let unfocused = build_block_title(inputs(), "/:filter", palette, false);
+    let m_focused = focused
+      .spans
+      .iter()
+      .find(|s| s.content.as_ref() == "M")
+      .expect("leading M span");
+    let m_unfocused = unfocused
+      .spans
+      .iter()
+      .find(|s| s.content.as_ref() == "M")
+      .expect("leading M span");
+    assert_eq!(m_focused.style.fg, Some(palette.panel_title));
+    assert!(m_focused.style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(
+      m_unfocused.style.fg,
+      Some(palette.muted),
+      "unfocused title must paint with muted fg"
+    );
+    assert!(
+      !m_unfocused.style.add_modifier.contains(Modifier::BOLD),
+      "unfocused title must drop the bold modifier"
+    );
+    // The mnemonic underline survives both states so Shift+M still
+    // reads as a press-this-letter hint.
+    assert!(m_unfocused
+      .style
+      .add_modifier
+      .contains(Modifier::UNDERLINED));
   }
 
   #[test]

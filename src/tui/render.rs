@@ -614,7 +614,7 @@ fn render_empty_state(
   focused: bool,
 ) {
   use ratatui::widgets::{Block, Borders};
-  let title_line = list_pane::build_block_title(title, filter_chip, palette);
+  let title_line = list_pane::build_block_title(title, filter_chip, palette, focused);
   let border_color = list_pane::border_color(palette, focused);
   let block = Block::default()
     .title(title_line)
