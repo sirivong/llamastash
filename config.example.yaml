@@ -166,6 +166,11 @@ proxy:
   # `status.proxy.status: "port_in_use"` — the proxy does not
   # auto-roam (would break the "single stable URL" promise). Edit
   # `port` and restart to recover.
+  #
+  # Override at startup with `llamastash daemon start --proxy-port N`
+  # (CLI flag beats this config value). Use `--proxy-port 0` to bind
+  # an ephemeral port — `llamastash status --json | jq .proxy.listen`
+  # reports the actual bound address.
   port: 11434
   # Seconds hyper waits for a client to finish sending request
   # headers before dropping the connection. Bounds the impact of

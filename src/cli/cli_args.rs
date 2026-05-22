@@ -178,6 +178,13 @@ pub enum DaemonAction {
     /// platform-default runtime socket. See `state-dir` for rationale.
     #[arg(long, value_name = "PATH", hide = true)]
     socket_path: Option<PathBuf>,
+    /// TCP port the OpenAI-compat proxy listener binds on
+    /// `127.0.0.1`. Overrides `proxy.port` from the config file.
+    /// Default `11434` (matches Ollama's well-known port). Use `0`
+    /// to bind an ephemeral port (the actual port is reported via
+    /// `llamastash status`).
+    #[arg(long, value_name = "PORT")]
+    proxy_port: Option<u16>,
   },
   /// Stop the running daemon. Running models keep running.
   Stop,
@@ -1164,10 +1171,12 @@ mod tests {
         detach,
         state_dir,
         socket_path,
+        proxy_port,
       })) => {
         assert!(detach);
         assert!(state_dir.is_none());
         assert!(socket_path.is_none());
+        assert!(proxy_port.is_none());
       }
       other => panic!("expected daemon start --detach, got {other:?}"),
     }
@@ -1185,6 +1194,7 @@ mod tests {
         detach,
         state_dir,
         socket_path,
+        proxy_port,
       })) => {
         assert!(!detach);
         assert_eq!(state_dir, Some(PathBuf::from("/tmp/llamastash-test-state")));
@@ -1192,8 +1202,35 @@ mod tests {
           socket_path,
           Some(PathBuf::from("/tmp/llamastash-test-state/daemon.sock"))
         );
+        assert!(proxy_port.is_none());
       }
       other => panic!("expected daemon start with paths, got {other:?}"),
+    }
+
+    let cli_with_proxy_port = parse(&["daemon", "start", "--proxy-port", "8080"]);
+    match cli_with_proxy_port.command {
+      Some(Command::Daemon(DaemonAction::Start {
+        detach,
+        state_dir,
+        socket_path,
+        proxy_port,
+      })) => {
+        assert!(!detach);
+        assert!(state_dir.is_none());
+        assert!(socket_path.is_none());
+        assert_eq!(proxy_port, Some(8080));
+      }
+      other => panic!("expected daemon start --proxy-port 8080, got {other:?}"),
+    }
+
+    // --proxy-port 0 binds an ephemeral port (status surface reports
+    // the actual bound port). Accepted as a deliberate dev-only knob.
+    let cli_ephemeral = parse(&["daemon", "start", "--proxy-port", "0"]);
+    match cli_ephemeral.command {
+      Some(Command::Daemon(DaemonAction::Start { proxy_port, .. })) => {
+        assert_eq!(proxy_port, Some(0));
+      }
+      other => panic!("expected daemon start --proxy-port 0, got {other:?}"),
     }
 
     let cli_stop = parse(&["daemon", "stop"]);

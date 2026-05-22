@@ -496,6 +496,11 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
     .arg(&opts.state_dir)
     .arg("--socket-path")
     .arg(&opts.socket_path)
+    // Propagate the effective proxy port so a `daemon start --detach
+    // --proxy-port N` doesn't drop the override on re-exec. Idempotent
+    // when the child re-reads the same config file (same value).
+    .arg("--proxy-port")
+    .arg(opts.proxy.port.to_string())
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null());

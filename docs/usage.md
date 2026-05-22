@@ -429,7 +429,9 @@ proxy:
 
 Unknown keys inside `[proxy]` are **rejected loudly** (`#[serde(deny_unknown_fields)]`) — a typo never silently falls back to defaults. The top-level config still tolerates unknown keys for forward-compat. There is no `host`, no `api_key`, no `tls_*`, no fallback-tuning knob; these are all deferred per the plan's Scope Boundaries.
 
-Port collision (Ollama running on the same machine, another listener on `11434`, …) leaves the daemon up and reports `proxy.status: "port_in_use"`. Edit `proxy.port` and restart the daemon. The proxy does not auto-roam to a free port — that would break the "single stable URL" contract.
+`llamastash daemon start --proxy-port <PORT>` overrides `proxy.port` for that daemon process — CLI flag beats config beats default. `--proxy-port 0` binds an ephemeral port; the actual address is reported via `llamastash status --json | jq .proxy.listen`. The flag survives `--detach` (the re-exec'd child receives it on its argv).
+
+Port collision (Ollama running on the same machine, another listener on `11434`, …) leaves the daemon up and reports `proxy.status: "port_in_use"`. Edit `proxy.port` and restart the daemon, or restart with `--proxy-port <free-port>`. The proxy does not auto-roam to a free port — that would break the "single stable URL" contract.
 
 ## Setup subcommands
 
