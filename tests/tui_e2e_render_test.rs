@@ -146,6 +146,14 @@ fn render_to_lines(app: &mut App) -> Vec<String> {
 // keep the test stable across version bumps and hint-strip tweaks.
 const SKIP_ROWS: &[usize] = &[0];
 
+// The golden fixture is captured on Linux and pins the PC-style key
+// glyphs (`Ctrl+s`, `↹`, `⇧↹`). On macOS the renderer emits the native
+// Apple glyphs (`⌃s`, `⇥`, `⇧⇥`) with different display widths, so the
+// title chips reflow and the trailing `─` padding diverges. The
+// structural `dashboard_render_carries_key_landmarks` test runs on
+// every platform and covers the invariants the golden was guarding;
+// only this character-exact compare is platform-specific.
+#[cfg_attr(target_os = "macos", ignore = "fixture uses Linux key glyphs")]
 #[test]
 fn dashboard_golden_render_matches_fixture() {
   let mut app = seeded_dashboard_app();
