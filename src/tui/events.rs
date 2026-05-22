@@ -3045,6 +3045,21 @@ mod tests {
   }
 
   #[test]
+  fn shift_p_opens_hf_dialog_from_right_pane() {
+    // Shift+P scope was widened from LIST to NAV so the chord fires
+    // from the right pane too — not just the models list.
+    let mut app = App::new(Default::default());
+    app.focus = Focus::RightPane;
+    assert!(app.hf_dialog.is_none());
+    pump_input(&mut app, key(KeyCode::Char('P'), KeyModifiers::SHIFT));
+    assert!(
+      app.hf_dialog.is_some(),
+      "Shift+P must open the HF dialog from the right pane"
+    );
+    assert_eq!(app.focus, Focus::HfDialog);
+  }
+
+  #[test]
   fn hf_dialog_o_in_resting_mode_cycles_sort_key() {
     use crate::init::hf_api::HfSortKey;
     let mut app = App::new(Default::default());

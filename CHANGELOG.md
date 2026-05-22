@@ -8,6 +8,8 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - TUI: model-list section headers collapse the parent path to a short label — `owner/repo` for HuggingFace and LM Studio caches, `Ollama` for blob storage, and the trailing path segments for user-configured `model_paths`.
 - TUI: right pane shows the focused model's full file path under the model name in the theme's muted tone, hard-wrapped across up to 3 lines so narrow panes still surface the location instead of a truncation stub. `$HOME` collapses to `~`.
 - Makefile: `make run <args>` now forwards extra goals to `cargo run --`, so `make run list` / `make run start <model>` work without further plumbing. New `make render` target renders the TUI at a sweep of representative sizes for layout review.
+- TUI: keybinding model split into `hint` (short UI-chip text) and `description` (longer help-overlay text, optional, falls back to `hint`). Each binding now declares its help-overlay home via a `categories: &[Category]` list, replacing the hand-rolled `Row::Single`/`Row::Multi` constants. The help overlay derives its layout directly from `DEFAULT_BINDINGS` — adding a new chord no longer requires a parallel edit in `help_overlay.rs`. Net `-220` lines.
+- TUI: `Shift+P` (pull-from-HF) now fires from the right pane too, not just the models list. Scoped to NAV so input fields keep typing capital `P` as text.
 
 ## [0.0.1] — Unreleased
 

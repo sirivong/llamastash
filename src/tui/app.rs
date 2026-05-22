@@ -464,27 +464,22 @@ impl App {
     self.options.keymap.bindings_for(focus)
   }
 
-  /// Build a `key:description` chip string for `(focus, action)`
-  /// against the live keymap. Returns `None` when the user has
-  /// unbound the action in `focus` entirely so callers can drop the
-  /// hint rather than render a chip with no working key.
+  /// Build a `key:hint` chip string for `(focus, action)` against the
+  /// live keymap. Returns `None` when the user has unbound the
+  /// action in `focus` entirely so callers can drop the hint rather
+  /// than render a chip with no working key.
   ///
-  /// The description comes from the binding's `description` field,
-  /// so updates in `keybindings.rs` flow through to every chip. For
-  /// cases where the binding's full description is too verbose for a
-  /// chip strip (e.g. `collapse think` → `think`), see
-  /// [`Self::hint_with`].
+  /// The chip text comes from `Action::hint_for(focus)` with a
+  /// fallback to the binding's `hint` field, so updates in
+  /// `keybindings.rs` flow through to every chip. For one-off
+  /// caller-supplied overrides see [`Self::hint_with`].
   pub fn hint(&self, focus: Focus, action: Action) -> Option<String> {
     let b = self
       .bindings_for(focus)
       .iter()
       .find(|b| b.action == action)?;
-    // Prefer the focus-specific override from `Action::description_for`
-    // so `Submit` in chat reads "send", in embed reads "embed", etc.
-    // Falls back to the binding's generic description for actions
-    // that don't vary across focuses.
-    let description = action.description_for(focus).unwrap_or(b.description);
-    Some(format!("{}:{}", b.label, description))
+    let hint = action.hint_for(focus).unwrap_or(b.hint);
+    Some(format!("{}:{}", b.label, hint))
   }
 
   /// Like [`Self::hint`] but with a caller-supplied description

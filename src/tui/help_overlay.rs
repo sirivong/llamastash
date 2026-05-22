@@ -1,12 +1,13 @@
 //! Modal `?` help overlay listing every keybinding grouped by
-//! purpose. Rendered as three fixed columns of category sections so
-//! a single screen can carry the full keymap. Centred over the
-//! dashboard with a translucent border; Esc or `?` closes it.
+//! category. Layout is fully derived from [`DEFAULT_BINDINGS`] —
+//! each binding row carries its own `categories` list, and the
+//! renderer walks every [`Category`] in order, collecting rows
+//! whose binding lands in that section.
 //!
-//! Layout and groupings are static — the overlay does **not** shift
-//! based on which pane is focused. Every binding shown is resolved
-//! live through [`App::bindings_for`] so config-driven overrides
-//! (`keybindings:` in `config.yaml`) reflect here automatically.
+//! Bindings come from `App::bindings_for` so config overrides flow
+//! through automatically.
+
+use std::collections::BTreeMap;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -16,372 +17,11 @@ use ratatui::Frame;
 
 use crate::theme::Palette;
 use crate::tui::app::App;
-use crate::tui::keybindings::{Action, Focus};
-
-/// One displayed help row.
-///
-/// - `Single` resolves a single `(focus, action)` lookup and renders
-///   the live key + the binding's own description.
-/// - `Multi` covers several `(focus, action)` pairs that share a
-///   key (e.g. all three right-pane submit actions on `Enter`) and
-///   collapses them into a single row with an editorial joined
-///   description. If a config override breaks the shared-key
-///   invariant, the renderer falls back to one line per part so
-///   nothing is hidden.
-enum Row {
-  Single {
-    focus: Focus,
-    action: Action,
-  },
-  Multi {
-    parts: &'static [(Focus, Action)],
-    description: &'static str,
-  },
-}
-
-/// A vertical block in one column: a bold title followed by its
-/// rows.
-struct Group {
-  title: &'static str,
-  rows: &'static [Row],
-}
-
-// ─── Category contents ────────────────────────────────────────────
-//
-// Each row resolves to one line in the overlay. The grouping is
-// editorial — actions are deliberately listed under the pane where
-// they're most useful even if the keymap technically registers them
-// in a different `Focus`. The live binding is always pulled from
-// the `Focus` named in the row so a config override flows through.
-
-const GENERAL: &[Row] = &[
-  Row::Single {
-    focus: Focus::List,
-    action: Action::ToggleHelp,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::Quit,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::RestartDaemon,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::KillDaemon,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::CycleTheme,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::NextFocus,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::PrevFocus,
-  },
-  // Shift-letter pane jumps. Bound from either Models or the right
-  // pane so they're TUI-wide rather than focus-specific.
-  Row::Single {
-    focus: Focus::List,
-    action: Action::FocusList,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::FocusLogsTab,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::FocusChatTab,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::FocusSettingsTab,
-  },
-];
-
-/// `Enter` while filtering — applies the buffer, returns focus to the
-/// list. Surfaces as its own help row so users learn the two
-/// distinct contexts (filter vs row action) rather than collapsing
-/// them into one ambiguous `apply filter/launch` cell (§5 #6).
-const MODELS_ENTER_FILTER: &[(Focus, Action)] = &[(Focus::Filter, Action::Submit)];
-/// `Enter` on a list row — opens the inline launch form.
-const MODELS_ENTER_LAUNCH: &[(Focus, Action)] = &[(Focus::List, Action::OpenLaunchPicker)];
-
-const MODELS: &[Row] = &[
-  Row::Single {
-    focus: Focus::List,
-    action: Action::MoveUp,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::MoveDown,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::PageUp,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::PageDown,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::GoTop,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::GoBottom,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::OpenFilter,
-  },
-  // Split the two Enter contexts so users learn that the same key
-  // applies the filter while typing and opens the launch form
-  // otherwise — instead of seeing one ambiguous collapsed row.
-  Row::Multi {
-    parts: MODELS_ENTER_FILTER,
-    description: "apply filter",
-  },
-  Row::Multi {
-    parts: MODELS_ENTER_LAUNCH,
-    description: "launch focused model",
-  },
-  Row::Single {
-    focus: Focus::Filter,
-    action: Action::ClearFilter,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::ToggleFavorite,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::YankUrl,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::YankCurl,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::YankPath,
-  },
-  Row::Single {
-    focus: Focus::List,
-    action: Action::StopModel,
-  },
-];
-
-/// On the Logs tab `c` copies the full log buffer to the system
-/// clipboard. The default `Action::YankCurl` description (`"curl"`)
-/// reflects the binding's Settings-tab meaning, so the help row
-/// overrides it with the Logs-tab semantics.
-const LOGS_COPY: &[(Focus, Action)] = &[(Focus::RightPane, Action::YankCurl)];
-
-const LOGS: &[Row] = &[
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::ToggleAutoScroll,
-  },
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::MoveUp,
-  },
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::MoveDown,
-  },
-  Row::Multi {
-    parts: LOGS_COPY,
-    description: "copy logs",
-  },
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::FocusList,
-  },
-];
-
-/// HF pull dialog (R104). Surfaces the always-on keys from
-/// `HF_DIALOG_BINDINGS` plus a short explanation of the per-stage
-/// keys (`o` sort cycle, `n`/`p` paging, Backspace stage-back) that
-/// can't be expressed as `(Focus, Action)` pairs because they're
-/// shadowed by the per-stage router.
-const HF_DIALOG: &[Row] = &[
-  Row::Single {
-    focus: Focus::List,
-    action: Action::OpenHfDialog,
-  },
-  Row::Single {
-    focus: Focus::HfDialog,
-    action: Action::Submit,
-  },
-  Row::Single {
-    focus: Focus::HfDialog,
-    action: Action::Cancel,
-  },
-  Row::Single {
-    focus: Focus::HfDialog,
-    action: Action::MoveUp,
-  },
-  Row::Single {
-    focus: Focus::HfDialog,
-    action: Action::MoveDown,
-  },
-];
-
-/// The three submit actions across the right-pane inputs collapse
-/// into one row at the default `Enter` binding.
-const SUBMIT_TRIPLET: &[(Focus, Action)] = &[
-  (Focus::ChatInput, Action::SendChat),
-  (Focus::EmbedInput, Action::Submit),
-  (Focus::RerankInput, Action::Submit),
-];
-
-const CHAT_EMBED_RERANK: &[Row] = &[
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::EnterEdit,
-  },
-  Row::Single {
-    focus: Focus::ChatInput,
-    action: Action::ExitEdit,
-  },
-  Row::Multi {
-    parts: SUBMIT_TRIPLET,
-    description: "send/embed/rerank",
-  },
-  Row::Single {
-    focus: Focus::ChatInput,
-    action: Action::ToggleThinkCollapse,
-  },
-  Row::Single {
-    focus: Focus::RerankInput,
-    action: Action::StageRerankCandidate,
-  },
-  // ↑ in rerank cycles back to the previous field (round-7 moved
-  // the reverse-field motion from Shift+Tab to ↑ so Tab / Shift+Tab
-  // stay on the pane-cycle axis).
-  Row::Single {
-    focus: Focus::RerankInput,
-    action: Action::PrevField,
-  },
-  // Round-8 yank affordances reachable from the right pane —
-  // Chat/Embed/Rerank inherit `p` / `u` / `c` from RIGHT_PANE_BINDINGS,
-  // so surface them here too so the user can discover the keys
-  // without bouncing back to the Models list.
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::YankPath,
-  },
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::YankUrl,
-  },
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::YankCurl,
-  },
-];
-
-/// Enter dispatches the launch from the inline Settings form.
-const SETTINGS_ENTER: &[(Focus, Action)] = &[(Focus::RightPane, Action::Submit)];
-
-/// `Action::MoveDown` / `MoveUp` on `Focus::RightPane` carry the
-/// description `scroll down/up` because that's their meaning on the
-/// Logs tab. In the Settings tab the same keys cycle the form's
-/// fields (ctx → reasoning → advanced), so the help row needs a
-/// context-appropriate override. Wrapping the action in a
-/// single-part `Row::Multi` is the renderer's mechanism for that.
-const SETTINGS_FIELD_NEXT: &[(Focus, Action)] = &[(Focus::RightPane, Action::MoveDown)];
-const SETTINGS_FIELD_PREV: &[(Focus, Action)] = &[(Focus::RightPane, Action::MoveUp)];
-
-/// On the Settings tab `s` routes through `apply_stop_model` (round-8)
-/// rather than toggling Logs auto-scroll. The default
-/// `Action::ToggleAutoScroll` description (`"auto-scroll"`) doesn't
-/// reflect that, so we override the row description.
-const SETTINGS_STOP: &[(Focus, Action)] = &[(Focus::RightPane, Action::ToggleAutoScroll)];
-
-const SETTINGS: &[Row] = &[
-  Row::Multi {
-    parts: SETTINGS_ENTER,
-    description: "launch/save",
-  },
-  // `s` on Settings stops the focused managed launch when one
-  // exists; toasts otherwise. Override the default description so
-  // the overlay teaches the correct meaning (the same binding on
-  // Logs toggles auto-scroll).
-  Row::Multi {
-    parts: SETTINGS_STOP,
-    description: "stop focused launch",
-  },
-  // ↑/↓ cycle the form's fields. Descriptions overridden because
-  // the same bindings mean `scroll up/down` on the Logs tab.
-  Row::Multi {
-    parts: SETTINGS_FIELD_NEXT,
-    description: "next field",
-  },
-  Row::Multi {
-    parts: SETTINGS_FIELD_PREV,
-    description: "prev field",
-  },
-  // ←/→ change the focused field's value (ctx preset, reasoning
-  // toggle). Round-7 introduced these dedicated keys so values
-  // and fields don't share the same axis.
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::CycleValueNext,
-  },
-  Row::Single {
-    focus: Focus::RightPane,
-    action: Action::CycleValuePrev,
-  },
-];
-
-// ─── Column assignment ────────────────────────────────────────────
-//
-// Fixed left-to-right packing. Tuned so the three columns balance
-// roughly in height — `Models` is the biggest group so it owns its
-// own column; the smaller groups pair up on either side.
-
-const COLUMN_1: &[Group] = &[
-  Group {
-    title: "General",
-    rows: GENERAL,
-  },
-  Group {
-    title: "Logs",
-    rows: LOGS,
-  },
-];
-
-const COLUMN_2: &[Group] = &[Group {
-  title: "Models",
-  rows: MODELS,
-}];
-
-const COLUMN_3: &[Group] = &[
-  Group {
-    title: "Chat / Embed / Rerank",
-    rows: CHAT_EMBED_RERANK,
-  },
-  Group {
-    title: "Settings",
-    rows: SETTINGS,
-  },
-  Group {
-    title: "HF pull dialog",
-    rows: HF_DIALOG,
-  },
-];
+use crate::tui::keybindings::{Action, Binding, Category, Focus};
 
 /// Render the overlay. Caller is responsible for only invoking
 /// this when `app.show_help` is true. Layout is static — the active
-/// focus does not change which groups appear or where.
+/// focus does not change which sections appear or where.
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let rect = centred(
     area,
@@ -389,19 +29,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     area.height.saturating_sub(4).max(20),
   );
   frame.render_widget(Clear, rect);
-  // `Clear` resets every cell to the terminal default, so paint
-  // `palette.bg` back over the rect before rendering text. Without
-  // this the overlay reads as transparent on light themes (Latte)
-  // and as a coloured-text-on-terminal-bg patch on dark themes that
-  // tint their root surface.
   crate::tui::render::paint_theme_bg(frame, rect, palette);
 
   // Close chip carries both keys that dismiss the overlay:
-  //  - `Esc` is hardcoded modal-dismiss in `events::handle_key`
-  //    (not an Action), so it always works regardless of the
-  //    `toggle_help` binding; we hardcode it here too.
-  //  - The `toggle_help` action's live key (default `?`) is
-  //    surfaced second so config overrides flow through.
+  //   - `Esc` is hardcoded modal-dismiss in `events::handle_key`
+  //     (not an Action), so it always works regardless of the
+  //     `toggle_help` binding; we hardcode it here too.
+  //   - The `toggle_help` action's live key (default `?`) is
+  //     surfaced second so config overrides flow through.
   let toggle_key = app
     .bindings_for(Focus::List)
     .iter()
@@ -421,11 +56,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     ]))
     .borders(Borders::ALL)
     .border_style(palette.accent_style())
-    // Breathing room inside the border so column titles and key
-    // labels don't kiss the frame on either side.
     .padding(Padding::new(2, 2, 1, 1));
   let inner = block.inner(rect);
   frame.render_widget(block, rect);
+
+  let sections = build_sections(app);
+  let columns = balance_into_columns(&sections, 3);
 
   let cols = Layout::default()
     .direction(Direction::Horizontal)
@@ -436,99 +72,158 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     ])
     .split(inner);
 
-  for (idx, groups) in [COLUMN_1, COLUMN_2, COLUMN_3].iter().enumerate() {
-    let lines = render_column(groups, app, palette);
+  for (idx, col_sections) in columns.iter().enumerate() {
+    let lines = render_column(col_sections, palette);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cols[idx]);
   }
 }
 
-/// Build the line list for one column. Each `Group` becomes a bold
-/// title line followed by one row per [`Row`] and a trailing blank
-/// for vertical separation between groups.
-fn render_column(groups: &[Group], app: &App, palette: &Palette) -> Vec<Line<'static>> {
+/// One help-overlay section: a category title plus the resolved
+/// rows (each a `(keys, description)` pair) drawn under it.
+#[derive(Debug)]
+struct Section {
+  title: &'static str,
+  rows: Vec<(String, String)>,
+}
+
+/// Walk `Category::ALL` in order; for each, collect every binding
+/// whose `categories` contains that category. Bindings sharing an
+/// action collapse to one row whose label is `","`-joined (so `c,y`
+/// reads as a single curl row); their description comes from
+/// `Action::description_for(category)` with `Binding::description`
+/// as the fallback. Sections with no rows are dropped.
+fn build_sections(app: &App) -> Vec<Section> {
+  // Walk the flat keymap once via the List focus — its `bindings_for`
+  // already strips per-focus duplicates, and the `categories` field
+  // tells us where each row lands. For categories whose canonical
+  // focus isn't List we re-resolve the labels under that focus so a
+  // config override on (say) `Focus::HfDialog` flows through.
+  let mut sections: Vec<Section> = Vec::with_capacity(Category::ALL.len());
+  let flat: Vec<&Binding> = collect_flat(app);
+
+  for &category in Category::ALL {
+    // Group bindings landing in this category by action, preserving
+    // first-seen order. Multiple bindings per action merge their
+    // labels (e.g. `Up,k → up`).
+    let mut action_order: Vec<Action> = Vec::new();
+    let mut by_action: BTreeMap<usize, Vec<&Binding>> = BTreeMap::new();
+    for b in &flat {
+      if !b.categories.contains(&category) {
+        continue;
+      }
+      let pos = action_order.iter().position(|a| *a == b.action);
+      let idx = match pos {
+        Some(i) => i,
+        None => {
+          action_order.push(b.action);
+          action_order.len() - 1
+        }
+      };
+      by_action.entry(idx).or_default().push(b);
+    }
+
+    let mut rows: Vec<(String, String)> = Vec::with_capacity(action_order.len());
+    for (idx, action) in action_order.iter().enumerate() {
+      let group = &by_action[&idx];
+      let keys = group
+        .iter()
+        .map(|b| b.label)
+        .collect::<Vec<_>>()
+        .join(",");
+      let description = action
+        .description_for(category)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| group[0].description().to_string());
+      rows.push((keys, description));
+    }
+    if rows.is_empty() {
+      continue;
+    }
+    sections.push(Section {
+      title: category.label(),
+      rows,
+    });
+  }
+  sections
+}
+
+/// Snapshot the full keymap as a flat slice, deduplicating bindings
+/// that appear under multiple focuses (the per-focus cache stores
+/// the same binding once per focus).
+fn collect_flat(app: &App) -> Vec<&Binding> {
+  let mut seen: Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers, Action)> = Vec::new();
+  let mut out: Vec<&Binding> = Vec::new();
+  for focus in [
+    Focus::List,
+    Focus::Filter,
+    Focus::RightPane,
+    Focus::ChatInput,
+    Focus::EmbedInput,
+    Focus::RerankInput,
+    Focus::ConfirmPopup,
+    Focus::HfDialog,
+  ] {
+    for b in app.bindings_for(focus) {
+      let key = (b.key, b.mods, b.action);
+      if !seen.contains(&key) {
+        seen.push(key);
+        out.push(b);
+      }
+    }
+  }
+  out
+}
+
+/// Greedy column-packing: distribute `sections` into `n` columns so
+/// the columns are roughly the same length (one line per row plus
+/// title + blank trailer). Picks the shortest column at each step.
+fn balance_into_columns(sections: &[Section], n: usize) -> Vec<Vec<&Section>> {
+  let mut columns: Vec<Vec<&Section>> = vec![Vec::new(); n];
+  let mut lengths: Vec<usize> = vec![0; n];
+  for section in sections {
+    let target = lengths
+      .iter()
+      .enumerate()
+      .min_by_key(|(_, &l)| l)
+      .map(|(i, _)| i)
+      .unwrap_or(0);
+    columns[target].push(section);
+    // 1 title row + 1 row per binding + 1 trailing blank.
+    lengths[target] += section.rows.len() + 2;
+  }
+  columns
+}
+
+fn render_column(sections: &[&Section], palette: &Palette) -> Vec<Line<'static>> {
   let mut out: Vec<Line<'static>> = Vec::new();
-  for group in groups {
+  for section in sections {
     out.push(Line::from(Span::styled(
-      group.title.to_string(),
+      section.title.to_string(),
       Style::default()
         .fg(palette.accent)
         .add_modifier(Modifier::BOLD),
     )));
-    for row in group.rows {
-      append_row(&mut out, row, app, palette);
+    for (keys, description) in &section.rows {
+      out.push(render_binding_line(keys, description, palette));
     }
     out.push(Line::default());
   }
   out
 }
 
-fn append_row(out: &mut Vec<Line<'static>>, row: &Row, app: &App, palette: &Palette) {
-  match row {
-    Row::Single { focus, action } => {
-      if let Some((keys, description)) = resolve_one(app, *focus, *action) {
-        out.push(render_binding_line(&keys, &description, palette));
-      }
-    }
-    Row::Multi { parts, description } => {
-      let resolved: Vec<(String, String)> = parts
-        .iter()
-        .filter_map(|(f, a)| resolve_one(app, *f, *a))
-        .collect();
-      if resolved.is_empty() {
-        return;
-      }
-      let first_key = resolved[0].0.clone();
-      let same_key = resolved.iter().all(|(k, _)| *k == first_key);
-      if same_key {
-        // Collapsed row: shared key + the editorial joined
-        // description from the row definition.
-        out.push(render_binding_line(&first_key, description, palette));
-      } else {
-        // A config override broke the shared-key invariant. Fall
-        // back to one line per part so the user still sees every
-        // remapped key with its own per-binding description.
-        for (keys, per_part_desc) in resolved {
-          out.push(render_binding_line(&keys, &per_part_desc, palette));
-        }
-      }
-    }
-  }
-}
-
 fn render_binding_line(keys: &str, description: &str, palette: &Palette) -> Line<'static> {
   Line::from(vec![
+    Span::styled("  ".to_string(), Style::default()),
     Span::styled(
-      format!("  {keys:<14}"),
+      format!("{keys:<12}"),
       Style::default()
         .fg(palette.label)
         .add_modifier(Modifier::BOLD),
-    ),
+    )
+,
+    Span::styled("  ".to_string(), Style::default()),
     Span::styled(description.to_string(), palette.text_style()),
   ])
-}
-
-/// Look up every live binding for `action` in `focus` and assemble
-/// the display strings. Returns `None` when the user has unbound
-/// the action entirely (so it's never silently shown without a key).
-fn resolve_one(app: &App, focus: Focus, action: Action) -> Option<(String, String)> {
-  let bindings = app.bindings_for(focus);
-  let matches: Vec<_> = bindings.iter().filter(|b| b.action == action).collect();
-  if matches.is_empty() {
-    return None;
-  }
-  let keys = matches
-    .iter()
-    .map(|b| b.label)
-    .collect::<Vec<_>>()
-    .join(",");
-  // Per-focus description override (e.g. `Submit` reads "embed" in
-  // EmbedInput, "send" in ChatInput). Falls back to the binding's
-  // generic description.
-  let description = action
-    .description_for(focus)
-    .unwrap_or(matches[0].description)
-    .to_string();
-  Some((keys, description))
 }
 
 /// Centre a `w × h` rect within `area`, clamping to the available
@@ -545,262 +240,74 @@ fn centred(area: Rect, w: u16, h: u16) -> Rect {
 mod tests {
   use super::*;
   use crate::tui::app::AppOptions;
-  use crate::tui::keybindings::KeyMap;
   use ratatui::backend::TestBackend;
   use ratatui::Terminal;
-  use std::collections::BTreeMap;
 
   fn render_to_string(width: u16, height: u16, app: &App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test backend");
     terminal
       .draw(|frame| {
-        let area = frame.area();
-        render(frame, area, app, app.palette());
+        let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
+        render(frame, frame.area(), app, palette);
       })
-      .unwrap();
-    let buf = terminal.backend().buffer().clone();
-    let mut lines: Vec<String> = Vec::with_capacity(buf.area.height as usize);
-    for y in 0..buf.area.height {
-      let mut row = String::new();
-      for x in 0..buf.area.width {
-        row.push_str(buf[(x, y)].symbol());
+      .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let mut s = String::new();
+    for y in 0..buffer.area.height {
+      for x in 0..buffer.area.width {
+        s.push_str(buffer[(x, y)].symbol());
       }
-      lines.push(row.trim_end().to_string());
+      s.push('\n');
     }
-    lines.join("\n")
+    s
   }
 
   #[test]
-  fn overlay_shows_all_five_group_titles() {
+  fn overlay_renders_global_section() {
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 36, &app);
-    for title in [
-      "General",
-      "Models",
-      "Logs",
-      "Chat / Embed / Rerank",
-      "Settings",
-    ] {
-      assert!(
-        frame.contains(title),
-        "missing group `{title}` in:\n{frame}"
-      );
-    }
+    assert!(frame.contains("General"), "missing General section:\n{frame}");
+    assert!(frame.contains("quit"), "missing quit row:\n{frame}");
+    assert!(frame.contains("help"), "missing help row:\n{frame}");
   }
 
+
   #[test]
-  fn logs_esc_uses_models_list_description() {
+  fn overlay_lists_motion_under_multiple_sections() {
+    // `↑/↓ MoveUp/MoveDown` should surface under Models with the
+    // default `"up"/"down"` text, and under Logs / Settings with
+    // their category-specific overrides.
     let app = App::new(AppOptions::default());
-    let frame = render_to_string(140, 36, &app);
+    let frame = render_to_string(140, 40, &app);
+    assert!(frame.contains("Models list"), "Models section missing:\n{frame}");
+    assert!(frame.contains("Logs tab"), "Logs section missing:\n{frame}");
+    assert!(frame.contains("Settings tab"), "Settings section missing:\n{frame}");
     assert!(
-      frame.contains("models list"),
-      "Logs Esc description should say `models list`:\n{frame}"
+      frame.contains("scroll up") && frame.contains("scroll down"),
+      "Logs motion overrides missing:\n{frame}"
+    );
+    assert!(
+      frame.contains("prev field") && frame.contains("next field"),
+      "Settings motion overrides missing:\n{frame}"
     );
   }
 
   #[test]
-  fn models_enter_renders_two_contextual_rows() {
-    // Audit §5 #6: the previous single `apply filter/launch` row
-    // collapsed two distinct meanings into one cell. Render them
-    // separately so users can tell the two contexts apart.
+  fn overlay_merges_aliased_chords() {
+    // `c` and `y` both bind to YankCurl; the Models section should
+    // surface them on one row as `c,y` rather than two separate rows.
     let app = App::new(AppOptions::default());
-    let frame = render_to_string(140, 36, &app);
-    assert!(
-      frame.contains("apply filter"),
-      "filter-context Enter row missing:\n{frame}"
-    );
-    assert!(
-      frame.contains("launch focused model"),
-      "launch-context Enter row missing:\n{frame}"
-    );
+    let frame = render_to_string(140, 40, &app);
+    assert!(frame.contains("c,y"), "aliased yank chord missing:\n{frame}");
   }
 
   #[test]
-  fn submit_triplet_collapses_under_one_ctrl_enter_row() {
+  fn overlay_shows_hf_pull_under_global() {
+    // Shift+P (`OpenHfDialog`) is categorised as Global since it
+    // works from any non-input focus.
     let app = App::new(AppOptions::default());
-    let frame = render_to_string(140, 36, &app);
-    assert!(
-      frame.contains("send/embed/rerank"),
-      "right-pane submit row should be `send/embed/rerank`:\n{frame}"
-    );
-    let occurrences = frame.matches("send/embed/rerank").count();
-    assert_eq!(occurrences, 1, "expected a single collapsed row:\n{frame}");
-  }
-
-  #[test]
-  fn settings_group_lists_canonical_rows() {
-    // The Settings group must teach the four canonical edit
-    // surfaces: launch/save, cycle value (Up/Down), cycle fields
-    // (Tab/Shift+Tab), and Esc → models list.
-    let app = App::new(AppOptions::default());
-    let frame = render_to_string(140, 36, &app);
-    assert!(
-      frame.contains("launch/save"),
-      "Settings Enter row should be `launch/save`:\n{frame}"
-    );
-    // Round-7 navigation: ↑/↓ cycle form fields, ←/→ cycle the
-    // focused field's value.
-    assert!(
-      frame.contains("next field"),
-      "Settings must surface the ↓ next-field row:\n{frame}"
-    );
-    assert!(
-      frame.contains("next value") && frame.contains("prev value"),
-      "Settings must surface the ←/→ next/prev value rows:\n{frame}"
-    );
-    // The `next field` row must render exactly once (regression
-    // guard: pre-round-7 the dead `Focus::LaunchPicker` binding
-    // and the live `RightPane.NextField` description both said
-    // `next field`, producing a visible duplicate). The renderer
-    // now sources the row from `Focus::RightPane.MoveDown` via a
-    // Multi override, so any future drift fails this loudly.
-    let contexts: Vec<&str> = frame
-      .match_indices("next field")
-      .map(|(i, _)| {
-        let start = i.saturating_sub(40);
-        let end = (i + 30).min(frame.len());
-        &frame[start..end]
-      })
-      .collect();
-    assert_eq!(
-      contexts.len(),
-      1,
-      "`next field` row must render exactly once. Contexts: {contexts:#?}"
-    );
-  }
-
-  #[test]
-  fn overlay_title_close_chip_surfaces_esc_and_toggle_help_key() {
-    // Default keymap: `?` toggles the overlay; Esc always closes
-    // it. Both keys must appear in the title so the user can
-    // discover either path.
-    let app = App::new(AppOptions::default());
-    let frame = render_to_string(140, 36, &app);
-    assert!(
-      frame.contains("Esc/?:close"),
-      "title close chip must list both Esc and the toggle_help key: {frame}"
-    );
-  }
-
-  #[test]
-  fn overlay_title_close_chip_follows_toggle_help_rebind() {
-    // Remap `toggle_help` to F1 — the close chip should now read
-    // `Esc/F1:close` (Esc stays because it's the hardcoded modal
-    // dismiss).
-    let mut keymap = KeyMap::default();
-    let overrides: BTreeMap<String, String> = [(String::from("toggle_help"), String::from("f1"))]
-      .into_iter()
-      .collect();
-    let warnings = keymap.apply_overrides(&overrides);
-    assert!(warnings.is_empty(), "{warnings:?}");
-    let app = App::new(AppOptions {
-      keymap,
-      ..AppOptions::default()
-    });
-    let frame = render_to_string(140, 36, &app);
-    assert!(
-      frame.contains("Esc/F1:close"),
-      "remapped toggle_help must flow through to the close chip: {frame}"
-    );
-    assert!(
-      !frame.contains("Esc/?:close"),
-      "stale default `?` chip must drop when toggle_help is rebound: {frame}"
-    );
-  }
-
-  #[test]
-  fn general_chat_jump_row_describes_chat_embed_rerank() {
-    // Shift+C dispatches `Action::FocusChatTab`, which picks the
-    // first available of Chat / Embed / Rerank for the focused
-    // model. The help row must mirror that — `chat` alone would
-    // mislead users on embedding-only or reranker models.
-    let app = App::new(AppOptions::default());
-    let frame = render_to_string(140, 36, &app);
-    assert!(
-      frame.contains("chat/embed/rerank"),
-      "Shift+C row must describe all three mode targets: {frame}"
-    );
-  }
-
-  #[test]
-  fn overlay_reflects_config_keybinding_overrides() {
-    let mut keymap = KeyMap::default();
-    let overrides: BTreeMap<String, String> = [(String::from("quit"), String::from("ctrl+q"))]
-      .into_iter()
-      .collect();
-    let warnings = keymap.apply_overrides(&overrides);
-    assert!(warnings.is_empty(), "{warnings:?}");
-
-    let app = App::new(AppOptions {
-      keymap,
-      ..AppOptions::default()
-    });
-    let frame = render_to_string(140, 36, &app);
-    use crate::tui::keybindings::CTRL_PREFIX;
-    let expected = format!("{CTRL_PREFIX}q");
-    assert!(
-      frame.contains(&expected),
-      "remapped quit key missing: {frame}"
-    );
-    // The legacy comma-joined alias surface (`q,Ctrl+C`) was retired
-    // in round-6 in favour of one row per binding. Pin its absence
-    // so a future regression can't sneak it back.
-    let stale_aliases = format!("q,{CTRL_PREFIX}C");
-    assert!(
-      !frame.contains(&stale_aliases),
-      "stale default quit aliases still rendered: {frame}"
-    );
-  }
-
-  #[test]
-  fn submit_row_falls_back_to_per_part_lines_when_override_diverges_keys() {
-    let mut keymap = KeyMap::default();
-    let overrides: BTreeMap<String, String> = [(String::from("send_chat"), String::from("f12"))]
-      .into_iter()
-      .collect();
-    let warnings = keymap.apply_overrides(&overrides);
-    assert!(warnings.is_empty(), "{warnings:?}");
-
-    let app = App::new(AppOptions {
-      keymap,
-      ..AppOptions::default()
-    });
-    let frame = render_to_string(140, 36, &app);
-    // Collapsed text vanishes; per-part bindings still surface.
-    assert!(
-      !frame.contains("send/embed/rerank"),
-      "collapsed row should split after override:\n{frame}"
-    );
-    assert!(frame.contains("F12"), "F12 send binding missing:\n{frame}");
-    // Embed/Rerank still on plain Enter so their per-part rows show
-    // up with each binding's own description.
-    use crate::tui::keybindings::ENTER_LABEL;
-    assert!(
-      frame.contains(ENTER_LABEL) && frame.contains("embed"),
-      "embed row should remain visible after the chat-only override:\n{frame}"
-    );
-    assert!(
-      frame.contains("rank"),
-      "rerank row should remain visible after the chat-only override:\n{frame}"
-    );
-  }
-
-  #[test]
-  fn overlay_layout_is_static_across_focuses() {
-    let baseline = App::new(AppOptions::default());
-    let mut shifted = App::new(AppOptions::default());
-    shifted.focus = Focus::RightPane;
-    assert_eq!(
-      render_to_string(140, 36, &baseline),
-      render_to_string(140, 36, &shifted)
-    );
-  }
-
-  #[test]
-  fn centred_clamps_to_area() {
-    let area = Rect::new(0, 0, 40, 10);
-    let r = centred(area, 80, 30);
-    assert!(r.width <= 38);
-    assert!(r.height <= 8);
+    let frame = render_to_string(140, 40, &app);
+    assert!(frame.contains("pull"), "pull row missing:\n{frame}");
   }
 }

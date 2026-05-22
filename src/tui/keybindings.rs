@@ -292,24 +292,141 @@ pub enum Action {
   CycleValuePrev,
 }
 
+/// Editorial grouping for the help overlay. Independent of
+/// `FocusSet` (which controls dispatch). A single [`Binding`] can
+/// belong to multiple categories — e.g. `↑ MoveUp` surfaces under
+/// `Models`, `Logs`, and `Settings` with category-specific text.
+///
+/// `ConfirmPopup`'s Enter/Esc bindings fold into [`Category::Global`]
+/// — they're always-on modal verbs, not a distinct user surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Category {
+  /// Always-on chords (quit, help, theme, daemon control, HF pull,
+  /// confirm/cancel).
+  Global,
+  /// Pane cycling (Tab / Shift+Tab) and Shift-letter quick-jumps.
+  PaneNav,
+  /// Models list — motion, filter, favorite, yank, launch.
+  Models,
+  /// Logs tab affordances.
+  Logs,
+  /// Settings tab affordances.
+  Settings,
+  /// Chat tab affordances.
+  Chat,
+  /// Embed tab affordances.
+  Embed,
+  /// Rerank tab affordances.
+  Rerank,
+  /// Input-mode shared keys (Esc:exit-edit, Shift+Enter:newline).
+  Input,
+  /// HuggingFace pull dialog modal.
+  HfDialog,
+}
+
+impl Category {
+  /// Display order in the help overlay. Renderer walks this list and
+  /// emits one section per category that has bindings.
+  pub const ALL: &'static [Category] = &[
+    Category::Global,
+    Category::PaneNav,
+    Category::Models,
+    Category::Logs,
+    Category::Settings,
+    Category::Chat,
+    Category::Embed,
+    Category::Rerank,
+    Category::Input,
+    Category::HfDialog,
+  ];
+
+  /// Section title shown in the help overlay.
+  pub fn label(self) -> &'static str {
+    match self {
+      Category::Global => "General",
+      Category::PaneNav => "Pane navigation",
+      Category::Models => "Models list",
+      Category::Logs => "Logs tab",
+      Category::Settings => "Settings tab",
+      Category::Chat => "Chat tab",
+      Category::Embed => "Embed tab",
+      Category::Rerank => "Rerank tab",
+      Category::Input => "Text input",
+      Category::HfDialog => "HF pull dialog",
+    }
+  }
+}
+
 /// One binding in the flat keymap. `scopes` lists every focus the
-/// binding fires in — a single row replaces what used to be a copy
-/// per focus.
+/// binding fires in (dispatcher); `categories` lists every help-
+/// overlay section it surfaces under. A single row replaces what
+/// used to be a copy per focus.
 #[derive(Debug, Clone, Copy)]
 pub struct Binding {
   pub key: KeyCode,
   pub mods: KeyModifiers,
   pub action: Action,
-  /// Short label rendered in the help bar (e.g. `↑` or `Ctrl+D`).
+  /// Chord glyph rendered in chips and help (e.g. `↑` or `Ctrl+D`).
   pub label: &'static str,
-  /// Generic description shown when no focus-specific override is
-  /// available (see [`Action::description_for`]).
-  pub description: &'static str,
+  /// Short UI-chip text (top bar, panel-border hints). Required.
+  /// Per-focus overrides via [`Action::hint_for`].
+  pub hint: &'static str,
+  /// Longer help-overlay text. `None` falls back to `hint`. Per-
+  /// category overrides via [`Action::description_for`].
+  pub description: Option<&'static str>,
   /// Focuses this binding is active in. The dispatcher filters by
-  /// this; the help bar/overlay reads only the bindings whose scope
-  /// contains the current focus.
+  /// this; the help bar reads only the bindings whose scope contains
+  /// the current focus.
   pub scopes: FocusSet,
+  /// Help-overlay sections this row appears in. Empty = hidden from
+  /// the overlay (still dispatches). Multi-element for actions that
+  /// editorially belong to several panes.
+  pub categories: &'static [Category],
 }
+
+impl Binding {
+  /// Help-overlay description (falls back to `hint` when none set).
+  pub fn description(&self) -> &'static str {
+    self.description.unwrap_or(self.hint)
+  }
+}
+
+// Shared category slices — keeps the binding table dense without
+// inline `&[Category::X]` literals at every row.
+const CAT_GLOBAL: &[Category] = &[Category::Global];
+const CAT_PANE_NAV: &[Category] = &[Category::PaneNav];
+const CAT_MODELS: &[Category] = &[Category::Models];
+const CAT_SETTINGS: &[Category] = &[Category::Settings];
+const CAT_CHAT: &[Category] = &[Category::Chat];
+const CAT_RERANK: &[Category] = &[Category::Rerank];
+const CAT_INPUT: &[Category] = &[Category::Input];
+const CAT_HF_DIALOG: &[Category] = &[Category::HfDialog];
+/// Yank chips (u/p) belong to Models but are reachable from
+/// every input-tab focus too.
+const CAT_YANK: &[Category] = &[
+  Category::Models,
+  Category::Chat,
+  Category::Embed,
+  Category::Rerank,
+];
+/// Yank-curl (`c`) reaches Logs too — on that tab it copies the
+/// whole log buffer (per [`Action::description_for`] override).
+const CAT_YANK_CURL: &[Category] = &[
+  Category::Models,
+  Category::Logs,
+  Category::Chat,
+  Category::Embed,
+  Category::Rerank,
+];
+/// Motion keys (↑/↓/k/j) appear under Models for cursor movement,
+/// under Logs as scroll, under Settings as field cycle, and under
+/// the HF dialog for row selection.
+const CAT_MOTION: &[Category] = &[
+  Category::Models,
+  Category::Logs,
+  Category::Settings,
+  Category::HfDialog,
+];
 
 /// Default keymap — one row per (action, key) chord, scoped to the
 /// focuses where the binding fires. Replaces the v1 per-focus table
@@ -329,40 +446,50 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::ToggleHelp,
     label: "?",
-    description: "help",
+    hint: "help",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('q'),
     mods: KeyModifiers::NONE,
     action: Action::Quit,
     label: "q",
-    description: "quit",
+    hint: "quit",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('c'),
     mods: KeyModifiers::CONTROL,
     action: Action::Quit,
     label: crate::ctrl_label!("c"),
-    description: "quit",
+    hint: "quit",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('t'),
     mods: KeyModifiers::NONE,
     action: Action::CycleTheme,
     label: "t",
-    description: "theme",
+    hint: "theme",
+    description: Some("next theme"),
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('T'),
     mods: KeyModifiers::SHIFT,
     action: Action::CycleThemePrev,
     label: "T",
-    description: "prev theme",
+    hint: "prev theme",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   // ─── Daemon-level / destructive (all behind Ctrl) ───────────
   Binding {
@@ -370,123 +497,153 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::CONTROL,
     action: Action::RestartDaemon,
     label: crate::ctrl_label!("r"),
-    description: "restart daemon",
+    hint: "restart",
+    description: Some("restart daemon"),
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('k'),
     mods: KeyModifiers::CONTROL,
     action: Action::KillDaemon,
     label: crate::ctrl_label!("k"),
-    description: "kill daemon",
+    hint: "kill",
+    description: Some("kill daemon"),
     scopes: FocusSet::LIST,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('s'),
     mods: KeyModifiers::CONTROL,
     action: Action::StopModel,
     label: crate::ctrl_label!("s"),
-    description: "stop",
+    hint: "stop",
+    description: Some("stop launch"),
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('d'),
     mods: KeyModifiers::CONTROL,
     action: Action::DeleteModel,
     label: crate::ctrl_label!("d"),
-    description: "delete",
+    hint: "delete",
+    description: Some("delete from disk"),
     scopes: FocusSet::LIST,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Char('x'),
     mods: KeyModifiers::CONTROL,
     action: Action::CancelDownload,
     label: crate::ctrl_label!("x"),
-    description: "cancel",
+    hint: "cancel",
+    description: Some("cancel download"),
     scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   // ─── Motion (arrows + vi aliases) ───────────────────────────
-  // MoveUp/MoveDown carry `description_for(RightPane) = "scroll
-  // up/down"` so the right pane chip reads naturally.
+  // Description_for(Category::Logs / Settings) reshapes these as
+  // "scroll up/down" and "prev/next field" in the help overlay.
   Binding {
     key: KeyCode::Up,
     mods: KeyModifiers::NONE,
     action: Action::MoveUp,
     label: "↑",
-    description: "up",
+    hint: "up",
+    description: None,
     scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
+    categories: CAT_MOTION,
   },
   Binding {
     key: KeyCode::Char('k'),
     mods: KeyModifiers::NONE,
     action: Action::MoveUp,
     label: "k",
-    description: "up",
+    hint: "up",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_MOTION,
   },
   Binding {
     key: KeyCode::Down,
     mods: KeyModifiers::NONE,
     action: Action::MoveDown,
     label: "↓",
-    description: "down",
+    hint: "down",
+    description: None,
     scopes: FocusSet::NAV.union(FocusSet::HF_DIALOG),
+    categories: CAT_MOTION,
   },
   Binding {
     key: KeyCode::Char('j'),
     mods: KeyModifiers::NONE,
     action: Action::MoveDown,
     label: "j",
-    description: "down",
+    hint: "down",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_MOTION,
   },
   Binding {
     key: KeyCode::PageUp,
     mods: KeyModifiers::NONE,
     action: Action::PageUp,
     label: "PgUp",
-    description: "page up",
+    hint: "page up",
+    description: None,
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::PageDown,
     mods: KeyModifiers::NONE,
     action: Action::PageDown,
     label: "PgDn",
-    description: "page down",
+    hint: "page down",
+    description: None,
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::Char('g'),
     mods: KeyModifiers::NONE,
     action: Action::GoTop,
     label: "g",
-    description: "top",
+    hint: "top",
+    description: Some("top of list"),
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::Home,
     mods: KeyModifiers::NONE,
     action: Action::GoTop,
     label: "Home",
-    description: "top",
+    hint: "top",
+    description: Some("top of list"),
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::Char('G'),
     mods: KeyModifiers::SHIFT,
     action: Action::GoBottom,
     label: "G",
-    description: "bottom",
+    hint: "bottom",
+    description: Some("bottom of list"),
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::End,
     mods: KeyModifiers::NONE,
     action: Action::GoBottom,
     label: "End",
-    description: "bottom",
+    hint: "bottom",
+    description: Some("bottom of list"),
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   // ─── Pane navigation (Tab in every TUI focus; vi aliases nav-only)
   Binding {
@@ -494,32 +651,40 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::NextFocus,
     label: TAB_LABEL,
-    description: "next pane",
+    hint: "next pane",
+    description: None,
     scopes: FocusSet::TUI,
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::BackTab,
     mods: KeyModifiers::SHIFT,
     action: Action::PrevFocus,
     label: SHIFT_TAB_LABEL,
-    description: "prev pane",
+    hint: "prev pane",
+    description: None,
     scopes: FocusSet::TUI,
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::Char('l'),
     mods: KeyModifiers::NONE,
     action: Action::NextFocus,
     label: "l",
-    description: "next pane",
+    hint: "next pane",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::Char('h'),
     mods: KeyModifiers::NONE,
     action: Action::PrevFocus,
     label: "h",
-    description: "prev pane",
+    hint: "prev pane",
+    description: None,
     scopes: FocusSet::NAV,
+    categories: CAT_PANE_NAV,
   },
   // ─── Shift-letter quick-jumps (navigation policy: Shift = navigate)
   Binding {
@@ -527,57 +692,74 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::SHIFT,
     action: Action::FocusList,
     label: "M",
-    description: "models",
+    hint: "models",
+    description: Some("models list"),
     scopes: FocusSet::NAV,
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::Char('L'),
     mods: KeyModifiers::SHIFT,
     action: Action::FocusLogsTab,
     label: "L",
-    description: "logs",
+    hint: "logs",
+    description: Some("logs tab"),
     scopes: FocusSet::NAV,
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::Char('C'),
     mods: KeyModifiers::SHIFT,
     action: Action::FocusChatTab,
     label: "C",
-    description: "chat/embed/rerank",
+    hint: "chat/embed/rerank",
+    description: Some("chat / embed / rerank"),
     scopes: FocusSet::NAV,
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::Char('E'),
     mods: KeyModifiers::SHIFT,
     action: Action::FocusChatTab,
     label: "E",
-    description: "chat/embed/rerank",
+    hint: "chat/embed/rerank",
+    description: Some("chat / embed / rerank"),
     scopes: FocusSet::NAV,
+    // Same action as Shift+C; grouped under PaneNav so the help
+    // overlay merges into a single `C,E,R` row.
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::Char('R'),
     mods: KeyModifiers::SHIFT,
     action: Action::FocusChatTab,
     label: "R",
-    description: "chat/embed/rerank",
+    hint: "chat/embed/rerank",
+    description: Some("chat / embed / rerank"),
     scopes: FocusSet::NAV,
+    categories: CAT_PANE_NAV,
   },
   Binding {
     key: KeyCode::Char('S'),
     mods: KeyModifiers::SHIFT,
     action: Action::FocusSettingsTab,
     label: "S",
-    description: "settings",
+    hint: "settings",
+    description: Some("settings tab"),
     scopes: FocusSet::NAV,
+    categories: CAT_PANE_NAV,
   },
-  // HF pull dialog. `P` is the "Pull" mnemonic.
+  // HF pull dialog. `P` is the "Pull" mnemonic. Scoped to NAV so it
+  // fires from both Models and right pane (every non-input focus).
   Binding {
     key: KeyCode::Char('P'),
     mods: KeyModifiers::SHIFT,
     action: Action::OpenHfDialog,
     label: "P",
-    description: "pull from HF",
-    scopes: FocusSet::LIST,
+    hint: "pull",
+    description: Some("pull from HF"),
+    scopes: FocusSet::NAV,
+    categories: CAT_GLOBAL,
   },
   // ─── Filter / favourite (List only) ─────────────────────────
   Binding {
@@ -585,16 +767,20 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::OpenFilter,
     label: "/",
-    description: "filter",
+    hint: "filter",
+    description: Some("open filter input"),
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::Char('f'),
     mods: KeyModifiers::NONE,
     action: Action::ToggleFavorite,
     label: "f",
-    description: "favorite",
+    hint: "favorite",
+    description: Some("toggle favorite ★"),
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   // ─── Yank / copy. `y` is a vim-style alias for `c`. ─────────
   Binding {
@@ -602,32 +788,42 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::YankUrl,
     label: "u",
-    description: "url",
+    hint: "url",
+    description: Some("copy server URL"),
     scopes: FocusSet::NAV,
+    categories: CAT_YANK,
   },
   Binding {
     key: KeyCode::Char('c'),
     mods: KeyModifiers::NONE,
     action: Action::YankCurl,
     label: "c",
-    description: "curl",
+    hint: "curl",
+    description: Some("copy curl command"),
     scopes: FocusSet::NAV,
+    categories: CAT_YANK_CURL,
   },
   Binding {
     key: KeyCode::Char('y'),
     mods: KeyModifiers::NONE,
     action: Action::YankCurl,
     label: "y",
-    description: "curl",
+    hint: "curl",
+    description: Some("copy curl command"),
     scopes: FocusSet::NAV,
+    // Same action as `c`; categories match so the help overlay
+    // merges the two labels into a single `c,y` row.
+    categories: CAT_YANK_CURL,
   },
   Binding {
     key: KeyCode::Char('p'),
     mods: KeyModifiers::NONE,
     action: Action::YankPath,
     label: "p",
-    description: "path",
+    hint: "path",
+    description: Some("copy file path"),
     scopes: FocusSet::NAV,
+    categories: CAT_YANK,
   },
   // ─── Right-pane affordances (Settings / Logs) ───────────────
   Binding {
@@ -635,32 +831,40 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::EnterEdit,
     label: "e",
-    description: "edit",
+    hint: "edit",
+    description: Some("enter edit mode"),
     scopes: FocusSet::RIGHT_PANE,
+    categories: &[Category::Settings, Category::Chat, Category::Embed, Category::Rerank],
   },
   Binding {
     key: KeyCode::Char('s'),
     mods: KeyModifiers::NONE,
     action: Action::ToggleAutoScroll,
     label: "s",
-    description: "auto-scroll",
+    hint: "auto-scroll",
+    description: None,
     scopes: FocusSet::RIGHT_PANE,
+    categories: &[Category::Logs, Category::Settings],
   },
   Binding {
     key: KeyCode::Right,
     mods: KeyModifiers::NONE,
     action: Action::CycleValueNext,
     label: "→",
-    description: "next value",
+    hint: "next value",
+    description: None,
     scopes: FocusSet::RIGHT_PANE,
+    categories: CAT_SETTINGS,
   },
   Binding {
     key: KeyCode::Left,
     mods: KeyModifiers::NONE,
     action: Action::CycleValuePrev,
     label: "←",
-    description: "prev value",
+    hint: "prev value",
+    description: None,
     scopes: FocusSet::RIGHT_PANE,
+    categories: CAT_SETTINGS,
   },
   // ─── Enter — five Action variants across disjoint scopes ────
   Binding {
@@ -668,45 +872,61 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::OpenLaunchPicker,
     label: ENTER_LABEL,
-    description: "launch",
+    hint: "launch",
+    description: Some("launch focused model"),
     scopes: FocusSet::LIST,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::Submit,
     label: ENTER_LABEL,
-    description: "submit",
+    hint: "submit",
+    description: Some("submit"),
     scopes: FocusSet::FILTER
       .union(FocusSet::RIGHT_PANE)
       .union(FocusSet::EMBED_INPUT)
       .union(FocusSet::RERANK_INPUT)
       .union(FocusSet::CONFIRM_POPUP)
       .union(FocusSet::HF_DIALOG),
+    categories: &[
+      Category::Models,
+      Category::Settings,
+      Category::Embed,
+      Category::Rerank,
+      Category::HfDialog,
+    ],
   },
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::NONE,
     action: Action::SendChat,
     label: ENTER_LABEL,
-    description: "send",
+    hint: "send",
+    description: Some("send chat"),
     scopes: FocusSet::CHAT_INPUT,
+    categories: CAT_CHAT,
   },
   Binding {
     key: KeyCode::Enter,
     mods: KeyModifiers::SHIFT,
     action: Action::InsertNewline,
     label: SHIFT_ENTER_LABEL,
-    description: "newline",
+    hint: "newline",
+    description: Some("insert newline"),
     scopes: FocusSet::INPUT,
+    categories: CAT_INPUT,
   },
   Binding {
     key: KeyCode::Char('r'),
     mods: KeyModifiers::CONTROL,
     action: Action::ToggleThinkCollapse,
     label: crate::ctrl_label!("r"),
-    description: "toggle reasoning",
+    hint: "toggle reasoning",
+    description: Some("toggle <think> blocks"),
     scopes: FocusSet::CHAT_INPUT,
+    categories: CAT_CHAT,
   },
   // ─── Esc — five disjoint actions across the focus families ──
   Binding {
@@ -714,40 +934,50 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::FocusList,
     label: ESC_LABEL,
-    description: "models list",
+    hint: "models list",
+    description: Some("focus models list"),
     scopes: FocusSet::RIGHT_PANE,
+    categories: &[Category::Logs, Category::Settings, Category::Chat, Category::Embed, Category::Rerank],
   },
   Binding {
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::ClearFilter,
     label: ESC_LABEL,
-    description: "clear",
+    hint: "clear",
+    description: Some("clear filter"),
     scopes: FocusSet::FILTER,
+    categories: CAT_MODELS,
   },
   Binding {
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::ExitEdit,
     label: ESC_LABEL,
-    description: "exit edit",
+    hint: "exit edit",
+    description: None,
     scopes: FocusSet::INPUT,
+    categories: CAT_INPUT,
   },
   Binding {
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::Cancel,
     label: ESC_LABEL,
-    description: "cancel",
+    hint: "cancel",
+    description: Some("cancel prompt"),
     scopes: FocusSet::CONFIRM_POPUP,
+    categories: CAT_GLOBAL,
   },
   Binding {
     key: KeyCode::Esc,
     mods: KeyModifiers::NONE,
     action: Action::Cancel,
     label: ESC_LABEL,
-    description: "close",
+    hint: "close",
+    description: Some("close dialog"),
     scopes: FocusSet::HF_DIALOG,
+    categories: CAT_HF_DIALOG,
   },
   // ─── Rerank field cycle (↑↓ inside rerank input only) ───────
   // Collides with MoveUp/MoveDown on the same keys; disjoint
@@ -757,16 +987,20 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     mods: KeyModifiers::NONE,
     action: Action::NextField,
     label: "↓",
-    description: "next field",
+    hint: "next field",
+    description: None,
     scopes: FocusSet::RERANK_INPUT,
+    categories: CAT_RERANK,
   },
   Binding {
     key: KeyCode::Up,
     mods: KeyModifiers::NONE,
     action: Action::PrevField,
     label: "↑",
-    description: "prev field",
+    hint: "prev field",
+    description: None,
     scopes: FocusSet::RERANK_INPUT,
+    categories: CAT_RERANK,
   },
 ];
 
@@ -898,14 +1132,19 @@ impl KeyMap {
         }
       };
       // Find every existing row for this action; capture the union
-      // of their scopes and the first description we encounter.
+      // of their scopes plus the first hint / description / categories
+      // we encounter so the override keeps the UI text.
       let mut combined_scopes = FocusSet::EMPTY;
-      let mut description: &'static str = "";
+      let mut hint: &'static str = "";
+      let mut description: Option<&'static str> = None;
+      let mut categories: &'static [Category] = &[];
       for b in self.flat.iter() {
         if b.action == action {
           combined_scopes = combined_scopes.union(b.scopes);
-          if description.is_empty() {
+          if hint.is_empty() {
+            hint = b.hint;
             description = b.description;
+            categories = b.categories;
           }
         }
       }
@@ -939,8 +1178,10 @@ impl KeyMap {
         mods: spec.mods,
         action,
         label: leaked_label,
+        hint,
         description,
         scopes: combined_scopes,
+        categories,
       });
     }
     self.per_focus = build_per_focus(&self.flat);
@@ -1026,28 +1267,47 @@ impl Action {
   /// Help-bar / overlay callers prefer this over the binding's
   /// raw description so the chip text matches what the action
   /// will actually do in the current pane.
-  pub fn description_for(self, focus: Focus) -> Option<&'static str> {
+  pub fn hint_for(self, focus: Focus) -> Option<&'static str> {
     match (self, focus) {
-      (Action::Submit, Focus::Filter) => Some("launch"),
-      (Action::Submit, Focus::RightPane) => Some("launch (Settings)"),
+      (Action::Submit, Focus::Filter) => Some("apply"),
+      (Action::Submit, Focus::RightPane) => Some("launch/save"),
       (Action::Submit, Focus::EmbedInput) => Some("embed"),
       (Action::Submit, Focus::RerankInput) => Some("query/add candidate"),
       (Action::Submit, Focus::ConfirmPopup) => Some("confirm"),
       (Action::Submit, Focus::HfDialog) => Some("open / confirm"),
-      // Motion in the right pane is scroll, not row movement. The
-      // Settings tab routes this in the handler.
+      // Motion in the right pane is scroll on the Logs tab, field
+      // cycle on Settings. The hint surfaces the live tab via the
+      // chip-rendering callers (right pane reads `app.right_tab`).
       (Action::MoveUp, Focus::RightPane) => Some("scroll up"),
       (Action::MoveDown, Focus::RightPane) => Some("scroll down"),
-      // Cancel reads "close" in the HF dialog (dismiss the modal)
-      // and "cancel" in the confirm popup (cancel the destructive
-      // action).
       (Action::Cancel, Focus::HfDialog) => Some("close"),
-      // `FocusList` is reachable from both the right pane (Esc =
-      // "models list") and the right pane via Shift+M (= "models").
-      // The two chords cluster under one help row; we want the more
-      // specific "models list" wording when read from the right
-      // pane context.
       (Action::FocusList, Focus::RightPane) => Some("models list"),
+      _ => None,
+    }
+  }
+
+  /// Per-category description override for the help overlay. Lets a
+  /// single `Binding` row (e.g. `↑ MoveUp`) surface under several
+  /// categories with section-specific wording.
+  pub fn description_for(self, category: Category) -> Option<&'static str> {
+    match (self, category) {
+      // Motion: cursor in Models, scroll in Logs, field cycle in
+      // Settings, row selection in HfDialog (uses default text).
+      (Action::MoveUp, Category::Logs) => Some("scroll up"),
+      (Action::MoveDown, Category::Logs) => Some("scroll down"),
+      (Action::MoveUp, Category::Settings) => Some("prev field"),
+      (Action::MoveDown, Category::Settings) => Some("next field"),
+      // Submit reshapes per editorial section.
+      (Action::Submit, Category::Models) => Some("apply filter"),
+      (Action::Submit, Category::Settings) => Some("launch / save"),
+      (Action::Submit, Category::Embed) => Some("send embed"),
+      (Action::Submit, Category::Rerank) => Some("query / add"),
+      (Action::Submit, Category::HfDialog) => Some("open / confirm"),
+      // Settings repurposes `s` as stop-launch when a launch is live.
+      (Action::ToggleAutoScroll, Category::Settings) => Some("stop launch"),
+      // Yank `c` on the Logs tab copies the entire log buffer rather
+      // than the curl command.
+      (Action::YankCurl, Category::Logs) => Some("copy logs"),
       _ => None,
     }
   }
