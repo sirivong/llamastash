@@ -192,7 +192,7 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
   // `&[CatalogRow]`). Built in-process here because the existing
   // `cli::resolve::fetch_catalog` round-trips through IPC, which
   // we explicitly want to avoid on the hot path.
-  let snap = state.catalog.snapshot().await;
+  let snap = state.ctx.catalog.snapshot().await;
   let rows: Vec<CatalogRow> = snap.iter().map(catalog_row_from_discovered).collect();
   let resolved = match resolve_model(&rows, &requested) {
     Ok(r) => r,
@@ -218,7 +218,7 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
   // Walk the supervisor snapshot for a Ready entry serving the
   // resolved row's path. Two HashMap lookups + one state read each
   // — well within the hot-path budget the plan asks for.
-  let sup_snap = state.supervisors.snapshot().await;
+  let sup_snap = state.ctx.supervisors.snapshot().await;
   for (_launch_id, model) in sup_snap.into_iter() {
     if !same_path(&model.id().path, &resolved.path) {
       continue;
@@ -397,13 +397,13 @@ fn served_name_for_row(row: &CatalogRow) -> String {
 /// against the catalog snapshot to find the matching `arch`, and
 /// stamps the latest MRU timestamp.
 async fn collect_fallback_candidates(state: &Arc<ProxyState>) -> Vec<FallbackCandidate> {
-  let sup_snap = state.supervisors.snapshot().await;
+  let sup_snap = state.ctx.supervisors.snapshot().await;
   // Build a `path -> CatalogRow` lookup from the catalog snapshot
   // so we can attach arch + display label without re-walking the
   // catalog for each supervisor entry. The catalog is small (tens
   // to hundreds of rows in v1) so a HashMap build is fine on this
   // path — only triggered when an auto-start has just failed.
-  let cat_snap = state.catalog.snapshot().await;
+  let cat_snap = state.ctx.catalog.snapshot().await;
   let mut by_path: std::collections::HashMap<String, &DiscoveredModel> =
     std::collections::HashMap::with_capacity(cat_snap.len());
   for m in cat_snap.iter() {

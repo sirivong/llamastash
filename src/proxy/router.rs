@@ -172,7 +172,7 @@ async fn health(state: Arc<ProxyState>) -> ProxyResponse {
   // discovery surfaces every row, even parse-error rows, so this
   // matches what `/v1/models` returns.
   let models_loaded = count_ready(&state).await;
-  let models_discovered = state.catalog.len().await;
+  let models_discovered = state.ctx.catalog.len().await;
   let body = json!({
     "status": "ok",
     "models_loaded": models_loaded,
@@ -188,7 +188,7 @@ async fn health(state: Arc<ProxyState>) -> ProxyResponse {
 /// snapshot is a sequence of cheap clones rather than one global
 /// lock — consistent with how `status_handler` walks the registry.
 async fn count_ready(state: &ProxyState) -> usize {
-  let snap = state.supervisors.snapshot().await;
+  let snap = state.ctx.supervisors.snapshot().await;
   let mut ready = 0usize;
   for (_id, model) in snap {
     if matches!(model.state().await, ManagedState::Ready) {
@@ -202,7 +202,7 @@ async fn count_ready(state: &ProxyState) -> usize {
 /// sorted alphabetically by `id`. Empty catalog returns
 /// `{"object":"list","data":[]}` (not a 404, not an error).
 async fn list_models(state: Arc<ProxyState>) -> ProxyResponse {
-  let snap = state.catalog.snapshot().await;
+  let snap = state.ctx.catalog.snapshot().await;
   let mut rows: Vec<ModelObject> = snap
     .iter()
     .map(|m| ModelObject::new(model_id_for(m)))

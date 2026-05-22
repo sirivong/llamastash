@@ -286,7 +286,7 @@ async fn verify_port_binding(
   port: u16,
   expected_id: &crate::gguf::identity::ModelId,
 ) -> bool {
-  let snap = state.supervisors.snapshot().await;
+  let snap = state.ctx.supervisors.snapshot().await;
   for (_launch_id, model) in snap.into_iter() {
     if model.port() != port {
       continue;
