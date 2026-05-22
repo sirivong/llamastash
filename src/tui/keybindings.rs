@@ -834,7 +834,12 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     hint: "edit",
     description: Some("enter edit mode"),
     scopes: FocusSet::RIGHT_PANE,
-    categories: &[Category::Settings, Category::Chat, Category::Embed, Category::Rerank],
+    categories: &[
+      Category::Settings,
+      Category::Chat,
+      Category::Embed,
+      Category::Rerank,
+    ],
   },
   Binding {
     key: KeyCode::Char('s'),
@@ -937,7 +942,13 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     hint: "models list",
     description: Some("focus models list"),
     scopes: FocusSet::RIGHT_PANE,
-    categories: &[Category::Logs, Category::Settings, Category::Chat, Category::Embed, Category::Rerank],
+    categories: &[
+      Category::Logs,
+      Category::Settings,
+      Category::Chat,
+      Category::Embed,
+      Category::Rerank,
+    ],
   },
   Binding {
     key: KeyCode::Esc,

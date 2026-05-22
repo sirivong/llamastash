@@ -125,11 +125,7 @@ fn build_sections(app: &App) -> Vec<Section> {
     let mut rows: Vec<(String, String)> = Vec::with_capacity(action_order.len());
     for (idx, action) in action_order.iter().enumerate() {
       let group = &by_action[&idx];
-      let keys = group
-        .iter()
-        .map(|b| b.label)
-        .collect::<Vec<_>>()
-        .join(",");
+      let keys = group.iter().map(|b| b.label).collect::<Vec<_>>().join(",");
       let description = action
         .description_for(category)
         .map(|s| s.to_string())
@@ -151,7 +147,11 @@ fn build_sections(app: &App) -> Vec<Section> {
 /// that appear under multiple focuses (the per-focus cache stores
 /// the same binding once per focus).
 fn collect_flat(app: &App) -> Vec<&Binding> {
-  let mut seen: Vec<(crossterm::event::KeyCode, crossterm::event::KeyModifiers, Action)> = Vec::new();
+  let mut seen: Vec<(
+    crossterm::event::KeyCode,
+    crossterm::event::KeyModifiers,
+    Action,
+  )> = Vec::new();
   let mut out: Vec<&Binding> = Vec::new();
   for focus in [
     Focus::List,
@@ -219,8 +219,7 @@ fn render_binding_line(keys: &str, description: &str, palette: &Palette) -> Line
       Style::default()
         .fg(palette.label)
         .add_modifier(Modifier::BOLD),
-    )
-,
+    ),
     Span::styled("  ".to_string(), Style::default()),
     Span::styled(description.to_string(), palette.text_style()),
   ])
@@ -267,11 +266,13 @@ mod tests {
   fn overlay_renders_global_section() {
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 36, &app);
-    assert!(frame.contains("General"), "missing General section:\n{frame}");
+    assert!(
+      frame.contains("General"),
+      "missing General section:\n{frame}"
+    );
     assert!(frame.contains("quit"), "missing quit row:\n{frame}");
     assert!(frame.contains("help"), "missing help row:\n{frame}");
   }
-
 
   #[test]
   fn overlay_lists_motion_under_multiple_sections() {
@@ -280,9 +281,15 @@ mod tests {
     // their category-specific overrides.
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 40, &app);
-    assert!(frame.contains("Models list"), "Models section missing:\n{frame}");
+    assert!(
+      frame.contains("Models list"),
+      "Models section missing:\n{frame}"
+    );
     assert!(frame.contains("Logs tab"), "Logs section missing:\n{frame}");
-    assert!(frame.contains("Settings tab"), "Settings section missing:\n{frame}");
+    assert!(
+      frame.contains("Settings tab"),
+      "Settings section missing:\n{frame}"
+    );
     assert!(
       frame.contains("scroll up") && frame.contains("scroll down"),
       "Logs motion overrides missing:\n{frame}"
@@ -299,7 +306,10 @@ mod tests {
     // surface them on one row as `c,y` rather than two separate rows.
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 40, &app);
-    assert!(frame.contains("c,y"), "aliased yank chord missing:\n{frame}");
+    assert!(
+      frame.contains("c,y"),
+      "aliased yank chord missing:\n{frame}"
+    );
   }
 
   #[test]
