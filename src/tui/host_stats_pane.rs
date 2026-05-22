@@ -90,10 +90,7 @@ fn cpu_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
   // sensor surfaced a reading. Same colour tiers as GPU temp.
   if let Some(temp) = host.cpu_temp_c {
     spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-      format!("{temp:.0}°C"),
-      Style::default().fg(gpu_temp_color(temp, palette)),
-    ));
+    spans.extend(temp_spans(temp, palette));
   }
   Line::from(spans)
 }
@@ -145,10 +142,7 @@ fn gpu_util_row<'a>(
   ];
   if let Some(temp) = host.gpu_temp_c {
     spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-      format!("{temp:.0}°C"),
-      Style::default().fg(gpu_temp_color(temp, palette)),
-    ));
+    spans.extend(temp_spans(temp, palette));
   }
   Line::from(spans)
 }
@@ -203,11 +197,11 @@ fn pluralize_gpu(n: u32) -> String {
 /// range so the trailing percent / units column always has room.
 fn bar_width_for(inner_width: u16) -> usize {
   let budget = inner_width as usize;
-  // Leave space for label + percent/value/temp. The 11-cell reserve
-  // covers the widest right-of-bar payload ("  100%  82°C" / a
-  // bytes pair like "14.2/24 G"), so the bar fills the rest of the
-  // row instead of leaving dead space against the right border.
-  let usable = budget.saturating_sub(LABEL_WIDTH + 11);
+  // Leave space for label + percent/value/temp. The 13-cell reserve
+  // covers the widest right-of-bar payload ("  100%  ▲ 82°C" — temp
+  // rows carry a 2-cell severity glyph in the warning/critical tiers
+  // so the bar doesn't shift width as temps cross thresholds).
+  let usable = budget.saturating_sub(LABEL_WIDTH + 13);
   usable.clamp(4, 14)
 }
 
@@ -255,6 +249,38 @@ fn gpu_temp_color(temp: f32, palette: &Palette) -> Color {
   }
 }
 
+/// Severity glyph for a temperature reading. Returns `""` on the
+/// green tier (no glyph), `"△ "` on yellow (warning), `"▲ "` on red
+/// (critical). Pairs with [`gpu_temp_color`] so themes that can't
+/// carry colour information (Mono) still differentiate `92°C` from
+/// `65°C` purely on glyph shape.
+fn temp_severity_glyph(temp: f32) -> &'static str {
+  if temp >= 82.0 {
+    "▲ "
+  } else if temp >= 70.0 {
+    "△ "
+  } else {
+    ""
+  }
+}
+
+/// Build the `glyph + value` spans for a temperature reading. The
+/// glyph carries the severity tier so colour isn't load-bearing; both
+/// glyph and value share the tier colour so colour-capable themes
+/// double-encode the signal. Reserves zero cells on the green tier
+/// (no glyph) so the common case still renders compactly.
+fn temp_spans<'a>(temp: f32, palette: &'a Palette) -> Vec<Span<'a>> {
+  let color = gpu_temp_color(temp, palette);
+  let glyph = temp_severity_glyph(temp);
+  let style = Style::default().fg(color);
+  let mut spans: Vec<Span<'a>> = Vec::with_capacity(2);
+  if !glyph.is_empty() {
+    spans.push(Span::styled(glyph, style));
+  }
+  spans.push(Span::styled(format!("{temp:.0}°C"), style));
+  spans
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -298,6 +324,55 @@ mod tests {
     assert_eq!(gpu_temp_color(50.0, palette), palette.success);
     assert_eq!(gpu_temp_color(70.0, palette), palette.warning);
     assert_eq!(gpu_temp_color(82.0, palette), palette.error);
+  }
+
+  #[test]
+  fn temp_severity_glyph_tiers_match_color_tiers() {
+    // No glyph on the green tier (compact), `△` on yellow, `▲` on red.
+    assert_eq!(temp_severity_glyph(0.0), "");
+    assert_eq!(temp_severity_glyph(69.9), "");
+    assert_eq!(temp_severity_glyph(70.0), "△ ");
+    assert_eq!(temp_severity_glyph(81.9), "△ ");
+    assert_eq!(temp_severity_glyph(82.0), "▲ ");
+    assert_eq!(temp_severity_glyph(105.0), "▲ ");
+  }
+
+  #[test]
+  fn temp_glyph_double_encodes_severity_on_mono_palette() {
+    // On Mono, `success` and `error` both collapse to `White` — colour
+    // alone can't tell `92°C` apart from `65°C`. The leading severity
+    // glyph carries the signal independently so the reading stays
+    // legible without colour.
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 30.0,
+      cpu_temp_c: Some(92.0),
+      ram_used_bytes: 1,
+      ram_total_bytes: 100,
+      gpu_backend: "cpu_only".into(),
+      ..Default::default()
+    };
+    let app = {
+      let mut a = App::new(AppOptions::default());
+      a.options.theme = crate::theme::ThemeName::Mono;
+      a
+    };
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(40, 7)).unwrap();
+    term
+      .draw(|f| render(f, Rect::new(0, 0, 40, 7), &snap, palette))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+    let mut frame = String::new();
+    for y in 0..buf.area.height {
+      for x in 0..buf.area.width {
+        frame.push_str(buf.cell((x, y)).unwrap().symbol());
+      }
+      frame.push('\n');
+    }
+    assert!(
+      frame.contains("▲ 92°C"),
+      "critical CPU temp should carry the `▲` glyph on Mono: {frame}"
+    );
   }
 
   #[test]

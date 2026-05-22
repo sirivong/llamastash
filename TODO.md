@@ -38,7 +38,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
   - [ ] Adaptive Panes.
   - [ ] Adaptive hints with priority ranks so that order doesn't matter.
   - [ ] Adaptive columns in model list. With priority ranks so that order doesn't matter.
-  - [ ] No visible severity encoding in the render (CPU temp 92 °C displays the same as 65 °C VRAM). a temp/severity glyph double encoded so color isn't load-bearing.
+  - [x] ~~No visible severity encoding in the render (CPU temp 92 °C displays the same as 65 °C VRAM). a temp/severity glyph double encoded so color isn't load-bearing.~~ — Temperature readings now carry a tier glyph (`△` warning ≥70°C, `▲` critical ≥82°C) alongside the existing colour, so themes that collapse `success`/`error` to the same hue (Mono) can still distinguish `92°C` from `65°C` by shape.
   - [x] ~~Fix: HF dialog binds only ↑↓ Enter Esc in the table. n/p paginate, o sorts, Backspace backs through stages but none surface in the help overlay because they're handled procedurally in events.rs.~~ — `o`/`n`/`p` now appear as display-only bindings under the `HF pull dialog` help section. Typing-to-filter and Backspace stage-back left for follow-up.
   - [x] ~~Ctrl+Q to Ctrl+K~~ — kill-daemon on `Ctrl+K`.
   - [x] ~~Add Shift+T for previous theme.~~ — `Shift+T` reverses the theme cycle via a new `CycleThemePrev` action.
