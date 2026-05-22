@@ -332,7 +332,7 @@ pub(crate) async fn handle_not_running(
 ) -> ProxyResponse {
   let outcome = launch::auto_start(state, &resolved_row).await;
   match outcome {
-    LaunchOutcome::Ready { port, .. } => {
+    LaunchOutcome::Ready { port } => {
       // Touch the MRU using the supervisor we just confirmed Ready.
       // The display name for the response header on the happy path
       // is the requested model name — no fallback, no surprise.
