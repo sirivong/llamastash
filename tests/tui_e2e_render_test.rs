@@ -239,19 +239,21 @@ fn dashboard_render_carries_key_landmarks() {
   assert!(frame.contains("mistral-7b"));
   assert!(frame.contains("phi-3"));
   // Folder headers reappear once Favorites no longer hides them.
-  assert!(
-    frame.contains("/m/x"),
-    "/m/x folder header missing: {frame}"
-  );
-  assert!(
-    frame.contains("/m/y"),
-    "/m/y folder header missing: {frame}"
-  );
+  // `friendly_group_label` collapses the parent path to its trailing
+  // segments, so `/m/x` renders as `m/x` in the section header.
+  assert!(frame.contains("m/x"), "m/x folder header missing: {frame}");
+  assert!(frame.contains("m/y"), "m/y folder header missing: {frame}");
   // The horizontal rule between Favorites and the folder sections
   // is painted with `─` (U+2500) — assert at least one full-width
-  // run sits between the Favorites header and the /m/x header.
+  // run sits between the Favorites header and the m/x header.
   let fav_at = frame.find("★ Favorites").expect("Favorites header");
-  let mx_at = frame.find("/m/x").expect("/m/x header");
+  // Search for the section header `m/x` after the Favorites position
+  // — the right-pane path row also surfaces `m/x` as a substring, so
+  // a bare `find` could resolve to that earlier match.
+  let mx_at = fav_at
+    + frame[fav_at..]
+      .find("m/x")
+      .expect("m/x header after Favorites");
   let between = &frame[fav_at..mx_at];
   assert!(
     between.contains("──────"),

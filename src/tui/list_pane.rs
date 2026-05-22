@@ -259,7 +259,7 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
   // preserved.
   for (parent, mut entries) in grouped {
     rows.push(ListRow::Header {
-      label: parent.display().to_string(),
+      label: crate::util::paths::friendly_group_label(parent),
     });
     entries.sort_by_key(|a| display_name(a));
     for m in entries {
@@ -330,8 +330,9 @@ fn surface_state_for(
 fn display_name(m: &DiscoveredModel) -> String {
   // `display_label` is populated by sources where the file basename
   // is hostile (Ollama's content-addressed `sha256-<hex>` blobs). For
-  // every other source (HF cache, LM Studio, user paths) it stays
-  // `None` and we keep the historic file_stem rendering.
+  // every other source (HF cache, LM Studio, user paths) we render
+  // the full file_stem so the user always sees the unambiguous
+  // weight identifier — quant, finetune, variant.
   if let Some(label) = &m.display_label {
     return label.clone();
   }
@@ -989,6 +990,15 @@ mod tests {
   }
 
   #[test]
+  fn display_name_returns_full_file_stem() {
+    let m = fake(
+      "/hf/models/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+      "/home/alice/.cache/huggingface/hub/models--bartowski--Qwen2.5-Coder-7B-Instruct-GGUF/snapshots/1234",
+    );
+    assert_eq!(display_name(&m), "Qwen2.5-Coder-7B-Instruct-Q4_K_M");
+  }
+
+  #[test]
   fn build_rows_places_running_section_at_top_with_per_launch_rows() {
     // Two launches of the same model should produce two Running
     // rows, each carrying its own `launch_id` and port. The section
@@ -1276,7 +1286,7 @@ mod tests {
         _ => None,
       })
       .collect();
-    assert_eq!(headers, vec!["/m/x".to_string(), "/m/y".to_string()]);
+    assert_eq!(headers, vec!["m/x".to_string(), "m/y".to_string()]);
   }
 
   fn title_text(line: &ratatui::text::Line<'_>) -> String {

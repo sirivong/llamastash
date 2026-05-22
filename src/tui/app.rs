@@ -1951,7 +1951,7 @@ mod tests {
       .collect();
     assert_eq!(
       headers,
-      vec!["/m/x".to_string()],
+      vec!["m/x".to_string()],
       "empty groups must be dropped"
     );
   }

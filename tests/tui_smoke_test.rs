@@ -98,7 +98,7 @@ fn populated_app_renders_directory_groups_and_status_glyph() {
     fake_model("/m/y/phi.gguf", "/m/y"),
   ];
   let frame = render_to_string(&mut app, 120, 20);
-  assert!(frame.contains("/m/x"), "directory group header missing");
+  assert!(frame.contains("m/x"), "directory group header missing");
   assert!(frame.contains("qwen"), "qwen row missing");
   assert!(frame.contains("phi"), "phi row missing");
   // Connected daemon shows the bare `daemon` label (no `connecting…`
@@ -119,7 +119,7 @@ fn favorites_render_above_directory_groups() {
   app.favorites = vec![PathBuf::from("/m/x/qwen.gguf")];
   let frame = render_to_string(&mut app, 120, 20);
   let fav_pos = frame.find("Favorites").expect("favorites header rendered");
-  let dir_pos = frame.find("/m/y").expect("directory header rendered");
+  let dir_pos = frame.find("m/y").expect("directory header rendered");
   assert!(
     fav_pos < dir_pos,
     "favorites must render above directory groups (fav={fav_pos}, dir={dir_pos})"

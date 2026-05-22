@@ -6,25 +6,25 @@
 │VRAM ██████░░░░ 14G/24G   ││models  3 found · 1 ready · 2 ★                                               ││ ██ ◡◡ ██ │
 │backend  NVML · 1 GPU     ││running 1 (qwen-7b :41100)                                                    ││  ▀████▀  │
 └──────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘└──────────┘
-┌ Models [3] · /:filter · ⏎:launch · Ctrl+s:stop · f:fav · p:path ─────┐┌ Settings │ Logs │ Chat ──────────────────────┐
-│      Name           Arch     Quant   Ctx     Size   Mode       Port  ││                                              │
-│▶ Running                                                             ││qwen-7b                                       │
-│ ● => qwen-7b        qwen3    Q4_K    32k     4.2G   chat       :41100││                                              │
-│★ Favorites                                                           ││ID:L1  :41100  ● ready  4.2G RAM · 312% CPU   │
-│   ★  mistral-7b     llama    Q4_K    8.0k    4.0G   chat       —     ││──────────────────────────────────────────────│
-│──────────────────────────────────────────────────────────────────────││Running launch                                │
-│/m/x                                                                  ││  launch          L1                          │
-│   ★  mistral-7b     llama    Q4_K    8.0k    4.0G   chat       —     ││  ctx             default                     │
-│/m/y                                                                  ││  reasoning       default                     │
-│      phi-3          phi      Q4_K    8.0k    3.9G   chat       —     ││  n_gpu_layers    default                     │
-│                                                                      ││  threads         default                     │
-│                                                                      ││  cache_type_k    default                     │
-│                                                                      ││  cache_type_v    default                     │
-│                                                                      ││  parallel        default                     │
-│                                                                      ││  flash_attn      default                     │
-│                                                                      ││  mlock           default                     │
-│                                                                      ││  no_mmap         default                     │
-│                                                                      ││  batch_size      default                     │
-│                                                                      ││  ubatch_size     default                     │
-│                                                                      ││  rope_freq_scale default                     │
-└ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ┘└ e:edit for launch · s:stop · ↑↓:scroll · p:pa┘
+┌ Models [3] · /:filter · ⏎:launch · Ctrl+s:stop · f:fav · p:path · u:url ───┐┌ Settings │ Logs │ Chat ────────────────┐
+│      Name                 Arch     Quant   Ctx     Size   Mode       Port  ││                                        │
+│▶ Running                                                                   ││ qwen-7b                                │
+│ ● => qwen-7b              qwen3    Q4_K    32k     4.2G   chat       :41100││ /m/x/qwen-7b.gguf                      │
+│★ Favorites                                                                 ││                                        │
+│   ★  mistral-7b           llama    Q4_K    8.0k    4.0G   chat       —     ││ ID:L1  :41100  ● ready  4.2G RAM · 312 │
+│────────────────────────────────────────────────────────────────────────────││ ────────────────────────────────────── │
+│m/x                                                                         ││ Running launch                         │
+│   ★  mistral-7b           llama    Q4_K    8.0k    4.0G   chat       —     ││   launch          L1                   │
+│m/y                                                                         ││   ctx             default              │
+│      phi-3                phi      Q4_K    8.0k    3.9G   chat       —     ││   reasoning       default              │
+│                                                                            ││   n_gpu_layers    default              │
+│                                                                            ││   threads         default              │
+│                                                                            ││   cache_type_k    default              │
+│                                                                            ││   cache_type_v    default              │
+│                                                                            ││   parallel        default              │
+│                                                                            ││   flash_attn      default              │
+│                                                                            ││   mlock           default              │
+│                                                                            ││   no_mmap         default              │
+│                                                                            ││   batch_size      default              │
+│                                                                            ││   ubatch_size     default              │
+└ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ e:edit for launch · s:stop · ↑↓:scroll ┘

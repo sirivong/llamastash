@@ -15,7 +15,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
 
 use crate::theme::Palette;
@@ -37,7 +37,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
   let mut outer = Block::default()
     .title(title_line)
     .borders(Borders::ALL)
-    .border_style(Style::default().fg(border_color));
+    .border_style(Style::default().fg(border_color))
+    .padding(Padding::horizontal(1));
   // All right-pane key hints live on the bottom border now —
   // contextual to the active tab and the current focus. Keeps the
   // top reserved for the tab strip alone (cleaner mnemonic
@@ -49,17 +50,19 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
   let inner = outer.inner(area);
   frame.render_widget(outer, area);
 
-  // Inner stack: 1 blank pad, name (1 row), 1 blank gap, stats
-  // (1 row), separator line, tab content. The blank gap below the
-  // name lets the bold-blue model heading breathe before the dense
-  // `:port  state  RAM  CPU` line — matching kdash's panel header
-  // rhythm. The contextual hint chips ride alongside the tab strip
-  // in the block title.
+  // Inner stack: blank pad, name (bold), path (muted, wraps to as
+  // many lines as needed up to 3), blank gap, stats
+  // (`:port  state  RAM  CPU`), separator, tab content. Wrapping the
+  // path means narrow panes still surface the full filesystem
+  // location instead of a left-truncated stub. Capped at 3 lines so
+  // a pathological path can't push the tab body off-screen.
+  let path_lines = focused_path_line_count(app, inner.width);
   let layout = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
       Constraint::Length(1),
       Constraint::Length(1),
+      Constraint::Length(path_lines),
       Constraint::Length(1),
       Constraint::Length(1),
       Constraint::Length(1),
@@ -68,9 +71,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
     .split(inner);
 
   render_header_name(frame, layout[1], app, palette);
-  render_header_stats(frame, layout[3], app, palette);
-  render_separator(frame, layout[4], palette);
-  let body_area = layout[5];
+  render_header_path(frame, layout[2], app, palette);
+  render_header_stats(frame, layout[4], app, palette);
+  render_separator(frame, layout[5], palette);
+  let body_area = layout[6];
 
   match app.right_tab {
     RightTab::Logs => logs::render(frame, body_area, &app.logs_state, palette),
@@ -409,6 +413,81 @@ fn render_header_name(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
     },
   };
   frame.render_widget(Paragraph::new(name_line), area);
+}
+
+/// Render the muted path row sitting under the model name. Shows the
+/// focused model's full file path with `$HOME` collapsed to `~`,
+/// hard-wrapped into chunks that fit `area.width` so the full path is
+/// always visible (paths have no whitespace, so ratatui's default
+/// word-wrap would just truncate them). Blank when nothing is focused.
+fn render_header_path(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
+  let Some(path) = focused_path(app) else {
+    return;
+  };
+  let abbreviated = crate::util::paths::abbreviate_with_home(&path);
+  let width = area.width as usize;
+  let style = palette.muted_style();
+  let lines: Vec<Line<'_>> = wrap_path_chunks(&abbreviated, width, area.height as usize)
+    .into_iter()
+    .map(|chunk| Line::from(Span::styled(chunk, style)))
+    .collect();
+  frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Resolve the path the right pane is currently focused on — running
+/// launch first, falling back to the list-pane selection.
+fn focused_path(app: &App) -> Option<std::path::PathBuf> {
+  app
+    .right_pane_focus()
+    .map(|m| m.path.clone())
+    .or_else(|| app.focused_path())
+}
+
+/// Number of vertical rows the focused path needs at `inner_width`,
+/// clamped to `[1, 3]`. Used by the right-pane layout to reserve a
+/// variable-height slot for the path row so the path wraps cleanly
+/// without pushing tab content off-screen on pathological paths.
+fn focused_path_line_count(app: &App, inner_width: u16) -> u16 {
+  let Some(path) = focused_path(app) else {
+    return 1;
+  };
+  let abbreviated = crate::util::paths::abbreviate_with_home(&path);
+  wrap_path_chunks(&abbreviated, inner_width as usize, 3).len() as u16
+}
+
+/// Hard-wrap `s` into `max_lines` chunks of at most `width` chars
+/// each. Path strings have no whitespace, so ratatui's word-wrap
+/// truncates them; this function slices at character boundaries
+/// instead. The last chunk is left-truncated with a leading `…` when
+/// it overflows so the meaningful filename tail stays visible.
+fn wrap_path_chunks(s: &str, width: usize, max_lines: usize) -> Vec<String> {
+  if width == 0 || max_lines == 0 {
+    return vec![s.to_string()];
+  }
+  let chars: Vec<char> = s.chars().collect();
+  if chars.len() <= width {
+    return vec![s.to_string()];
+  }
+  let mut out: Vec<String> = Vec::with_capacity(max_lines);
+  let mut i = 0;
+  while i < chars.len() && out.len() < max_lines {
+    let end = (i + width).min(chars.len());
+    let chunk: String = chars[i..end].iter().collect();
+    out.push(chunk);
+    i = end;
+  }
+  // Overflow: the path didn't fit in `max_lines`. Replace the last
+  // chunk with a `…`-prefixed slice that keeps the path tail visible
+  // instead of cleaving off the filename.
+  if i < chars.len() {
+    if let Some(last) = out.last_mut() {
+      let want = width.saturating_sub(1).max(1);
+      let tail_start = chars.len().saturating_sub(want);
+      let tail: String = chars[tail_start..].iter().collect();
+      *last = format!("…{tail}");
+    }
+  }
+  out
 }
 
 /// Render line 2 of the header: `:port  state  RAM  CPU` for a
@@ -986,6 +1065,39 @@ mod tests {
   }
 
   #[test]
+  fn render_shows_muted_path_row_under_model_name() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![crate::discovery::DiscoveredModel {
+      path: PathBuf::from("/models/custom/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"),
+      parent: PathBuf::from("/models/custom"),
+      source: crate::discovery::ModelSource::UserPath,
+      metadata: None,
+      parse_error: None,
+      split_siblings: Vec::new(),
+      display_label: None,
+    }];
+    app.list_cursor = 2;
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(80, 14)).unwrap();
+    term
+      .draw(|f| render(f, Rect::new(0, 0, 80, 14), &app, palette, false))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+
+    let path = "/models/custom/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf";
+    let row = 3;
+    for (idx, ch) in path.chars().enumerate() {
+      let cell = buf.cell((2 + idx as u16, row)).unwrap();
+      assert_eq!(cell.symbol(), ch.to_string());
+      assert_eq!(cell.fg, palette.muted);
+    }
+  }
+
+  #[test]
   fn unlaunched_selection_shows_settings_only() {
     // The right pane follows the cursor. When the cursor sits on a
     // model with no managed launch (or no model at all), only the
@@ -1065,18 +1177,23 @@ mod tests {
       stats_row > name_row,
       "stats row {stats_row} should sit below name row {name_row}"
     );
-    // Round-8: the name and stats lines are separated by exactly
-    // one blank row so the bold-blue heading breathes.
+    // The header now spans name → muted path → blank gap → stats.
     assert_eq!(
       stats_row,
-      name_row + 2,
-      "stats row should sit one blank line below the name row"
+      name_row + 3,
+      "stats row should sit below the name + path rows with one blank gap"
     );
-    let gap_row = name_row + 1;
+    let path_row = name_row + 1;
+    assert!(
+      rows[path_row].contains("/m/qwen.gguf"),
+      "expected a full path row directly under the model name, got: {:?}",
+      rows[path_row]
+    );
+    let gap_row = name_row + 2;
     let gap_inner = rows[gap_row].trim_matches(|c| c == '│' || c == ' ');
     assert!(
       gap_inner.is_empty(),
-      "expected blank gap row between name and stats, got: {:?}",
+      "expected blank gap row between path and stats, got: {:?}",
       rows[gap_row]
     );
     assert!(

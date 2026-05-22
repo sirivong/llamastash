@@ -27,11 +27,12 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [x] ~~copy actions(url,path,curl,logs) should show a visual confirmation.~~ — toasts now read `copied URL/curl/path/logs via {backend}` so the user sees exactly what was copied.
 - [x] ~~The UI here in `init` doesn't look nice. Make those info inline with remaining UI.~~ — summary now renders via `cliclack::note` so every line keeps the panel border, then a single-line `outro` closes the session.
 - [ ] UI/UX UI beatifications/tweaks.
-  - [ ] Trim path names in model list grouping. Derive a short name. Show path in Right pane under the model name. It should be in muted color palette of the theme.
-  - [ ] Try some Padding for all panes.
-  - [ ] try 65x35 split for main panes
+  - [x] Trim path names in model list grouping. Derive a short name. Show path in Right pane under the model name. It should be in muted color palette of the theme.
+  - [x] Try some Padding for all panes.
+  - [x] try 65x35 split for main panes
   - [ ] Settings: when value is default it should be muted color. Else normal color
   - [ ] No logo in small widths < 120w
+  - [ ] wrong favorites count
   - [ ] Adaptive Panes.
   - [ ] Adaptive hints with priority ranks so that order doesn't matter.
   - [ ] Adaptive columns in model list. With priority ranks so that order doesn't matter.
@@ -65,6 +66,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 ### Follow-up
 
 - [ ] No glyphs fallback.
+- [ ] `show` command shows model info. gguf parses values, full path, size, etc and 
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
 - [ ] Some HF downloaded models fail to start??

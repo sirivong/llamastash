@@ -2,6 +2,13 @@
 
 All notable changes to LlamaStash will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project intends to follow [SemVer](https://semver.org/spec/v2.0.0.html) starting with the first stable release.
 
+## [Unreleased]
+
+- TUI: dashboard split now 65/35 (Models / right pane) with 1-cell horizontal padding inside both pane borders, so content breathes against the border line.
+- TUI: model-list section headers collapse the parent path to a short label — `owner/repo` for HuggingFace and LM Studio caches, `Ollama` for blob storage, and the trailing path segments for user-configured `model_paths`.
+- TUI: right pane shows the focused model's full file path under the model name in the theme's muted tone, hard-wrapped across up to 3 lines so narrow panes still surface the location instead of a truncation stub. `$HOME` collapses to `~`.
+- Makefile: `make run <args>` now forwards extra goals to `cargo run --`, so `make run list` / `make run start <model>` work without further plumbing. New `make render` target renders the TUI at a sweep of representative sizes for layout review.
+
 ## [0.0.1] — Unreleased
 
 First publicly-installable release. A single `llamastash` binary acts as TUI, CLI, and on-demand daemon for running local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp). Distributed via Cargo, a Homebrew tap, and a GitHub-hosted install script, with a marketing site at [llamastash.cli.rs](https://llamastash.cli.rs).

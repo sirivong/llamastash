@@ -175,6 +175,101 @@ pub fn init_snapshot_file() -> Option<PathBuf> {
   state_dir().map(|d| d.join("init_snapshot.json"))
 }
 
+/// Substitute `$HOME` for `~` when `path` is under the user's home
+/// directory, so right-pane and list-pane headers stay scannable.
+/// Returns the path verbatim when no home dir is available or the
+/// path is outside it.
+pub fn abbreviate_with_home(path: &Path) -> String {
+  if let Some(home) = home_dir() {
+    if let Ok(rest) = path.strip_prefix(&home) {
+      if rest.as_os_str().is_empty() {
+        return "~".to_string();
+      }
+      return format!("~/{}", rest.display());
+    }
+  }
+  path.display().to_string()
+}
+
+fn trailing_path_label(path: &Path, keep_segments: usize) -> String {
+  let parts: Vec<String> = path
+    .components()
+    .filter_map(|comp| comp.as_os_str().to_str())
+    .filter(|part| !part.is_empty() && *part != "/")
+    .map(ToOwned::to_owned)
+    .collect();
+  if parts.is_empty() {
+    return abbreviate_with_home(path);
+  }
+  let start = parts.len().saturating_sub(keep_segments);
+  let tail = parts[start..].join("/");
+  if start == 0 {
+    tail
+  } else {
+    format!("…/{tail}")
+  }
+}
+
+/// Derive a short, human-friendly label for a model-directory parent
+/// path. Used by the list pane's section headers in place of the full
+/// raw parent so the user reads `owner/repo` instead of a 100-cell
+/// cache path. Detects three common cache layouts:
+///
+/// * HuggingFace — `…/huggingface/hub/models--<owner>--<repo>/snapshots/<hash>`
+///   → `<owner>/<repo>`
+/// * LM Studio — `…/lmstudio-models/<owner>/<repo>` or
+///   `…/.lmstudio/models/<owner>/<repo>` → `<owner>/<repo>`
+/// * Ollama — `…/registry.ollama.ai/library/<name>/<tag>` → `<name>:<tag>`
+///
+/// Anything that doesn't match falls back to the last two path segments
+/// (`…/models/qwen`) so user-configured `model_paths` stay scannable
+/// instead of burning the whole left-pane width on an absolute path.
+pub fn friendly_group_label(parent: &Path) -> String {
+  for comp in parent.components() {
+    if let Some(s) = comp.as_os_str().to_str() {
+      if let Some(rest) = s.strip_prefix("models--") {
+        if let Some((owner, repo)) = rest.split_once("--") {
+          return format!("{owner}/{repo}");
+        }
+      }
+    }
+  }
+  let s = parent.to_string_lossy();
+  // Ollama blob storage — every model lives in `<root>/blobs/sha256-…`
+  // as a content-addressed file, so all rows share one parent dir.
+  // The per-model `display_label` carries the resolved `<name>:<tag>`,
+  // so the group header only needs to advertise the cache.
+  let last = parent.file_name().and_then(|n| n.to_str());
+  if last == Some("blobs") && (s.contains("ollama") || s.contains(".ollama")) {
+    return "Ollama".to_string();
+  }
+  if let Some(idx) = s.find("registry.ollama.ai/library/") {
+    let tail = &s[idx + "registry.ollama.ai/library/".len()..];
+    let mut parts = tail.split('/').filter(|p| !p.is_empty());
+    let name = parts.next().unwrap_or("");
+    let tag = parts.next().unwrap_or("");
+    if !name.is_empty() {
+      return if tag.is_empty() {
+        name.to_string()
+      } else {
+        format!("{name}:{tag}")
+      };
+    }
+  }
+  for marker in ["lmstudio-models/", ".lmstudio/models/"] {
+    if let Some(idx) = s.find(marker) {
+      let tail = &s[idx + marker.len()..];
+      let mut parts = tail.split('/').filter(|p| !p.is_empty());
+      let owner = parts.next().unwrap_or("");
+      let repo = parts.next().unwrap_or("");
+      if !owner.is_empty() && !repo.is_empty() {
+        return format!("{owner}/{repo}");
+      }
+    }
+  }
+  trailing_path_label(parent, 2)
+}
+
 #[cfg(test)]
 mod tests {
   use std::{
@@ -402,6 +497,24 @@ mod tests {
   fn sanitize_username_falls_back_when_all_chars_stripped() {
     assert_eq!(sanitize_username("///"), "default");
     assert_eq!(sanitize_username(""), "default");
+  }
+
+  #[test]
+  fn friendly_group_label_collapses_generic_paths_to_tail_segments() {
+    assert_eq!(
+      friendly_group_label(Path::new("/very/long/model/cache/custom/qwen")),
+      "…/custom/qwen"
+    );
+  }
+
+  #[test]
+  fn friendly_group_label_keeps_hf_owner_repo_short_form() {
+    assert_eq!(
+      friendly_group_label(Path::new(
+        "/home/alice/.cache/huggingface/hub/models--bartowski--Qwen2.5-Coder-7B-Instruct-GGUF/snapshots/1234"
+      )),
+      "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
+    );
   }
 
   #[test]

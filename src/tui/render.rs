@@ -336,7 +336,7 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) 
   let split = if show_right {
     Layout::default()
       .direction(Direction::Horizontal)
-      .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+      .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
       .split(area)
   } else {
     // Hidden right pane → Models list owns the whole body width.

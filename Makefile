@@ -46,9 +46,28 @@ snapshot: .venv/bin/python
 		.venv/bin/python scripts/regenerate-benchmark-snapshot.py; \
 	fi
 
-## Run the TUI against the local daemon (auto-spawns one if missing)
+## Run llamastash against the local daemon (auto-spawns one if missing).
+## Extra goals are forwarded to cargo as subcommand args, so:
+##   make run                     -> cargo run --                (launches TUI)
+##   make run list                -> cargo run -- list           (CLI subcommand)
+##   make run start qwen2.5-coder -> cargo run -- start qwen2.5-coder
+## The trailing `%:` catch-all turns the forwarded goals into no-op targets
+## so make doesn't error with "No rule to make target 'list'" afterward.
 run:
 	@cargo fmt --all && make lint && CARGO_INCREMENTAL=1 cargo run -- $(filter-out $@, $(MAKECMDGOALS))
+
+%:
+	@:
+
+## Render a single TUI frame at a handful of representative terminal sizes.
+## Useful for eyeballing the adaptive layout (split breakpoints, info-row /
+## logo cutoffs) without resizing your real terminal. Override with SIZES=...
+SIZES ?= 80x24 100x30 120x30 139x30 140x30 160x40 200x50
+render:
+	@for s in $(SIZES); do \
+		printf '\n\033[1m── %s ──\033[0m\n' "$$s"; \
+		cargo run --quiet -- --render --render-size $$s; \
+	done
 
 ## Run clippy with the project's deny-warnings policy (test-fixtures gates the integration surface)
 lint:
