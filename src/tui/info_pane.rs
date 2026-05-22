@@ -431,8 +431,8 @@ mod tests {
     let mut app = App::new(AppOptions::default());
     app.models = vec![fake_model("/m/a.gguf", "/m")];
     app.favorites = vec![
-      PathBuf::from("/m/a.gguf"),         // in catalog
-      PathBuf::from("/m/ghost.gguf"),     // stale — not in catalog
+      PathBuf::from("/m/a.gguf"),     // in catalog
+      PathBuf::from("/m/ghost.gguf"), // stale — not in catalog
     ];
     let rows = render_lines(&app);
     assert!(
@@ -452,10 +452,7 @@ mod tests {
     // star is visible on the row in its folder group. Each model
     // counts exactly once.
     let mut app = App::new(AppOptions::default());
-    app.models = vec![
-      fake_model("/m/a.gguf", "/m"),
-      fake_model("/m/b.gguf", "/m"),
-    ];
+    app.models = vec![fake_model("/m/a.gguf", "/m"), fake_model("/m/b.gguf", "/m")];
     app.managed = vec![fake_managed("/m/a.gguf", 41100, SurfaceState::Ready)];
     app.favorites = vec![PathBuf::from("/m/a.gguf"), PathBuf::from("/m/b.gguf")];
     let rows = render_lines(&app);

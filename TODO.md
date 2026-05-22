@@ -26,22 +26,21 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [x] ~~Add copy feature for logs pane. When in log pane, c should copy the full log text to clipboard and show a visual confirmation.~~ — `c` on the Logs tab now copies the full buffer and toasts `copied logs (N lines) via {backend}`.
 - [x] ~~copy actions(url,path,curl,logs) should show a visual confirmation.~~ — toasts now read `copied URL/curl/path/logs via {backend}` so the user sees exactly what was copied.
 - [x] ~~The UI here in `init` doesn't look nice. Make those info inline with remaining UI.~~ — summary now renders via `cliclack::note` so every line keeps the panel border, then a single-line `outro` closes the session.
+- [ ] wrong favorites count
 - [ ] UI/UX UI beatifications/tweaks.
   - [x] Trim path names in model list grouping. Derive a short name. Show path in Right pane under the model name. It should be in muted color palette of the theme.
   - [x] Try some Padding for all panes.
   - [x] try 65x35 split for main panes
   - [x] Settings: when value is default it should be muted color. Else normal color
+  - [ ] **IP** Model pane title "Models [x]" should be muted color when Model pane is not active. ie Right pane has focus.
   - [ ] No logo in small widths < 120w
-  - [ ] wrong favorites count
   - [ ] adjust min h x w supported.
   - [ ] Adaptive Panes.
   - [ ] Adaptive hints with priority ranks so that order doesn't matter.
   - [ ] Adaptive columns in model list. With priority ranks so that order doesn't matter.
   - [ ] No visible severity encoding in the render (CPU temp 92 °C displays the same as 65 °C VRAM). a temp/severity glyph double encoded so color isn't load-bearing.
+  - [x] ~~Fix: HF dialog binds only ↑↓ Enter Esc in the table. n/p paginate, o sorts, Backspace backs through stages but none surface in the help overlay because they're handled procedurally in events.rs.~~ — `o`/`n`/`p` now appear as display-only bindings under the `HF pull dialog` help section. Typing-to-filter and Backspace stage-back left for follow-up.
   - [x] ~~Ctrl+Q to Ctrl+K~~ — kill-daemon on `Ctrl+K`.
-  - [ ] Fix: HF dialog binds only ↑↓ Enter Esc in the table. The actual interactive surface uses typing-to-filter, n/p to paginate, o to sort, and Backspace to back through stages — none
-        of which appear in the help overlay because they're handled procedurally in events.rs. The dialog's own footer is the only discoverability surface for them. Real users will
-        discover them by trial; the global help screen will quietly lie by omission.
   - [x] ~~Add Shift+T for previous theme.~~ — `Shift+T` reverses the theme cycle via a new `CycleThemePrev` action.
   - [x] ~~do alt keybindings of yank for c,p,u anywhere in app.~~ — `y` is now a vi-style alias for `c` (yank curl / copy logs) in nav focuses; `u` and `p` still single-bound.
   - [x] ~~Remap 'd'. maybe to 'Shift+p'~~ — HF pull dialog opens with `Shift+P` ("P" for Pull).
@@ -71,6 +70,8 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 ### Follow-up
 
 - [ ] No glyphs fallback.
+- [ ] flag to disable proxy fallback (or flip to off by default?)
+- [ ] Loopback + LAN binding options for the proxy.
 - [ ] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".

@@ -10,6 +10,9 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - Makefile: `make run <args>` now forwards extra goals to `cargo run --`, so `make run list` / `make run start <model>` work without further plumbing. New `make render` target renders the TUI at a sweep of representative sizes for layout review.
 - TUI: keybinding model split into `hint` (short UI-chip text) and `description` (longer help-overlay text, optional, falls back to `hint`). Each binding now declares its help-overlay home via a `categories: &[Category]` list, replacing the hand-rolled `Row::Single`/`Row::Multi` constants. The help overlay derives its layout directly from `DEFAULT_BINDINGS` — adding a new chord no longer requires a parallel edit in `help_overlay.rs`. Net `-220` lines.
 - TUI: `Shift+P` (pull-from-HF) now fires from the right pane too, not just the models list. Scoped to NAV so input fields keep typing capital `P` as text.
+- TUI: help overlay grouping pruned — `General` absorbs pane navigation (Tab / Shift-letter quick-jumps), motion, edit, Shift+Enter newline, and a consolidated `Esc` row ("back/cancel/clear/exit edit"). Yank rows (`c/u/y/p`) collapse onto Models, Settings, and Logs (curl-only) instead of repeating under Chat/Embed/Rerank. `Ctrl+S` (stop) and `Ctrl+D` (delete) move out of General into their model surfaces.
+- TUI: help overlay scrolls — `j`/`k` (and arrows / PgUp / PgDn / Home) slide the content vertically when a short terminal can't fit every section; a `j/k:scroll` chip joins the title bar when overflow exists. Narrow widths (< 80 cells of usable inner space) collapse to a single column so descriptions stop truncating.
+- TUI: HF pull dialog's per-stage chords (`o` cycle sort, `n` next page, `p` previous page) now appear in the help overlay under `HF pull dialog` — previously the dialog's own footer was the only discoverability surface.
 
 ## [0.0.1] — Unreleased
 

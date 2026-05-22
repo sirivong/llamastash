@@ -43,7 +43,32 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     .find(|b| b.action == Action::ToggleHelp)
     .map(|b| b.label.to_string())
     .unwrap_or_else(|| "?".to_string());
-  let close_chip = format!("Esc/{toggle_key}:close");
+
+  // Compute layout + scroll bounds first so the title can advertise
+  // scrolling only when the content actually overflows the viewport.
+  let block_for_inner = Block::default()
+    .borders(Borders::ALL)
+    .padding(Padding::new(2, 2, 1, 1));
+  let inner = block_for_inner.inner(rect);
+  let sections = build_sections(app);
+  // Single-column layout when the overlay is narrow (≤ 80 cells of
+  // usable width) — column-balancing on a 25-cell strip just truncates
+  // everything. Wider terminals get the canonical 3-column packing.
+  let n_cols: usize = if inner.width >= 80 { 3 } else { 1 };
+  let columns = balance_into_columns(&sections, n_cols);
+  let tallest = columns
+    .iter()
+    .map(|col| column_height(col))
+    .max()
+    .unwrap_or(0) as u16;
+  let max_scroll = tallest.saturating_sub(inner.height);
+  let scroll_y = app.help_scroll.min(max_scroll);
+
+  let close_chip = if max_scroll > 0 {
+    format!("Esc/{toggle_key}:close · j/k:scroll")
+  } else {
+    format!("Esc/{toggle_key}:close")
+  };
   let block = Block::default()
     .title(Line::from(vec![
       Span::styled(
@@ -57,25 +82,31 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     .borders(Borders::ALL)
     .border_style(palette.accent_style())
     .padding(Padding::new(2, 2, 1, 1));
-  let inner = block.inner(rect);
   frame.render_widget(block, rect);
 
-  let sections = build_sections(app);
-  let columns = balance_into_columns(&sections, 3);
-
+  let constraints: Vec<Constraint> = (0..n_cols)
+    .map(|_| Constraint::Ratio(1, n_cols as u32))
+    .collect();
   let cols = Layout::default()
     .direction(Direction::Horizontal)
-    .constraints([
-      Constraint::Ratio(1, 3),
-      Constraint::Ratio(1, 3),
-      Constraint::Ratio(1, 3),
-    ])
+    .constraints(constraints)
     .split(inner);
 
   for (idx, col_sections) in columns.iter().enumerate() {
     let lines = render_column(col_sections, palette);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), cols[idx]);
+    frame.render_widget(
+      Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y, 0)),
+      cols[idx],
+    );
   }
+}
+
+/// Total line count a column would render at: title + one line per
+/// row + one blank trailer, summed across every section.
+fn column_height(sections: &[&Section]) -> usize {
+  sections.iter().map(|s| s.rows.len() + 2).sum()
 }
 
 /// One help-overlay section: a category title plus the resolved
@@ -87,50 +118,48 @@ struct Section {
 }
 
 /// Walk `Category::ALL` in order; for each, collect every binding
-/// whose `categories` contains that category. Bindings sharing an
-/// action collapse to one row whose label is `","`-joined (so `c,y`
-/// reads as a single curl row); their description comes from
-/// `Action::description_for(category)` with `Binding::description`
-/// as the fallback. Sections with no rows are dropped.
+/// whose `categories` contains that category. Bindings collapse to
+/// one row only when they share BOTH the same action and the same
+/// effective description — so `↑` and `k` merge into `↑,k → up/prev`
+/// (same action `MoveUp`, same description), but `Esc` and `M` stay
+/// separate (both `FocusList`, but Esc reads "back/cancel/clear/exit
+/// edit" while M reads "models list"). Sections with no rows drop.
 fn build_sections(app: &App) -> Vec<Section> {
-  // Walk the flat keymap once via the List focus — its `bindings_for`
-  // already strips per-focus duplicates, and the `categories` field
-  // tells us where each row lands. For categories whose canonical
-  // focus isn't List we re-resolve the labels under that focus so a
-  // config override on (say) `Focus::HfDialog` flows through.
   let mut sections: Vec<Section> = Vec::with_capacity(Category::ALL.len());
   let flat: Vec<&Binding> = collect_flat(app);
 
   for &category in Category::ALL {
-    // Group bindings landing in this category by action, preserving
-    // first-seen order. Multiple bindings per action merge their
-    // labels (e.g. `Up,k → up`).
-    let mut action_order: Vec<Action> = Vec::new();
-    let mut by_action: BTreeMap<usize, Vec<&Binding>> = BTreeMap::new();
+    // Group bindings landing in this category by (action, effective
+    // description), preserving first-seen order. Same-action bindings
+    // with diverging descriptions land in separate rows.
+    let mut row_order: Vec<(Action, String)> = Vec::new();
+    let mut by_row: BTreeMap<usize, Vec<&Binding>> = BTreeMap::new();
     for b in &flat {
       if !b.categories.contains(&category) {
         continue;
       }
-      let pos = action_order.iter().position(|a| *a == b.action);
+      let description = b
+        .action
+        .description_for(category)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| b.description().to_string());
+      let key = (b.action, description);
+      let pos = row_order.iter().position(|k| *k == key);
       let idx = match pos {
         Some(i) => i,
         None => {
-          action_order.push(b.action);
-          action_order.len() - 1
+          row_order.push(key);
+          row_order.len() - 1
         }
       };
-      by_action.entry(idx).or_default().push(b);
+      by_row.entry(idx).or_default().push(b);
     }
 
-    let mut rows: Vec<(String, String)> = Vec::with_capacity(action_order.len());
-    for (idx, action) in action_order.iter().enumerate() {
-      let group = &by_action[&idx];
+    let mut rows: Vec<(String, String)> = Vec::with_capacity(row_order.len());
+    for (idx, (_, description)) in row_order.iter().enumerate() {
+      let group = &by_row[&idx];
       let keys = group.iter().map(|b| b.label).collect::<Vec<_>>().join(",");
-      let description = action
-        .description_for(category)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| group[0].description().to_string());
-      rows.push((keys, description));
+      rows.push((keys, description.clone()));
     }
     if rows.is_empty() {
       continue;
@@ -275,35 +304,34 @@ mod tests {
   }
 
   #[test]
-  fn overlay_lists_motion_under_multiple_sections() {
-    // `↑/↓ MoveUp/MoveDown` should surface under Models with the
-    // default `"up"/"down"` text, and under Logs / Settings with
-    // their category-specific overrides.
+  fn overlay_lists_motion_only_under_global() {
+    // Motion (`↑/↓/k/j`) lives in Global as a single merged row —
+    // category-specific overrides for Logs/Settings have been
+    // retired. The Logs/Settings sections still exist with their
+    // own non-motion chords.
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 40, &app);
     assert!(
-      frame.contains("Models list"),
-      "Models section missing:\n{frame}"
-    );
-    assert!(frame.contains("Logs tab"), "Logs section missing:\n{frame}");
-    assert!(
-      frame.contains("Settings tab"),
-      "Settings section missing:\n{frame}"
+      frame.contains("General"),
+      "General section missing:\n{frame}"
     );
     assert!(
-      frame.contains("scroll up") && frame.contains("scroll down"),
-      "Logs motion overrides missing:\n{frame}"
+      frame.contains("up/prev") && frame.contains("down/next"),
+      "Global motion descriptions missing:\n{frame}"
     );
+    // Rerank's NextField/PrevField bindings still surface "prev field"
+    // in the Rerank section — assert only the Logs override is gone.
     assert!(
-      frame.contains("prev field") && frame.contains("next field"),
-      "Settings motion overrides missing:\n{frame}"
+      !frame.contains("scroll up") && !frame.contains("scroll down"),
+      "Logs motion overrides should be gone:\n{frame}"
     );
   }
 
   #[test]
   fn overlay_merges_aliased_chords() {
-    // `c` and `y` both bind to YankCurl; the Models section should
-    // surface them on one row as `c,y` rather than two separate rows.
+    // `c` and `y` both bind to YankCurl with the same description; the
+    // Models section should surface them on one row as `c,y` rather
+    // than two separate rows.
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 40, &app);
     assert!(
@@ -319,5 +347,89 @@ mod tests {
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 40, &app);
     assert!(frame.contains("pull"), "pull row missing:\n{frame}");
+  }
+
+  #[test]
+  fn esc_and_shift_m_render_as_separate_rows() {
+    // Esc (RIGHT_PANE → FocusList) and Shift+M (NAV → FocusList) share
+    // the same action but carry different descriptions — the help
+    // overlay must keep them on separate rows so the Esc line reads
+    // "back/cancel/clear/exit edit", not "models list". The renderer
+    // may soft-wrap the long description, so we sniff for the leading
+    // segment rather than the full string.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 40, &app);
+    assert!(
+      frame.contains("back/cancel/clear"),
+      "Esc consolidated description missing:\n{frame}"
+    );
+    assert!(
+      frame.contains("models list"),
+      "Shift+M models list row missing:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_lists_hf_dialog_stage_chords() {
+    // `o` (sort), `n` (next page), `p` (prev page) live in events.rs
+    // but surface in the help overlay via display-only bindings.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 40, &app);
+    assert!(
+      frame.contains("HF pull dialog"),
+      "HF section missing:\n{frame}"
+    );
+    assert!(
+      frame.contains("cycle sort order"),
+      "sort row missing:\n{frame}"
+    );
+    assert!(
+      frame.contains("next page"),
+      "next-page row missing:\n{frame}"
+    );
+    assert!(
+      frame.contains("prev page"),
+      "prev-page row missing:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_falls_back_to_single_column_on_narrow_widths() {
+    // Below the 80-cell threshold the renderer collapses to a single
+    // column so each row prints in full — three thin columns would
+    // truncate every description.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(60, 36, &app);
+    // General section still surfaces; "back/cancel/clear" survives the
+    // narrow render because the column is now full-width.
+    assert!(frame.contains("General"), "General missing:\n{frame}");
+    assert!(
+      frame.contains("back/cancel/clear"),
+      "Esc row missing under single-column:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_scrolls_when_help_scroll_advanced() {
+    // A short terminal can't fit every section. Advancing `help_scroll`
+    // should slide the content up so later rows appear and earlier
+    // rows leave the viewport.
+    let mut app = App::new(AppOptions::default());
+    let frame_top = render_to_string(80, 14, &app);
+    assert!(
+      frame_top.contains("General"),
+      "General must be visible at scroll=0:\n{frame_top}"
+    );
+    // Show the scroll affordance in the title chip when overflow exists.
+    assert!(
+      frame_top.contains("j/k:scroll"),
+      "scroll hint missing in close chip:\n{frame_top}"
+    );
+    app.help_scroll = 30;
+    let frame_bottom = render_to_string(80, 14, &app);
+    assert_ne!(
+      frame_top, frame_bottom,
+      "advancing help_scroll must change the rendered viewport"
+    );
   }
 }

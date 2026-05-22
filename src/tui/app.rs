@@ -211,6 +211,11 @@ pub struct App {
   pub should_exit: bool,
   /// Whether the modal help overlay is visible. Bound to `?`.
   pub show_help: bool,
+  /// Vertical scroll offset for the help overlay (in lines). Lets the
+  /// overlay survive on terminals too short to fit every category.
+  /// Reset to `0` whenever the overlay closes; advanced by `j`/`k`,
+  /// arrow keys, and PgUp/PgDn while it's open.
+  pub help_scroll: u16,
   /// Modal "are you sure?" prompt. `Some(...)` shows a centred
   /// confirmation overlay that captures `y` / Enter to dispatch
   /// the inner action and `n` / Esc to dismiss. Used by stop-model
@@ -321,6 +326,7 @@ impl App {
       host_metrics: HostMetricsSnapshot::default(),
       should_exit: false,
       show_help: false,
+      help_scroll: 0,
       confirm_dialog: None,
       hf_dialog: None,
       download_strip: crate::tui::download_strip::DownloadStripState::default(),
@@ -427,6 +433,7 @@ impl App {
   /// it via the existing Cancel action plumbing.
   pub fn toggle_help(&mut self) {
     self.show_help = !self.show_help;
+    self.help_scroll = 0;
   }
 
   /// Resolve the active palette. For `ThemeName::Custom`, prefer the

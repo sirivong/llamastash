@@ -171,10 +171,37 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
   // Help dialog owns Esc and `?` ahead of every focus-specific
   // routing: when it's open, the user expects Esc to dismiss it
   // even if they were in the middle of typing into a filter or
-  // chat prompt. Anything else falls through to normal dispatch.
-  if app.show_help && matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
-    app.show_help = false;
-    return;
+  // chat prompt. Motion keys scroll the overlay so it stays
+  // readable on terminals too short to fit every category.
+  if app.show_help {
+    match key.code {
+      KeyCode::Esc | KeyCode::Char('?') => {
+        app.show_help = false;
+        app.help_scroll = 0;
+        return;
+      }
+      KeyCode::Down | KeyCode::Char('j') => {
+        app.help_scroll = app.help_scroll.saturating_add(1);
+        return;
+      }
+      KeyCode::Up | KeyCode::Char('k') => {
+        app.help_scroll = app.help_scroll.saturating_sub(1);
+        return;
+      }
+      KeyCode::PageDown => {
+        app.help_scroll = app.help_scroll.saturating_add(10);
+        return;
+      }
+      KeyCode::PageUp => {
+        app.help_scroll = app.help_scroll.saturating_sub(10);
+        return;
+      }
+      KeyCode::Home => {
+        app.help_scroll = 0;
+        return;
+      }
+      _ => {}
+    }
   }
   // Confirmation dialog steals all input. Submit (default `Enter`)
   // or `y` / `Y` confirms; everything else cancels. We treat
@@ -780,6 +807,11 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     // keys stay unbound so they don't double as pane navigation.
     Action::CycleValueNext => apply_cycle_value(app, ValueDir::Next),
     Action::CycleValuePrev => apply_cycle_value(app, ValueDir::Prev),
+    // HF dialog stage chords (`o`, `n`, `p`) dispatch via the dialog's
+    // own per-stage handler in `handle_hf_dialog_input`. The Action
+    // variants exist only so the help overlay can list them — if one
+    // ever escapes to the generic dispatcher, it's a no-op.
+    Action::HfCycleSort | Action::HfNextPage | Action::HfPrevPage => {}
   }
 }
 
