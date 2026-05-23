@@ -216,6 +216,11 @@ pub struct App {
   /// Reset to `0` whenever the overlay closes; advanced by `j`/`k`,
   /// arrow keys, and PgUp/PgDn while it's open.
   pub help_scroll: u16,
+  /// True after `g` was pressed in the right pane and we're awaiting
+  /// the second half of a vim-style `gt` / `gT` chord. Cleared on the
+  /// next keystroke regardless of whether the chord completed — one-
+  /// shot, no timeout.
+  pub pending_g_prefix: bool,
   /// Modal "are you sure?" prompt. `Some(...)` shows a centred
   /// confirmation overlay that captures `y` / Enter to dispatch
   /// the inner action and `n` / Esc to dismiss. Used by stop-model
@@ -327,6 +332,7 @@ impl App {
       should_exit: false,
       show_help: false,
       help_scroll: 0,
+      pending_g_prefix: false,
       confirm_dialog: None,
       hf_dialog: None,
       download_strip: crate::tui::download_strip::DownloadStripState::default(),

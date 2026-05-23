@@ -79,7 +79,7 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 ### [A TUI that doesn't get in your way](FEATURES.md#a-tui-that-doesnt-get-in-your-way)
 
-- [Keyboard-driven everywhere](FEATURES.md#keyboard-driven-everywhere) — vim-style `hjkl`, `/` filter, `u`/`c`/`p` yank, `?` help.
+- [Keyboard-driven everywhere](FEATURES.md#keyboard-driven-everywhere) — vim-style `hjkl` + `Ctrl+F`/`Ctrl+B` paging, `0`/`$` top/bottom, `gt`/`gT` tab cycling; `/` filter, `u`/`c`/`p` yank, `?` help.
 - [Right pane is your smoke test](FEATURES.md#right-pane-is-your-smoke-test) — Logs / Chat / Embed / Rerank over the same OpenAI-compatible endpoints external clients use.
 - [In-TUI HuggingFace browser](FEATURES.md#in-tui-huggingface-browser) — search, sort, paginate, per-file hardware fit, download strip with cancel.
 - [Theming and rebinding](FEATURES.md#theming-and-rebinding) — five themes + custom palette; every action rebindable.

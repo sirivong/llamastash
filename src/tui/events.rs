@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -233,6 +233,33 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
     && !matches!(key.code, KeyCode::Enter)
   {
     handle_settings_inline_edit(app, key);
+    return;
+  }
+  // Vim `g`-prefix dispatcher (right-pane only — `g` is unbound there;
+  // in List focus `g` keeps its immediate GoTop semantic). After `g`
+  // is queued, the next key resolves:
+  //   - `t`        → cycle to the next right tab
+  //   - `T` (⇧t)   → cycle to the previous right tab
+  //   - anything   → drop the prefix and fall through to normal dispatch
+  if app.pending_g_prefix {
+    app.pending_g_prefix = false;
+    match (key.code, key.modifiers) {
+      (KeyCode::Char('t'), KeyModifiers::NONE) => {
+        app.cycle_right_tab();
+        return;
+      }
+      (KeyCode::Char('T'), KeyModifiers::SHIFT) => {
+        app.cycle_right_tab_prev();
+        return;
+      }
+      _ => {}
+    }
+  }
+  if app.focus == Focus::RightPane
+    && matches!(key.code, KeyCode::Char('g'))
+    && key.modifiers == KeyModifiers::NONE
+  {
+    app.pending_g_prefix = true;
     return;
   }
   // Resolve the bound action first; if a focus doesn't have a binding
@@ -3106,6 +3133,112 @@ mod tests {
     pump_input(&mut app, key(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.hf_dialog.is_none());
     assert_eq!(app.focus, Focus::List);
+  }
+
+  fn vim_test_app() -> App {
+    let mut app = App::new(Default::default());
+    app.models = (0..30)
+      .map(|i| fake_model_for_events(&format!("/m/model-{i:02}.gguf"), "/m"))
+      .collect();
+    app.focus = Focus::List;
+    app.list_cursor = 0;
+    app
+  }
+
+  #[test]
+  fn vim_page_aliases_fire_pgdn_pgup() {
+    // Ctrl+F / Ctrl+B alias PgDn / PgUp; Ctrl+U collapses to PgUp
+    // since the list scroller has no half-page concept.
+    let mut app = vim_test_app();
+    let start = app.list_cursor;
+    pump_input(&mut app, key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    assert!(
+      app.list_cursor > start,
+      "Ctrl+F must page down (cursor moved from {start} to {})",
+      app.list_cursor
+    );
+    let after_down = app.list_cursor;
+    pump_input(&mut app, key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert!(
+      app.list_cursor < after_down,
+      "Ctrl+B must page up (cursor moved back)"
+    );
+    let after_up = app.list_cursor;
+    pump_input(&mut app, key(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    pump_input(&mut app, key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert!(
+      app.list_cursor <= after_up,
+      "Ctrl+U must page up too (cursor must not stay below the Ctrl+B landing)"
+    );
+  }
+
+  #[test]
+  fn vim_zero_dollar_aliases_jump_top_and_bottom() {
+    // `go_top` / `go_bottom` land on the first / last *selectable* row,
+    // not raw index 0 — `app.models[0]` may sit behind a group header.
+    let mut app = vim_test_app();
+    pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
+    let top = app.list_cursor;
+    pump_input(&mut app, key(KeyCode::Char('$'), KeyModifiers::NONE));
+    let bottom = app.list_cursor;
+    pump_input(&mut app, key(KeyCode::Char('0'), KeyModifiers::NONE));
+    assert_eq!(app.list_cursor, top, "`0` must mirror `g` (top)");
+    assert!(bottom > top, "`$` should have moved past the top row");
+  }
+
+  #[test]
+  fn vim_i_in_right_pane_enters_edit_mode() {
+    // Mirrors the `e:edit` path. We use the Embed tab because Chat
+    // requires a Ready managed launch — Embed accepts edit without one.
+    let mut app = App::new(Default::default());
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Embed;
+    pump_input(&mut app, key(KeyCode::Char('i'), KeyModifiers::NONE));
+    assert_eq!(app.focus, Focus::EmbedInput, "`i` must open the input");
+  }
+
+  #[test]
+  fn vim_gt_cycles_right_tabs_from_right_pane() {
+    // `g` queues the prefix in right-pane focus; `t` then cycles to
+    // the next available right tab. `gT` (shift) cycles backward.
+    let mut app = App::new(Default::default());
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Settings;
+    let tabs = app.available_right_tabs();
+    if tabs.len() < 2 {
+      // Empty-state fallback: only Settings is reachable, so `gt` is
+      // a no-op. Pin that rather than skip.
+      pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
+      pump_input(&mut app, key(KeyCode::Char('t'), KeyModifiers::NONE));
+      assert_eq!(app.right_tab, RightTab::Settings);
+      assert!(!app.pending_g_prefix, "prefix must clear after second key");
+      return;
+    }
+    pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert!(app.pending_g_prefix, "`g` in right pane queues the prefix");
+    pump_input(&mut app, key(KeyCode::Char('t'), KeyModifiers::NONE));
+    assert!(!app.pending_g_prefix);
+    assert_ne!(
+      app.right_tab,
+      RightTab::Settings,
+      "`gt` should cycle to a new tab"
+    );
+  }
+
+  #[test]
+  fn vim_g_prefix_drops_on_unrelated_second_key() {
+    // After `g`, any non-`t`/`T` key clears the prefix and the second
+    // key falls through to normal dispatch.
+    let mut app = App::new(Default::default());
+    app.focus = Focus::RightPane;
+    pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
+    assert!(app.pending_g_prefix);
+    pump_input(&mut app, key(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(
+      !app.pending_g_prefix,
+      "prefix must clear even when the second key isn't t/T"
+    );
+    assert!(app.should_exit, "fallthrough `q` must still quit");
   }
 
   #[test]

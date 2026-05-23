@@ -27,6 +27,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 - [x] ~~copy actions(url,path,curl,logs) should show a visual confirmation.~~ — toasts now read `copied URL/curl/path/logs via {backend}` so the user sees exactly what was copied.
 - [x] ~~The UI here in `init` doesn't look nice. Make those info inline with remaining UI.~~ — summary now renders via `cliclack::note` so every line keeps the panel border, then a single-line `outro` closes the session.
 - [x] ~~wrong favorites count~~ — `N ★` in the info pane now filters `app.favorites` against the catalog before counting, so stale favorites (file deleted / moved out of watched dirs) drop off and the number matches what the user can actually find in the list. Running favorites still count once (star stays visible in the folder group).
+- [ ] fake_llama_server from tests should not get added to config
 - [ ] UI/UX UI beatifications/tweaks.
   - [x] Trim path names in model list grouping. Derive a short name. Show path in Right pane under the model name. It should be in muted color palette of the theme.
   - [x] Try some Padding for all panes.
@@ -47,8 +48,10 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
   - [x] ~~Map all destructive actions behind Ctr (ctrl+s,k,r,d). All navigation actions behind Shif.~~ — stop = `Ctrl+S`, kill = `Ctrl+K`, restart = `Ctrl+R`, delete = `Ctrl+D`, cancel-download = `Ctrl+X`. Shift-letter pane jumps (`Shift+M/L/C/E/R/S/P`) cover navigation.
   - [x] ~~Dedupe keybindings.~~ — flat `DEFAULT_BINDINGS: &[Binding]` with a `FocusSet` bitfield per row replaces the seven per-focus tables (91 entries → ~52). Public `KeyMap` API preserved; one row per action drives all surfaces via `Action::description_for(focus)`.
   - [x] ~~Use unicode label for Tab etc in keybinds~~ — Tab is `↹` on Linux/Win, `⇥` on macOS; Enter is `⏎` everywhere; modifiers `⌃ ⌥ ⌘` on macOS only, `Ctrl+ / Alt+ / Super+` on PC. Shift glyph (`⇧`) no longer carries a `+` joiner.
+  - [ ] Vim-style keybindings (h/j/k/l to navigate list, enter to launch, etc).
+  - [ ] Mouse capture for pane focus and launch picker selection.
 
-- [ ] **In progress**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
+- [ ] **Ready to merge**: Proxy router that maps a single endpoint to running models by model name. If the model isn't running, start it; if launch fails, fall back to a running model when one is available; otherwise error. Keep it OpenCode / π compatible so agents and tools can hit one URL.
 
 - [x] ~~**TUI burns ~50% CPU when idle**.~~ — Ported the run loop to a kdash-style single-mpsc / blocking-`recv` architecture. The 8 separate `drain_*` / `try_recv` calls in `events.rs` (refresher, logs, writer feedback, chat stream, embed, rerank, HF dialog, download strip) collapse into `Event` variants on one channel; the main thread blocks on `recv` so an idle TUI consumes ~0% CPU. Background crossterm-poll thread emits `Event::Input` / `Event::Tick` at a 250ms cadence (kdash default). Renders are gated on a per-event dirty flag.
 
@@ -69,20 +72,18 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 ### Follow-up
 
-- [ ] No glyphs fallback.
-- [ ] flag to disable proxy fallback (or flip to off by default?)
-- [ ] Loopback + LAN binding options for the proxy.
 - [ ] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
 - [ ] Some HF downloaded models fail to start??
 - [ ] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
+- [ ] flag to disable proxy fallback (or flip to off by default?)
 - [ ]
 
 ### Good to have
 
-- [ ] Mouse capture for pane focus and launch picker selection.
-- [ ] Vim-style keybindings (h/j/k/l to navigate list, enter to launch, etc).
+- [ ] No glyphs fallback.
+- [ ] Loopback + LAN binding options for the proxy.
 
 ## R2 (post-v0.0.1 roadmap)
 

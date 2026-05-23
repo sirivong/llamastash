@@ -417,7 +417,151 @@ const CAT_STOP: &[Category] = &[Category::Models, Category::Settings];
 /// and `Ctrl+C` both map to `Quit`). Same-key collisions across
 /// disjoint scopes are fine — the dispatcher walks the flat list
 /// and picks the first match for the current focus.
-pub const DEFAULT_BINDINGS: &[Binding] = &[
+///
+/// Most alias groups (same action across N keys with shared scope /
+/// hint / description) use the [`binds!`] macro below to keep the
+/// source dense; chords whose scope or category diverges per chord
+/// stay as explicit `Binding { ... }` literals.
+///
+/// Expand a `binds!` group into a literal `[Binding; N]` array with
+/// shared metadata and per-chord `(key, mods, label, categories)`. Use
+/// `&[]` for `categories` on alias chords you want hidden from the
+/// help overlay (the user-visible row comes from the canonical chord).
+macro_rules! binds {
+  (
+    action: $action:expr,
+    scopes: $scopes:expr,
+    hint: $hint:literal,
+    description: $desc:expr,
+    chords: [ $( ( $key:expr, $mods:expr, $label:expr, $cat:expr ) ),+ $(,)? ]
+    $(,)?
+  ) => {
+    [ $(
+      Binding {
+        key: $key,
+        mods: $mods,
+        action: $action,
+        label: $label,
+        hint: $hint,
+        description: $desc,
+        scopes: $scopes,
+        categories: $cat,
+      },
+    )+ ]
+  };
+}
+
+/// Hidden-from-overlay marker for alias chords whose user-visible row
+/// already appears via a sibling chord. Saves the `&[] as &[Category]`
+/// dance at every alias site.
+const NO_CAT: &[Category] = &[];
+
+pub static DEFAULT_BINDINGS: std::sync::LazyLock<Vec<Binding>> =
+  std::sync::LazyLock::new(build_default_bindings);
+
+fn build_default_bindings() -> Vec<Binding> {
+  let mut v: Vec<Binding> = Vec::new();
+  // Quit (q, Ctrl+C) — both surface in help.
+  v.extend_from_slice(&binds! {
+    action: Action::Quit,
+    scopes: FocusSet::NAV,
+    hint: "quit",
+    description: None,
+    chords: [
+      (KeyCode::Char('q'), KeyModifiers::NONE, "q", CAT_GLOBAL),
+      (KeyCode::Char('c'), KeyModifiers::CONTROL, crate::ctrl_label!("c"), CAT_GLOBAL),
+    ],
+  });
+  // GoTop / GoBottom — `g`/`Home` and `G`/`End` are co-primary;
+  // vim `0`/`$` are hidden aliases.
+  v.extend_from_slice(&binds! {
+    action: Action::GoTop,
+    scopes: FocusSet::LIST,
+    hint: "top",
+    description: Some("top of list"),
+    chords: [
+      (KeyCode::Char('g'), KeyModifiers::NONE, "g", CAT_MODELS),
+      (KeyCode::Home, KeyModifiers::NONE, "Home", CAT_MODELS),
+      (KeyCode::Char('0'), KeyModifiers::NONE, "0", NO_CAT),
+    ],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::GoBottom,
+    scopes: FocusSet::LIST,
+    hint: "bottom",
+    description: Some("bottom of list"),
+    chords: [
+      (KeyCode::Char('G'), KeyModifiers::SHIFT, "G", CAT_MODELS),
+      (KeyCode::End, KeyModifiers::NONE, "End", CAT_MODELS),
+      (KeyCode::Char('$'), KeyModifiers::NONE, "$", NO_CAT),
+    ],
+  });
+  // PageDown / PageUp — PgDn/PgUp are canonical; Ctrl+F/B/U are vim aliases.
+  v.extend_from_slice(&binds! {
+    action: Action::PageDown,
+    scopes: FocusSet::LIST,
+    hint: "page down",
+    description: None,
+    chords: [
+      (KeyCode::PageDown, KeyModifiers::NONE, "PgDn", CAT_MODELS),
+      (KeyCode::Char('f'), KeyModifiers::CONTROL, crate::ctrl_label!("f"), NO_CAT),
+    ],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::PageUp,
+    scopes: FocusSet::LIST,
+    hint: "page up",
+    description: None,
+    chords: [
+      (KeyCode::PageUp, KeyModifiers::NONE, "PgUp", CAT_MODELS),
+      (KeyCode::Char('b'), KeyModifiers::CONTROL, crate::ctrl_label!("b"), NO_CAT),
+      (KeyCode::Char('u'), KeyModifiers::CONTROL, crate::ctrl_label!("u"), NO_CAT),
+    ],
+  });
+  // YankCurl (c, y) — both surface; `y` is the vim-style alias.
+  v.extend_from_slice(&binds! {
+    action: Action::YankCurl,
+    scopes: FocusSet::NAV,
+    hint: "curl",
+    description: Some("copy curl command"),
+    chords: [
+      (KeyCode::Char('c'), KeyModifiers::NONE, "c", CAT_YANK_CURL),
+      (KeyCode::Char('y'), KeyModifiers::NONE, "y", CAT_YANK_CURL),
+    ],
+  });
+  // EnterEdit (e, i) — `i` is the vim alias.
+  v.extend_from_slice(&binds! {
+    action: Action::EnterEdit,
+    scopes: FocusSet::RIGHT_PANE,
+    hint: "edit",
+    description: Some("enter edit mode"),
+    chords: [
+      (KeyCode::Char('e'), KeyModifiers::NONE, "e", CAT_GLOBAL),
+      (KeyCode::Char('i'), KeyModifiers::NONE, "i", NO_CAT),
+    ],
+  });
+  // FocusChatTab — Shift+C/E/R all jump to the same tab; merge into
+  // one help row via the (action, description) grouping in the overlay.
+  v.extend_from_slice(&binds! {
+    action: Action::FocusChatTab,
+    scopes: FocusSet::NAV,
+    hint: "chat/embed/rerank",
+    description: Some("chat/embed/rerank"),
+    chords: [
+      (KeyCode::Char('C'), KeyModifiers::SHIFT, "C", CAT_GLOBAL),
+      (KeyCode::Char('E'), KeyModifiers::SHIFT, "E", CAT_GLOBAL),
+      (KeyCode::Char('R'), KeyModifiers::SHIFT, "R", CAT_GLOBAL),
+    ],
+  });
+  // Everything else stays as an explicit literal — scope or category
+  // divergence per chord defeats the shared-metadata macro.
+  v.extend_from_slice(LEGACY_BINDINGS);
+  v
+}
+
+/// Bindings that don't fit the `binds!` shared-metadata pattern —
+/// scope or category diverges per chord, or there's only one chord.
+const LEGACY_BINDINGS: &[Binding] = &[
   // ─── Always-on chords across the nav focuses ────────────────
   Binding {
     key: KeyCode::Char('?'),
@@ -429,26 +573,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     scopes: FocusSet::NAV,
     categories: CAT_GLOBAL,
   },
-  Binding {
-    key: KeyCode::Char('q'),
-    mods: KeyModifiers::NONE,
-    action: Action::Quit,
-    label: "q",
-    hint: "quit",
-    description: None,
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('c'),
-    mods: KeyModifiers::CONTROL,
-    action: Action::Quit,
-    label: crate::ctrl_label!("c"),
-    hint: "quit",
-    description: None,
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
+  // Quit (q, Ctrl+C) — see `binds!` group in `build_default_bindings`.
   Binding {
     key: KeyCode::Char('t'),
     mods: KeyModifiers::NONE,
@@ -564,66 +689,8 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     scopes: FocusSet::NAV,
     categories: CAT_GLOBAL,
   },
-  Binding {
-    key: KeyCode::PageUp,
-    mods: KeyModifiers::NONE,
-    action: Action::PageUp,
-    label: "PgUp",
-    hint: "page up",
-    description: None,
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::PageDown,
-    mods: KeyModifiers::NONE,
-    action: Action::PageDown,
-    label: "PgDn",
-    hint: "page down",
-    description: None,
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::Char('g'),
-    mods: KeyModifiers::NONE,
-    action: Action::GoTop,
-    label: "g",
-    hint: "top",
-    description: Some("top of list"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::Home,
-    mods: KeyModifiers::NONE,
-    action: Action::GoTop,
-    label: "Home",
-    hint: "top",
-    description: Some("top of list"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::Char('G'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::GoBottom,
-    label: "G",
-    hint: "bottom",
-    description: Some("bottom of list"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
-  Binding {
-    key: KeyCode::End,
-    mods: KeyModifiers::NONE,
-    action: Action::GoBottom,
-    label: "End",
-    hint: "bottom",
-    description: Some("bottom of list"),
-    scopes: FocusSet::LIST,
-    categories: CAT_MODELS,
-  },
+  // PageUp / PageDown + vim Ctrl+B/F/U aliases — see `binds!` group.
+  // GoTop / GoBottom + Home/End + vim 0/$ aliases — see `binds!` group.
   // ─── Pane navigation (Tab in every TUI focus; vi aliases nav-only)
   Binding {
     key: KeyCode::Tab,
@@ -686,37 +753,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     scopes: FocusSet::NAV,
     categories: CAT_GLOBAL,
   },
-  Binding {
-    key: KeyCode::Char('C'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "C",
-    hint: "chat/embed/rerank",
-    description: Some("chat/embed/rerank"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('E'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "E",
-    hint: "chat/embed/rerank",
-    description: Some("chat/embed/rerank"),
-    scopes: FocusSet::NAV,
-    // Same action as Shift+C; help overlay merges into one `C,E,R` row.
-    categories: CAT_GLOBAL,
-  },
-  Binding {
-    key: KeyCode::Char('R'),
-    mods: KeyModifiers::SHIFT,
-    action: Action::FocusChatTab,
-    label: "R",
-    hint: "chat/embed/rerank",
-    description: Some("chat/embed/rerank"),
-    scopes: FocusSet::NAV,
-    categories: CAT_GLOBAL,
-  },
+  // Shift+C / Shift+E / Shift+R (FocusChatTab) — see `binds!` group.
   Binding {
     key: KeyCode::Char('S'),
     mods: KeyModifiers::SHIFT,
@@ -771,28 +808,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     scopes: FocusSet::NAV,
     categories: CAT_YANK,
   },
-  Binding {
-    key: KeyCode::Char('c'),
-    mods: KeyModifiers::NONE,
-    action: Action::YankCurl,
-    label: "c",
-    hint: "curl",
-    description: Some("copy curl command"),
-    scopes: FocusSet::NAV,
-    categories: CAT_YANK_CURL,
-  },
-  Binding {
-    key: KeyCode::Char('y'),
-    mods: KeyModifiers::NONE,
-    action: Action::YankCurl,
-    label: "y",
-    hint: "curl",
-    description: Some("copy curl command"),
-    scopes: FocusSet::NAV,
-    // Same action as `c`; categories match so the help overlay
-    // merges the two labels into a single `c,y` row.
-    categories: CAT_YANK_CURL,
-  },
+  // YankCurl (c, y vim alias) — see `binds!` group.
   Binding {
     key: KeyCode::Char('p'),
     mods: KeyModifiers::NONE,
@@ -804,16 +820,7 @@ pub const DEFAULT_BINDINGS: &[Binding] = &[
     categories: CAT_YANK,
   },
   // ─── Right-pane affordances (Settings / Logs) ───────────────
-  Binding {
-    key: KeyCode::Char('e'),
-    mods: KeyModifiers::NONE,
-    action: Action::EnterEdit,
-    label: "e",
-    hint: "edit",
-    description: Some("enter edit mode"),
-    scopes: FocusSet::RIGHT_PANE,
-    categories: CAT_GLOBAL,
-  },
+  // EnterEdit (e, i vim alias) — see `binds!` group.
   Binding {
     key: KeyCode::Char('s'),
     mods: KeyModifiers::NONE,
