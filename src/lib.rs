@@ -20,6 +20,7 @@ pub mod gpu;
 pub mod init;
 pub mod ipc;
 pub mod launch;
+pub mod proxy;
 pub mod theme;
 pub mod tui;
 pub mod util;

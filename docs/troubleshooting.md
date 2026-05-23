@@ -94,6 +94,66 @@ The toast prints the URL inline when every backend fails, so you can still paste
 
 **Fix:** llamastash quarantines a corrupt `state.json` as `state.json.broken-<ts>` and starts with defaults. You'll lose favorites, presets, last-params, and the running snapshot for this restart — but the daemon will come up. If you have a recent backup of `state.json`, restore it and try again.
 
+## Proxy port already in use (`:11434`)
+
+**Symptom:** `llamastash status --json | jq .proxy` shows `"status": "port_in_use"` (and `bind_error` is `null`). Agents pointed at `http://127.0.0.1:11434/v1` get connection-refused or hit Ollama instead of llamastash.
+
+**This is the design.** The proxy refuses to auto-roam to a free port — the `:11434` default exists so OpenAI-client wrappers that hard-code Ollama's well-known port discover llamastash without reconfiguration; silently moving would break that contract. The most common cause is Ollama running on the same box.
+
+**Fix (pick one):**
+
+- Stop the conflicting listener and restart the daemon:
+
+  ```bash
+  lsof -i :11434                  # identify the owner
+  systemctl --user stop ollama    # if Ollama is the culprit
+  llamastash daemon stop && llamastash daemon start
+  ```
+
+- Move llamastash off the default port — CLI flag (one-shot) or config (persistent):
+
+  ```bash
+  llamastash daemon start --proxy-port 11500
+  ```
+
+  ```yaml
+  proxy:
+    port: 11500
+  ```
+
+  Agents then point at `http://127.0.0.1:11500/v1`. `--proxy-port 0` binds an ephemeral port; the actual address is reported via `llamastash status --json | jq .proxy.listen`.
+
+## Agent reports "could not reach API" / connection refused on `:11434`
+
+**Symptom:** an OpenAI-compatible client (OpenCode, Pi, etc.) configured against `http://127.0.0.1:11434/v1` reports connection-refused; `curl http://127.0.0.1:11434/v1/models` returns `curl: (7) Failed to connect`.
+
+**Fix:** the proxy listener is owned by the daemon, so no daemon means no listener. Start it:
+
+```bash
+llamastash daemon start
+llamastash status --json | jq .proxy
+# expect: {"enabled": true, "listen": "127.0.0.1:11434",
+#         "status": "listening", "bind_error": null}
+```
+
+If `status` is `"disabled"` instead of `"listening"`, your config has `proxy.enabled: false` — flip it back and restart the daemon. If `status` is `"port_in_use"`, see the previous section.
+
+## Proxy returned a different model than I asked for
+
+**Symptom:** an agent gets a plausible response but the answer style doesn't match the requested model; response headers carry `x-llamastash-served-by: <other-model>` and `x-llamastash-fallback-reason: launch_failed` or `family_mismatch`.
+
+**This is the family-MRU fallback.** When the requested model's auto-start fails and another model is already `Ready`, the proxy substitutes it and stamps both headers so the substitution is auditable. `launch_failed` means an in-family pick (closest match was the same architecture); `family_mismatch` means cross-arch (no in-family Ready model existed).
+
+**Fix:** look at the daemon log around the request timestamp for the underlying launch failure — usually a missing GGUF, `llama-server` ENOENT, port-range exhaustion, or a probe timeout. Start the intended model manually first to surface the real error:
+
+```bash
+llamastash start <model-name>
+# or, for the full launch log:
+llamastash logs <launch-id> -f
+```
+
+Once the underlying launch issue is fixed, the fallback path stops firing. To turn the fallback off entirely is tracked as a deferred decision in `TODO.md §R1` (`proxy.fallback: false`).
+
 ## HuggingFace pull does nothing
 
 **This is intentional.** The in-app HF pull worker is deferred to v2 (R46). The `pull` subcommand is hidden from `--help` and exits unimplemented. Use `huggingface-cli download ...` for now; llamastash discovers the downloaded files via its cache scanner.

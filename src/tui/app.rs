@@ -112,6 +112,28 @@ pub struct DaemonInfo {
   /// pid 1234` line. `None` only when talking to an older daemon
   /// that pre-dates the field.
   pub socket_path: Option<String>,
+  /// Latest snapshot of the OpenAI-compat proxy listener (Unit 5).
+  /// `None` when talking to a pre-Unit-5 daemon that omits the
+  /// field — info_pane renders the proxy row as `proxy   —` in that case.
+  pub proxy: Option<ProxyInfo>,
+}
+
+/// Wire shape of the proxy listener block surfaced via the IPC
+/// `status` response (R161). Parsed from the daemon's JSON and held
+/// on `DaemonInfo` so [`crate::tui::info_pane`] can render a one-line
+/// summary in the Daemon panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyInfo {
+  /// Mirrors config: `false` when `proxy.enabled: false`. Tracks
+  /// whether the listener was *intended* to be up, separately from
+  /// whether the bind succeeded.
+  pub enabled: bool,
+  /// Attempted bind address. `None` only when `enabled == false`.
+  pub listen: Option<String>,
+  /// One of `disabled` / `listening` / `port_in_use` / `unbound`.
+  pub status: String,
+  /// OS-level cause when `status == "unbound"`; `None` otherwise.
+  pub bind_error: Option<String>,
 }
 
 /// Per-frame cache of the screen rectangles that mouse-focus needs
@@ -303,6 +325,13 @@ pub struct App {
   /// spawning a tokio task so their results land back on the same
   /// `recv` the main loop blocks on.
   pub events_tx: Option<tokio::sync::mpsc::Sender<crate::tui::events::Event>>,
+  /// Previous observed `proxy.status` label. Used by
+  /// [`Self::ingest_status`] to fire a one-shot toast on the
+  /// transition into `port_in_use` (plan §Approach: "flag on first
+  /// observation"). Reading the cell on every tick would surface a
+  /// toast each refresh; transitions keep the noise to once-per-
+  /// session-collision.
+  pub(crate) last_proxy_status: Option<String>,
 }
 
 /// Action awaiting user confirmation in the modal popup. Captured
@@ -388,6 +417,7 @@ impl App {
       right_tabs_cache: None,
       hit_rects: RefCell::new(MouseHitRects::default()),
       events_tx: None,
+      last_proxy_status: None,
     }
   }
 
@@ -708,6 +738,10 @@ impl App {
       self.external.clear();
     }
     if let Some(daemon) = body.get("daemon") {
+      // Preserve the proxy snapshot — it lives in a sibling field
+      // (`body["proxy"]`) but on the same daemon-info struct so the
+      // info_pane can render both in one block.
+      let proxy = body.get("proxy").and_then(parse_proxy_info);
       self.daemon_info = DaemonInfo {
         pid: daemon.get("pid").and_then(Value::as_u64).map(|n| n as u32),
         uptime_seconds: daemon.get("uptime_seconds").and_then(Value::as_u64),
@@ -723,7 +757,29 @@ impl App {
           .get("socket_path")
           .and_then(Value::as_str)
           .map(String::from),
+        proxy,
       };
+      // First-observation toast on `port_in_use`. Only fires when the
+      // last *observed* status was something other than `port_in_use`
+      // (the daemon emits the same status on every tick, so reading
+      // the cell value alone would re-toast forever). Snapshot the
+      // fields we need out of the borrow before `show_toast` claims
+      // a mutable borrow on `self`.
+      let (cur_status, cur_listen): (Option<String>, Option<String>) =
+        match self.daemon_info.proxy.as_ref() {
+          Some(p) => (Some(p.status.clone()), p.listen.clone()),
+          None => (None, None),
+        };
+      if let Some(status) = cur_status {
+        let was_port_in_use = matches!(self.last_proxy_status.as_deref(), Some("port_in_use"));
+        if status == "port_in_use" && !was_port_in_use {
+          let listen = cur_listen.as_deref().unwrap_or("?");
+          self.show_toast(format!(
+            "proxy: port {listen} already in use; daemon continues without the OpenAI-compat router"
+          ));
+        }
+        self.last_proxy_status = Some(status);
+      }
     }
     if let Some(host) = body.get("host") {
       if !host.is_null() {
@@ -1550,6 +1606,30 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
   })
 }
 
+/// Parse the daemon's `status.proxy` block into the TUI-side
+/// [`ProxyInfo`] struct. Returns `None` for non-object / missing
+/// shapes so an older daemon (pre-Unit-5) leaves the row off
+/// instead of rendering a confusing "?" placeholder.
+fn parse_proxy_info(v: &Value) -> Option<ProxyInfo> {
+  let obj = v.as_object()?;
+  let status = obj.get("status").and_then(Value::as_str)?.to_string();
+  let enabled = obj
+    .get("enabled")
+    .and_then(Value::as_bool)
+    .unwrap_or(status != "disabled");
+  let listen = obj.get("listen").and_then(Value::as_str).map(String::from);
+  let bind_error = obj
+    .get("bind_error")
+    .and_then(Value::as_str)
+    .map(String::from);
+  Some(ProxyInfo {
+    enabled,
+    listen,
+    status,
+    bind_error,
+  })
+}
+
 fn parse_status_row(row: &Value) -> Option<ManagedRow> {
   let launch_id = row.get("launch_id")?.as_str()?.to_string();
   let port = row.get("port")?.as_u64()? as u16;
@@ -1757,6 +1837,73 @@ mod tests {
     assert_eq!(
       app.daemon_info.server_path.as_deref(),
       Some("/usr/bin/llama-server")
+    );
+  }
+
+  #[test]
+  fn ingest_status_populates_proxy_info_from_proxy_block() {
+    let mut app = App::new(AppOptions::default());
+    let body = json!({
+      "daemon": {"pid": 1, "uptime_seconds": 0, "active_connections": 0},
+      "proxy": {
+        "enabled": true,
+        "listen": "127.0.0.1:11434",
+        "status": "listening",
+        "bind_error": null,
+      }
+    });
+    app.ingest_status(&body);
+    let proxy = app.daemon_info.proxy.as_ref().expect("proxy info parsed");
+    assert!(proxy.enabled);
+    assert_eq!(proxy.listen.as_deref(), Some("127.0.0.1:11434"));
+    assert_eq!(proxy.status, "listening");
+    assert!(proxy.bind_error.is_none());
+  }
+
+  #[test]
+  fn ingest_status_toasts_once_on_port_in_use_transition() {
+    // Plan §Approach: toast fires on the *transition* into
+    // port_in_use, not on every poll. A second consecutive
+    // port_in_use observation must not re-fire the toast.
+    let mut app = App::new(AppOptions::default());
+    let listening = json!({
+      "daemon": {"pid": 1, "uptime_seconds": 0, "active_connections": 0},
+      "proxy": {
+        "enabled": true,
+        "listen": "127.0.0.1:11434",
+        "status": "listening",
+        "bind_error": null,
+      }
+    });
+    app.ingest_status(&listening);
+    assert!(app.toast.is_none(), "listening must not toast");
+
+    let collided = json!({
+      "daemon": {"pid": 1, "uptime_seconds": 0, "active_connections": 0},
+      "proxy": {
+        "enabled": true,
+        "listen": "127.0.0.1:11434",
+        "status": "port_in_use",
+        "bind_error": null,
+      }
+    });
+    app.ingest_status(&collided);
+    let first = app
+      .toast
+      .clone()
+      .expect("transition into port_in_use must toast");
+    assert!(
+      first.0.contains("port") && first.0.contains("11434"),
+      "toast must name the listen address: {first:?}"
+    );
+
+    // Clear the toast (simulate it expiring) and re-ingest the same
+    // port_in_use status. No new toast should fire.
+    app.toast = None;
+    app.ingest_status(&collided);
+    assert!(
+      app.toast.is_none(),
+      "subsequent identical port_in_use ticks must NOT re-toast"
     );
   }
 

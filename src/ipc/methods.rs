@@ -102,6 +102,15 @@ pub struct MethodContext {
   /// pid 1234`). `None` only in catalog-only tests that never bind
   /// a real socket.
   pub socket_path: Option<PathBuf>,
+  /// Read handle to the proxy listener's status cell. The proxy
+  /// task is the sole writer (every bind / disable transition lands
+  /// here); the IPC `status` handler clones this and reads it to
+  /// project the `proxy` block. `None` only in catalog-only tests
+  /// that never bring the proxy up — the response then omits the
+  /// `proxy` field entirely so existing test fixtures keep their
+  /// shape. Production wiring always sets this; if `proxy.enabled:
+  /// false` the cell holds [`ProxyStatus::Disabled`].
+  pub proxy_status: Option<crate::proxy::StatusCell>,
 }
 
 /// Wrapper around the in-memory `DaemonState` plus the directory
@@ -192,6 +201,7 @@ impl MethodContext {
       external: Arc::new(RwLock::new(Vec::new())),
       peer_authorizer: Arc::new(crate::daemon::peercred::is_authorized_peer),
       socket_path: None,
+      proxy_status: None,
     }
   }
 
@@ -247,6 +257,15 @@ impl MethodContext {
   /// `InvalidRequest`.
   pub fn with_launch_env(mut self, env: LaunchEnv) -> Self {
     self.launch = Some(env);
+    self
+  }
+
+  /// Builder helper: attach the proxy listener's status cell. The
+  /// IPC `status` handler reads from this to surface the `proxy`
+  /// block (Unit 5). Catalog-only tests skip this — the response
+  /// then omits the `proxy` field entirely.
+  pub fn with_proxy_status(mut self, status: crate::proxy::StatusCell) -> Self {
+    self.proxy_status = Some(status);
     self
   }
 }
@@ -458,7 +477,22 @@ async fn status_response(ctx: &MethodContext) -> Value {
     Some(slot) => serde_json::to_value(&*slot.read().await).unwrap_or(Value::Null),
     None => serde_json::to_value(ctx.gpu.as_ref()).unwrap_or(Value::Null),
   };
-  json!({
+  // Proxy block — read-only projection of the listener's shared
+  // status cell. Catalog-only tests that never bring the proxy up
+  // leave `proxy_status` as `None`; the field is omitted in that
+  // case so pre-Unit-5 fixtures stay byte-identical. The wire shape
+  // is locked by the plan's Key Decision row on `proxy.status`:
+  //
+  // ```
+  // "proxy": {
+  //   "enabled": bool,
+  //   "listen": "127.0.0.1:11434" | null,
+  //   "status": "disabled" | "listening" | "port_in_use" | "unbound",
+  //   "bind_error": "permission denied" | null,
+  // }
+  // ```
+  let proxy = ctx.proxy_status.as_ref().map(project_proxy_status);
+  let mut body = json!({
     "models": models,
     "external": external,
     "gpu": gpu,
@@ -474,7 +508,55 @@ async fn status_response(ctx: &MethodContext) -> Value {
         .map(|env| env.binary.display().to_string()),
       "socket_path": ctx.socket_path.as_ref().map(|p| p.display().to_string()),
     },
-  })
+  });
+  if let Some(proxy) = proxy {
+    if let Some(obj) = body.as_object_mut() {
+      obj.insert("proxy".into(), proxy);
+    }
+  }
+  body
+}
+
+/// Project the proxy listener's status cell into the wire shape
+/// surfaced under `status.proxy`. The cell is the single source of
+/// truth — Unit 1 wired the listener task to write every transition
+/// (Disabled / Listening / PortInUse / Unbound) here; Unit 5 is the
+/// read side.
+///
+/// `listen` is the *attempted* address: `Disabled` emits `null`
+/// (no bind was attempted), every other variant carries the address
+/// the daemon tried to bind. `bind_error` is non-null only when the
+/// variant is `Unbound` — `PortInUse` is its own discriminator and
+/// callers shouldn't need a parallel string to recognise it.
+fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
+  use crate::proxy::ProxyStatus;
+  let snapshot = cell.read().unwrap_or_else(|e| e.into_inner()).clone();
+  match snapshot {
+    ProxyStatus::Disabled => json!({
+      "enabled": false,
+      "listen": Value::Null,
+      "status": "disabled",
+      "bind_error": Value::Null,
+    }),
+    ProxyStatus::Listening { addr } => json!({
+      "enabled": true,
+      "listen": addr.to_string(),
+      "status": "listening",
+      "bind_error": Value::Null,
+    }),
+    ProxyStatus::PortInUse { addr } => json!({
+      "enabled": true,
+      "listen": addr.to_string(),
+      "status": "port_in_use",
+      "bind_error": Value::Null,
+    }),
+    ProxyStatus::Unbound { addr, bind_error } => json!({
+      "enabled": true,
+      "listen": addr.to_string(),
+      "status": "unbound",
+      "bind_error": bind_error,
+    }),
+  }
 }
 
 #[derive(Deserialize)]
@@ -811,19 +893,23 @@ async fn logs_tail_handler(
   }))
 }
 
-#[derive(Deserialize)]
-struct StartParams {
+/// Wire-shape for the `start_model` IPC method. The fields land
+/// verbatim from JSON-RPC; `start_model_inner` consumes the parsed
+/// struct so the proxy's auto-start path (Unit 4) can build one
+/// directly without going through JSON.
+#[derive(Deserialize, Default, Clone)]
+pub(crate) struct StartParams {
   /// Absolute path to the GGUF the user wants to launch. We compute
   /// the canonical `ModelId` by reading its header on the daemon
   /// side rather than trusting the caller — keeps the surface
   /// minimal for CLI/TUI clients.
-  model_path: PathBuf,
+  pub(crate) model_path: PathBuf,
   #[serde(default)]
-  mode: Option<LaunchModeWire>,
+  pub(crate) mode: Option<LaunchModeWire>,
   #[serde(default)]
-  ctx: Option<u32>,
+  pub(crate) ctx: Option<u32>,
   #[serde(default)]
-  port: Option<u16>,
+  pub(crate) port: Option<u16>,
   /// Soft port preference — if the supplied port is free at
   /// reservation time, use it; otherwise allocate from the
   /// configured range. Distinct from `port` which is strict and
@@ -831,23 +917,23 @@ struct StartParams {
   /// lands on their previously-bound port without scripted clients
   /// silently losing strict semantics.
   #[serde(default)]
-  prefer_port: Option<u16>,
+  pub(crate) prefer_port: Option<u16>,
   #[serde(default)]
-  reasoning: Option<bool>,
+  pub(crate) reasoning: Option<bool>,
   /// Caller-supplied typed knob overrides. Each `Some` field lands
   /// on the `LayerLabel::User` layer of the resolver, outranking
   /// last_used / arch_default / built-in.
   #[serde(default)]
-  knobs: crate::config::TypedKnobs,
+  pub(crate) knobs: crate::config::TypedKnobs,
   /// Free-form argv tail for `llama-server` flags the typed editor
   /// doesn't model. Appended after the resolved knobs.
   #[serde(default)]
-  extras: Vec<String>,
+  pub(crate) extras: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
-enum LaunchModeWire {
+pub(crate) enum LaunchModeWire {
   Chat,
   Embedding,
   Rerank,
@@ -899,11 +985,53 @@ fn supported_methods() -> Vec<&'static str> {
 /// `--ctx u32::MAX` straight to llama-server.
 const MAX_CTX_TOKENS: u32 = 1_048_576;
 
+/// Output of [`start_model_inner`] — everything the caller needs to
+/// observe the launch from the outside. The IPC handler projects
+/// this onto the JSON-RPC response; the proxy's auto-start path
+/// (Unit 4) keeps the `ManagedModel` handle so it can poll the state
+/// machine without going through the registry snapshot.
+pub(crate) struct StartedLaunch {
+  pub(crate) launch_id: LaunchId,
+  pub(crate) model_id: ModelId,
+  pub(crate) port: u16,
+  pub(crate) model: ManagedModel,
+  pub(crate) log_path: PathBuf,
+}
+
+/// IPC `start_model` handler — a thin wrapper around
+/// [`start_model_inner`]. Keeps the JSON-RPC plumbing (parse params →
+/// call inner → JSON-encode response) at the handler boundary so
+/// the proxy's auto-start can call the inner helper directly without
+/// round-tripping through the dispatcher.
 async fn start_model_handler(
   ctx: &MethodContext,
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: StartParams = parse_params(params)?;
+  let started = start_model_inner(ctx, parsed).await?;
+  let pid = started.model.pid().await;
+  Ok(json!({
+    "launch_id": started.launch_id,
+    "model_id": started.model_id,
+    "port": started.port,
+    "pid": pid,
+    "log_path": started.log_path,
+  }))
+}
+
+/// In-process equivalent of [`start_model_handler`] for callers that
+/// already have a parsed [`StartParams`] (the proxy's Unit 4
+/// auto-start path). Performs the same composition pipeline —
+/// validation → arch resolve → port reservation → layered knob
+/// merge → supervisor spawn → registry insert → last_params recorder
+/// — so the two call sites share one code path. Returns the live
+/// [`StartedLaunch`] handle on success; the [`ErrorObject`] form on
+/// any failure stays JSON-RPC compatible so the IPC handler can
+/// forward it verbatim.
+pub(crate) async fn start_model_inner(
+  ctx: &MethodContext,
+  parsed: StartParams,
+) -> Result<StartedLaunch, ErrorObject> {
   // Pure input-validation lives before the daemon's launch-env
   // lookup so a malformed request gives an actionable
   // `InvalidParams` error even on misconfigured daemons.
@@ -1155,13 +1283,13 @@ async fn start_model_handler(
     ctx.shutdown.clone(),
   );
 
-  Ok(json!({
-    "launch_id": launch_id,
-    "model_id": id,
-    "port": port,
-    "pid": model.pid().await,
-    "log_path": log_path,
-  }))
+  Ok(StartedLaunch {
+    launch_id,
+    model_id: id,
+    port,
+    model,
+    log_path,
+  })
 }
 
 fn spawn_last_params_recorder(
@@ -1665,6 +1793,94 @@ mod tests {
     assert!(daemon["pid"].is_number());
     assert!(daemon["uptime_seconds"].is_number());
     assert_eq!(daemon["active_connections"], json!(0));
+  }
+
+  #[tokio::test]
+  async fn status_omits_proxy_block_when_cell_is_absent() {
+    // Catalog-only contexts (`MethodContext::new`) leave
+    // `proxy_status` as `None`. The wire shape must omit the
+    // `proxy` field entirely so the pre-Unit-5 status fixture stays
+    // byte-identical — callers that don't surface a proxy don't get
+    // a confusing `"proxy": null` blob either.
+    let c = ctx();
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    assert!(
+      body.get("proxy").is_none(),
+      "proxy block must be absent when no cell is attached: {body}"
+    );
+  }
+
+  #[tokio::test]
+  async fn status_emits_proxy_listening_block() {
+    use crate::proxy;
+    use std::net::SocketAddr;
+    let addr: SocketAddr = "127.0.0.1:11434".parse().unwrap();
+    let cell = proxy::server::new_status_cell();
+    *cell.write().unwrap() = proxy::ProxyStatus::Listening { addr };
+    let c = MethodContext::new(ShutdownToken::new()).with_proxy_status(cell);
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    let proxy = body.get("proxy").expect("proxy block present");
+    assert_eq!(proxy["enabled"], json!(true));
+    assert_eq!(proxy["listen"], json!("127.0.0.1:11434"));
+    assert_eq!(proxy["status"], json!("listening"));
+    assert_eq!(proxy["bind_error"], Value::Null);
+  }
+
+  #[tokio::test]
+  async fn status_emits_proxy_disabled_block() {
+    use crate::proxy;
+    let cell = proxy::server::new_status_cell();
+    // `new_status_cell` already seeds `Disabled`.
+    let c = MethodContext::new(ShutdownToken::new()).with_proxy_status(cell);
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    let proxy = body.get("proxy").expect("proxy block present");
+    assert_eq!(proxy["enabled"], json!(false));
+    assert_eq!(proxy["listen"], Value::Null);
+    assert_eq!(proxy["status"], json!("disabled"));
+    assert_eq!(proxy["bind_error"], Value::Null);
+  }
+
+  #[tokio::test]
+  async fn status_emits_proxy_port_in_use_block() {
+    use crate::proxy;
+    use std::net::SocketAddr;
+    let addr: SocketAddr = "127.0.0.1:11434".parse().unwrap();
+    let cell = proxy::server::new_status_cell();
+    *cell.write().unwrap() = proxy::ProxyStatus::PortInUse { addr };
+    let c = MethodContext::new(ShutdownToken::new()).with_proxy_status(cell);
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    let proxy = body.get("proxy").expect("proxy block present");
+    assert_eq!(proxy["enabled"], json!(true));
+    assert_eq!(proxy["listen"], json!("127.0.0.1:11434"));
+    assert_eq!(proxy["status"], json!("port_in_use"));
+    // PortInUse is its own discriminator; no parallel bind_error
+    // string — the wire shape pins this so parsers don't have to
+    // double-check.
+    assert_eq!(proxy["bind_error"], Value::Null);
+  }
+
+  #[tokio::test]
+  async fn status_emits_proxy_unbound_block_with_bind_error() {
+    use crate::proxy;
+    use std::net::SocketAddr;
+    let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+    let cell = proxy::server::new_status_cell();
+    *cell.write().unwrap() = proxy::ProxyStatus::Unbound {
+      addr,
+      bind_error: "permission denied".to_string(),
+    };
+    let c = MethodContext::new(ShutdownToken::new()).with_proxy_status(cell);
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    let proxy = body.get("proxy").expect("proxy block present");
+    assert_eq!(proxy["enabled"], json!(true));
+    assert_eq!(proxy["listen"], json!("127.0.0.1:80"));
+    assert_eq!(proxy["status"], json!("unbound"));
+    assert_eq!(proxy["bind_error"], json!("permission denied"));
   }
 
   #[tokio::test]

@@ -28,7 +28,8 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
       detach,
       state_dir,
       socket_path,
-    } => handle_start(detach, state_dir, socket_path, cli, config).await,
+      proxy_port,
+    } => handle_start(detach, state_dir, socket_path, proxy_port, cli, config).await,
     DaemonAction::Stop => handle_stop().await,
     DaemonAction::Status { json } => handle_status(json).await,
   }
@@ -38,10 +39,11 @@ async fn handle_start(
   detach: bool,
   state_dir: Option<PathBuf>,
   socket_path: Option<PathBuf>,
+  proxy_port: Option<u16>,
   cli: &Cli,
   config: &Config,
 ) -> Result<()> {
-  let opts = build_options(state_dir, socket_path, cli, config)?;
+  let opts = build_options(state_dir, socket_path, proxy_port, cli, config)?;
   if detach {
     // `start_detached` blocks until the child reports socket bound.
     match start_detached(opts)? {
@@ -116,6 +118,7 @@ async fn handle_stop() -> Result<()> {
 pub(crate) fn build_options(
   state_dir: Option<PathBuf>,
   socket_path: Option<PathBuf>,
+  proxy_port: Option<u16>,
   cli: &Cli,
   config: &Config,
 ) -> Result<DaemonOptions> {
@@ -146,6 +149,13 @@ pub(crate) fn build_options(
   opts.port_range = config.port_range;
   opts.probe_timeout_secs = Some(config.probe_timeout_secs);
   opts.arch_defaults = config.arch_defaults.clone();
+  // Proxy: config layer first, then CLI override. Without this thread-
+  // through the daemon silently ignored `proxy:` from the config file
+  // and ran with `ProxyConfig::default()` regardless.
+  opts.proxy = config.proxy.clone();
+  if let Some(p) = proxy_port {
+    opts.proxy.port = p;
+  }
   opts.propagated_cli_args = propagated_cli_args(cli);
   Ok(opts)
 }
@@ -491,5 +501,59 @@ mod tests {
     let plain = console::strip_ansi_codes(&rendered);
     assert!(plain.contains("unexpected version response shape"));
     assert!(plain.contains("[\n  1,"));
+  }
+
+  #[test]
+  fn build_options_threads_config_proxy_block_into_daemon_options() {
+    // Regression: before this wiring landed, config.proxy.port was
+    // parsed and validated but `build_options` never copied it onto
+    // DaemonOptions.proxy. The daemon silently ran with
+    // ProxyConfig::default() (port 11434) no matter what the user put
+    // in config.yaml.
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        enabled: true,
+        port: 22222,
+        header_read_timeout_secs: 45,
+      },
+      ..Config::default()
+    };
+    let opts = build_options(None, None, None, &cli, &config).expect("build_options");
+    assert_eq!(
+      opts.proxy.port, 22222,
+      "config proxy.port must reach daemon"
+    );
+    assert_eq!(opts.proxy.header_read_timeout_secs, 45);
+    assert!(opts.proxy.enabled);
+  }
+
+  #[test]
+  fn build_options_proxy_port_cli_overrides_config_value() {
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        enabled: true,
+        port: 22222,
+        header_read_timeout_secs: 30,
+      },
+      ..Config::default()
+    };
+    // The CLI override (Some(8080)) beats config.proxy.port.
+    let opts = build_options(None, None, Some(8080), &cli, &config).expect("build_options");
+    assert_eq!(opts.proxy.port, 8080, "CLI flag overrides config");
+    // Other proxy fields still come from config (not reset).
+    assert!(opts.proxy.enabled);
+    assert_eq!(opts.proxy.header_read_timeout_secs, 30);
+  }
+
+  #[test]
+  fn build_options_no_cli_override_falls_back_to_config_then_default() {
+    // Defaults all the way down: no CLI override, no proxy block in
+    // config → daemon uses ProxyConfig::default().
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config::default();
+    let opts = build_options(None, None, None, &cli, &config).expect("build_options");
+    assert_eq!(opts.proxy.port, 11434);
   }
 }

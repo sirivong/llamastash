@@ -36,10 +36,12 @@ flowchart LR
     subgraph user[User-facing entrypoints]
         TUI[llamastash<br/>TUI]
         CLI[llamastash list / start / stop / ...<br/>CLI subcommands]
+        AGENT[OpenCode / Pi /<br/>OpenAI-SDK agent]
     end
 
     subgraph daemon[llamastash daemon]
         IPC[Unix-socket JSON-RPC server<br/>peercred auth]
+        PROXY[OpenAI-compat proxy<br/>127.0.0.1:11434 — loopback HTTP/1.1]
         SCAN[Discovery<br/>scan + watch + caches]
         GGUF[GGUF parser<br/>metadata + identity]
         SUP[Process supervisor<br/>spawn / health / stop]
@@ -55,6 +57,11 @@ flowchart LR
 
     TUI -- attach --> IPC
     CLI -- attach --> IPC
+    AGENT -- HTTP /v1/* --> PROXY
+    PROXY --> SUP
+    PROXY --> SCAN
+    PROXY --> LS1
+    PROXY --> LS2
     IPC --> SCAN
     IPC --> SUP
     IPC --> STATE
@@ -67,7 +74,31 @@ flowchart LR
 
 - **Daemon-on-demand.** The TUI and CLI both try to attach to the daemon socket first. If absent or stale, they fork/exec `llamastash daemon start --detach` and retry with exponential backoff.
 - **Socket.** Unix domain socket, mode `0600`, with peer-credential auth (`SO_PEERCRED` on Linux, `getpeereid` on macOS). Wire protocol: length-prefixed JSON-RPC 2.0 envelopes.
+- **Proxy.** A loopback HTTP/1.1 listener bound on `127.0.0.1:11434` by default, enabled by default, no auth and no TLS. Routes `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` by resolving `body.model` through the same fuzzy resolver as `llamastash start <ref>` and forwarding byte-for-byte to the matching `llama-server` child (auto-starting it if not running; falling back to a Ready model on launch failure with `x-llamastash-served-by` + `x-llamastash-fallback-reason` headers). Same-machine threat model — LAN exposure, auth, and TLS are deferred follow-ups. Implementation: `src/proxy/`; user docs: [`usage.md §Proxy (OpenAI-compatible listener)`](usage.md#proxy-openai-compatible-listener); design: [`plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
 - **State separation.** XDG-aware. `$XDG_STATE_HOME/llamastash/state.json` for favorites / presets / last-params / running snapshot. `$XDG_CONFIG_HOME/llamastash/config.yaml` for user-authored config. `$XDG_CACHE_HOME/llamastash/logs/<id>-<ts>.log` for per-launch logs.
+
+## Proxy comparison — Ollama, LM Studio, llamastash
+
+All three engines expose an OpenAI-shape local server, so any agent that speaks the OpenAI REST contract attaches to any of them by swapping the base URL. The interesting differences are behavioral: what happens when the requested model isn't loaded yet, whether the server can keep several models resident, and what it does when a launch fails. These shape the agent experience more than the wire surface does.
+
+- **Ollama** runs one HTTP server backed by a central `Scheduler`. Requests for an unloaded model flow through `scheduleRunner`, which asks the scheduler for a runner; if none exists, the scheduler launches one (each model is its own `llama.cpp` subprocess). Multiple runners can be resident concurrently, bounded by VRAM and the `OLLAMA_MAX_LOADED_MODELS` env. Eviction is refcount-gated with a keep-alive TTL (default 5 min). If a launch fails the request fails — Ollama treats `body.model` as exact intent and has no cross-model fallback. The `:cloud` suffix is a separate passthrough that signs and forwards requests to `ollama.com`.
+- **LM Studio** uses Just-In-Time (JIT) loading: the first request to an unloaded model loads it inline. By default `Auto-Evict` is on, which means JIT keeps **one model resident at a time** — loading a new one unloads the previously JIT-loaded model (manually-loaded models are exempt). Idle TTL defaults to 60 min, resets on every request, configurable per-request via `"ttl"`. No documented fallback for load failures.
+- **llamastash** auto-starts a dormant model via `route::handle_not_running` → `launch::auto_start`, with concurrent requests for the same `ModelId` coalesced through `proxy::coalesce::Coalesce`. Multiple models can stay resident at once (whatever the host fits). When a launch fails and another supervisor is already `Ready`, the proxy picks a family-MRU fallback (`pick_fallback` in `proxy/mru.rs`) and stamps `x-llamastash-served-by` + `x-llamastash-fallback-reason` (`launch_failed` for in-family substitution, `family_mismatch` for cross-arch picks). No idle-TTL eviction in v1 — models stay resident until explicit `stop_model`. The proxy serves **two API surfaces in parallel**: the OpenAI compat endpoints (`/v1/...`) are the primary inference surface, and the Ollama discovery endpoints (`/api/tags`, `/api/version`, `/api/ps`, `/api/show`) ship so Ollama-shape discovery libraries (`ollama-python` default path, `OLLAMA_HOST` env detection) recognise llamastash without code changes — see `src/proxy/ollama_compat.rs`. The Ollama *inference* endpoints (`/api/chat`, `/api/generate`, `/api/embed`) are deferred to a future plan (TODO §R2). See `src/proxy/` and [`plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
+
+| Behavior | Ollama | LM Studio | llamastash |
+|---|---|---|---|
+| Auto-start unloaded model | Yes (scheduler) | Yes (JIT) | Yes (`auto_start` + coalesce) |
+| Multiple loaded at once | Yes, VRAM-bounded | No by default (Auto-Evict on) | Yes (whatever fits) |
+| Idle TTL eviction | 5 min, refcount-gated | 60 min, request-resets | Not in v1 (R34 deferred) |
+| Single-flight coalesce on concurrent first-requests | Implicit via scheduler channel | Not documented | Explicit `Coalesce` map keyed on `ModelId` |
+| Fallback when load fails | None — request fails | None documented | Family-MRU pick, headers stamped (`x-llamastash-served-by` + `fallback-reason`) |
+| Body pass-through (no `model` rewrite) | Re-routes by name, may rewrite | OpenAI-shape pass-through | Byte-pure forward via `StreamBody` |
+| Loopback-only by default | No (configurable bind) | Yes (`127.0.0.1`) | Yes, hard-coded |
+| OpenAI-compat `/v1/...` surface | Yes (added later) | Yes (primary surface) | Yes (primary surface) |
+| Ollama discovery `/api/tags` etc. | Yes (native) | No | Yes — `/api/tags`, `/api/version`, `/api/ps`, `/api/show` (Tier 1) |
+| Ollama inference `/api/chat`, `/api/generate` | Yes (native) | No | **Deferred** (Tier 2 — TODO §R2) |
+
+**Two takeaways for llamastash's roadmap.** The family-MRU fallback is the one behavior neither Ollama nor LM Studio surfaces — both fail the request when a launch fails. For agents that don't read response headers the substitution is invisible, which is worth re-considering before v1 ships (do we want this to be opt-in via `proxy.fallback: false`?). The idle-TTL gap is the more concrete functional gap: both prior-art engines evict idle models so a long-running daemon doesn't pin memory forever. llamastash defers idle eviction to v2 under the broader R34 umbrella — see TODO §R1 follow-up.
 
 ## Model lifecycle
 
@@ -167,7 +198,7 @@ Inline `#[cfg(test)] mod tests` per source file plus an integration suite under 
 
 ## What's not here
 
-- HTTP and MCP surfaces (v2, R34).
+- Anthropic `/v1/messages`, MCP, LAN-exposed HTTP (the original v1 R34 deferral). The loopback OpenAI-compat proxy carves out only that surface; auth, TLS, network binding, and the rest of R34 stay deferred.
 - HuggingFace pull worker (v2, R46). The CLI `pull` subcommand is hidden and exits unimplemented.
 - Multi-user / remote / network daemon. v1 is loopback-only; v2 will require explicit opt-in.
 - Daily-driver chat history; markdown rendering. The right-pane Chat tab is a single-shot smoke test.

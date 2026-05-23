@@ -174,17 +174,40 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
       out.push_str(&format::section_header("daemon", None));
       let pid_styled = console::style(d.pid.to_string()).bold().to_string();
       let uptime = format::format_uptime(d.uptime_seconds);
-      out.push_str(&format::kv_block(&[
+      let mut rows: Vec<(&'static str, String)> = vec![
         ("pid", pid_styled),
         ("uptime", uptime),
         ("connections", d.active_connections.to_string()),
-      ]));
+      ];
+      // Proxy row — surfaced inline in the daemon block when the
+      // proxy is enabled. Skipped (per plan §Test scenarios edge
+      // case 3) when disabled. The label cycles through the same
+      // wire labels the IPC emits so a user grepping `status` text
+      // matches the same strings agents key on.
+      if let Some(line) = proxy_human_label(&snap.proxy) {
+        rows.push(("proxy", line));
+      }
+      out.push_str(&format::kv_block(&rows));
       out.push('\n');
     } else {
       out.push_str(&format!(
         "daemon: pid={} uptime={}s connections={}\n",
         d.pid, d.uptime_seconds, d.active_connections,
       ));
+      if let Some(line) = proxy_human_label(&snap.proxy) {
+        out.push_str(&format!("proxy: {line}\n"));
+      }
+    }
+  } else if let Some(line) = proxy_human_label(&snap.proxy) {
+    // No daemon block (older daemon) but the proxy field is
+    // present — surface it on its own line so the user can still
+    // see the listener state.
+    if tty {
+      out.push_str(&format::section_header("proxy", None));
+      out.push_str(&format::kv_block(&[("status", line)]));
+      out.push('\n');
+    } else {
+      out.push_str(&format!("proxy: {line}\n"));
     }
   }
 
@@ -300,6 +323,37 @@ fn gpu_label(gpu: &Value) -> Option<String> {
   }
 }
 
+/// Format the proxy block for the human-readable status table.
+/// Returns `None` when the proxy is disabled or the block is absent
+/// — the row is then skipped entirely so a config that turns the
+/// proxy off doesn't add noise to the table (plan §Test scenarios
+/// edge case 3).
+///
+/// Examples:
+/// - listening  → `listening 127.0.0.1:11434`
+/// - port_in_use → `port_in_use 127.0.0.1:11434 (port taken)`
+/// - unbound    → `unbound 127.0.0.1:80 (permission denied)`
+fn proxy_human_label(proxy: &Value) -> Option<String> {
+  let obj = proxy.as_object()?;
+  let status = obj.get("status").and_then(Value::as_str)?;
+  if status == "disabled" {
+    return None;
+  }
+  let listen = obj.get("listen").and_then(Value::as_str).unwrap_or("?");
+  match status {
+    "listening" => Some(format!("listening {listen}")),
+    "port_in_use" => Some(format!("port_in_use {listen} (port taken)")),
+    "unbound" => {
+      let cause = obj
+        .get("bind_error")
+        .and_then(Value::as_str)
+        .unwrap_or("bind failed");
+      Some(format!("unbound {listen} ({cause})"))
+    }
+    other => Some(format!("{other} {listen}")),
+  }
+}
+
 /// JSON projection of `status` (preserves the daemon's wire shape so
 /// agents that already parse `daemon status` keep working).
 ///
@@ -366,13 +420,24 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
       "socket_path": d.socket_path,
     })
   });
-  serde_json::json!({
+  let mut body = serde_json::json!({
     "models": models,
     "external": external,
     "gpu": snap.gpu,
     "host": snap.host,
     "daemon": daemon,
-  })
+  });
+  // Proxy block — surfaced byte-for-byte from the IPC `status`
+  // response so agents that parse `status --json` see the same
+  // shape as raw IPC clients (R161). Pre-Unit-5 daemons emit no
+  // block; we mirror that by omitting the key entirely rather than
+  // synthesising a placeholder.
+  if !snap.proxy.is_null() {
+    if let Some(obj) = body.as_object_mut() {
+      obj.insert("proxy".into(), snap.proxy.clone());
+    }
+  }
+  body
 }
 
 /// Pretty-print `serde_json::Value` as the canonical CLI JSON form.
@@ -544,6 +609,7 @@ mod tests {
         gpu: Value::Null,
         host: Value::Null,
         daemon: None,
+        proxy: Value::Null,
       };
       let s = status_human(&snap);
       assert!(console::strip_ansi_codes(&s).contains("no managed"));
@@ -565,6 +631,7 @@ mod tests {
         gpu: serde_json::json!({"backend": "cpu_only"}),
         host: Value::Null,
         daemon: None,
+        proxy: Value::Null,
       };
       let s = status_human(&snap);
       let plain = console::strip_ansi_codes(&s);
@@ -630,6 +697,7 @@ mod tests {
         server_path: None,
         socket_path: None,
       }),
+      proxy: Value::Null,
     };
     let s = status_human(&snap);
     assert!(s.starts_with("daemon: pid=4242"), "preamble shape: {s:?}");
@@ -654,6 +722,7 @@ mod tests {
         server_path: None,
         socket_path: None,
       }),
+      proxy: Value::Null,
     };
     let s = status_human(&snap);
     let plain = console::strip_ansi_codes(&s);
@@ -690,6 +759,7 @@ mod tests {
       gpu: Value::String("CpuOnly".into()),
       host: serde_json::json!({"gpu_backend": "amd", "cpu_pct": 12.5}),
       daemon: None,
+      proxy: Value::Null,
     };
     let v = status_json(&snap);
     let model = &v["models"][0];
@@ -721,6 +791,7 @@ mod tests {
         server_path: Some("/usr/bin/llama-server".into()),
         socket_path: Some("/run/user/1000/llamastash/daemon.sock".into()),
       }),
+      proxy: Value::Null,
     };
     let v = status_json(&snap);
     assert_eq!(v["daemon"]["pid"], serde_json::json!(11));
@@ -754,6 +825,7 @@ mod tests {
         "gpu_device_count": 1,
       }),
       daemon: None,
+      proxy: Value::Null,
     };
     let v = status_json(&snap);
     assert!(v.get("host").is_some(), "host key must appear: {v}");
@@ -791,6 +863,7 @@ mod tests {
       gpu: Value::Null,
       host: Value::Null,
       daemon: None,
+      proxy: Value::Null,
     };
     let s = status_human(&snap);
     // Regression guard: managed + external rows are exact tabs, no
@@ -812,6 +885,7 @@ mod tests {
       gpu: Value::Null,
       host: Value::Null,
       daemon: None,
+      proxy: Value::Null,
     };
     let s = status_human(&snap);
     let plain = console::strip_ansi_codes(&s);
@@ -823,5 +897,219 @@ mod tests {
     assert!(plain.contains("L1"));
     assert!(plain.contains("ready"));
     assert!(plain.contains("41100"));
+  }
+
+  fn proxy_value(status: &str, listen: Option<&str>, bind_error: Option<&str>) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("enabled".into(), Value::Bool(status != "disabled"));
+    obj.insert(
+      "listen".into(),
+      listen
+        .map(|s| Value::String(s.into()))
+        .unwrap_or(Value::Null),
+    );
+    obj.insert("status".into(), Value::String(status.into()));
+    obj.insert(
+      "bind_error".into(),
+      bind_error
+        .map(|s| Value::String(s.into()))
+        .unwrap_or(Value::Null),
+    );
+    Value::Object(obj)
+  }
+
+  #[test]
+  fn status_json_round_trips_proxy_listening_block() {
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: proxy_value("listening", Some("127.0.0.1:11434"), None),
+    };
+    let v = status_json(&snap);
+    let proxy = v.get("proxy").expect("proxy block must round-trip");
+    assert_eq!(proxy["status"], serde_json::json!("listening"));
+    assert_eq!(proxy["listen"], serde_json::json!("127.0.0.1:11434"));
+    assert_eq!(proxy["enabled"], serde_json::json!(true));
+    assert_eq!(proxy["bind_error"], Value::Null);
+  }
+
+  #[test]
+  fn status_json_round_trips_proxy_disabled_block() {
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: proxy_value("disabled", None, None),
+    };
+    let v = status_json(&snap);
+    let proxy = v.get("proxy").expect("proxy block must round-trip");
+    assert_eq!(proxy["status"], serde_json::json!("disabled"));
+    assert_eq!(proxy["enabled"], serde_json::json!(false));
+    assert_eq!(proxy["listen"], Value::Null);
+  }
+
+  #[test]
+  fn status_json_round_trips_proxy_port_in_use_block() {
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: proxy_value("port_in_use", Some("127.0.0.1:11434"), None),
+    };
+    let v = status_json(&snap);
+    let proxy = v.get("proxy").expect("proxy block must round-trip");
+    assert_eq!(proxy["status"], serde_json::json!("port_in_use"));
+    assert_eq!(proxy["listen"], serde_json::json!("127.0.0.1:11434"));
+    assert_eq!(proxy["bind_error"], Value::Null);
+  }
+
+  #[test]
+  fn status_json_round_trips_proxy_unbound_block() {
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: proxy_value("unbound", Some("127.0.0.1:80"), Some("permission denied")),
+    };
+    let v = status_json(&snap);
+    let proxy = v.get("proxy").expect("proxy block must round-trip");
+    assert_eq!(proxy["status"], serde_json::json!("unbound"));
+    assert_eq!(proxy["bind_error"], serde_json::json!("permission denied"));
+  }
+
+  #[test]
+  fn status_json_omits_proxy_block_when_absent() {
+    // Pre-Unit-5 daemons emit no `proxy` field. The CLI surface must
+    // mirror that by omitting the key entirely, not synthesising a
+    // null placeholder.
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: Value::Null,
+    };
+    let v = status_json(&snap);
+    assert!(
+      v.get("proxy").is_none(),
+      "proxy key must be absent when StatusSnapshot.proxy is null: {v}"
+    );
+  }
+
+  #[test]
+  fn status_human_skips_proxy_row_when_disabled() {
+    // Plan §Test scenarios edge case 3: disabled config doesn't add a
+    // row. The label cycle includes `proxy` as a kv label otherwise;
+    // its absence is the signal that the proxy is off.
+    use crate::cli::resolve::DaemonHealth;
+    let _g = ColorGuard::set(false);
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: Some(DaemonHealth {
+        pid: 1,
+        uptime_seconds: 0,
+        active_connections: 0,
+        build: None,
+        server_path: None,
+        socket_path: None,
+      }),
+      proxy: proxy_value("disabled", None, None),
+    };
+    let s = status_human(&snap);
+    assert!(
+      !s.contains("proxy"),
+      "disabled proxy must not add a `proxy` row: {s:?}"
+    );
+  }
+
+  #[test]
+  fn status_human_renders_proxy_listening_row_under_daemon() {
+    use crate::cli::resolve::DaemonHealth;
+    let _g = ColorGuard::set(false);
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: Some(DaemonHealth {
+        pid: 1,
+        uptime_seconds: 0,
+        active_connections: 0,
+        build: None,
+        server_path: None,
+        socket_path: None,
+      }),
+      proxy: proxy_value("listening", Some("127.0.0.1:11434"), None),
+    };
+    let s = status_human(&snap);
+    assert!(
+      s.contains("proxy: listening 127.0.0.1:11434"),
+      "expected proxy row, got: {s:?}"
+    );
+  }
+
+  #[test]
+  fn status_human_renders_proxy_port_in_use_row_with_hint() {
+    use crate::cli::resolve::DaemonHealth;
+    let _g = ColorGuard::set(false);
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: Some(DaemonHealth {
+        pid: 1,
+        uptime_seconds: 0,
+        active_connections: 0,
+        build: None,
+        server_path: None,
+        socket_path: None,
+      }),
+      proxy: proxy_value("port_in_use", Some("127.0.0.1:11434"), None),
+    };
+    let s = status_human(&snap);
+    assert!(
+      s.contains("port_in_use"),
+      "expected port_in_use label: {s:?}"
+    );
+  }
+
+  #[test]
+  fn status_human_renders_proxy_unbound_row_with_cause() {
+    use crate::cli::resolve::DaemonHealth;
+    let _g = ColorGuard::set(false);
+    let snap = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: Some(DaemonHealth {
+        pid: 1,
+        uptime_seconds: 0,
+        active_connections: 0,
+        build: None,
+        server_path: None,
+        socket_path: None,
+      }),
+      proxy: proxy_value("unbound", Some("127.0.0.1:80"), Some("permission denied")),
+    };
+    let s = status_human(&snap);
+    assert!(
+      s.contains("unbound") && s.contains("permission denied"),
+      "expected unbound row with cause: {s:?}"
+    );
   }
 }

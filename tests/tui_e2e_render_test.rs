@@ -67,6 +67,7 @@ fn seeded_dashboard_app() -> App {
     build: Some("0.1.0".into()),
     server_path: Some("/usr/local/bin/llama-server".into()),
     socket_path: Some("/run/user/1000/llamastash/daemon.sock".into()),
+    proxy: None,
   };
   app.host_metrics = HostMetricsSnapshot {
     cpu_pct: 47.5,
@@ -227,9 +228,14 @@ fn dashboard_render_carries_key_landmarks() {
   assert!(frame.contains("GPU"));
   assert!(frame.contains("VRAM"));
   assert!(frame.contains("NVML"));
-  // Daemon pane: build + server path.
-  assert!(frame.contains("v0.1.0"));
+  // Daemon pane: server path + always-on proxy row. The build
+  // version surfaces on the title bar (`render_title_left`) and is
+  // no longer repeated on the info pane.
   assert!(frame.contains("llama-server"));
+  assert!(
+    frame.contains("proxy"),
+    "proxy row missing from Daemon info pane: {frame}"
+  );
   // Logo pane (visible at width 120).
   assert!(frame.contains("macchiato"));
   // Models pane: section headers + per-row badges. Running has a

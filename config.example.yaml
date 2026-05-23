@@ -137,6 +137,48 @@ probe_timeout_secs: 120
 #   alias llamastash='llamastash --mouse-focus'
 mouse_focus: false
 
+# ─── Proxy (OpenAI-compatible listener) ───────────────────────────
+#
+# A loopback HTTP/1.1 listener that speaks the OpenAI REST shape on
+# one stable URL so any agent (OpenCode, Pi, OpenAI SDKs, …) can
+# route every discovered model through `body.model`. The full
+# endpoint table, error envelopes, response headers (notably the
+# fallback-path `x-llamastash-served-by` /
+# `x-llamastash-fallback-reason`), and the manual smoke runbook live
+# in `docs/usage.md §Proxy (OpenAI-compatible listener)`.
+#
+# Auth posture: none. The listener binds 127.0.0.1 only and ignores
+# every authentication header — same-machine single-user threat
+# model. There is intentionally no `host`, `api_key`, `tls_*`, or
+# fallback-tuning knob in v1; LAN exposure, auth, TLS, and the rest
+# of R34 are deferred follow-ups.
+#
+# Unknown keys inside this block are rejected loudly (no
+# silently-tolerated typos).
+proxy:
+  # Toggle the listener. When false the daemon still runs but no
+  # port is bound and `status.proxy.status` reports "disabled".
+  enabled: true
+  # TCP port on 127.0.0.1. Default matches Ollama's well-known port
+  # so OpenAI-client wrappers that hard-code that target see
+  # llamastash without reconfiguration. If another process already
+  # owns the port the daemon stays up and reports
+  # `status.proxy.status: "port_in_use"` — the proxy does not
+  # auto-roam (would break the "single stable URL" promise). Edit
+  # `port` and restart to recover.
+  #
+  # Override at startup with `llamastash daemon start --proxy-port N`
+  # (CLI flag beats this config value). Use `--proxy-port 0` to bind
+  # an ephemeral port — `llamastash status --json | jq .proxy.listen`
+  # reports the actual bound address.
+  port: 11434
+  # Seconds hyper waits for a client to finish sending request
+  # headers before dropping the connection. Bounds the impact of
+  # partial-request clients (crashed agents leaving sockets
+  # half-open, slow-loris-style mistakes). Raise to 120 if a client
+  # legitimately streams headers across a slow link.
+  header_read_timeout_secs: 30
+
 # ─── Keybindings ──────────────────────────────────────────────────
 #
 # Override the default keymap. Each entry maps an action name

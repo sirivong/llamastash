@@ -5,7 +5,7 @@ authors = ["Deepu K Sasidharan <d4udts@gmail.com>"]
 description = "A fast, keyboard-driven TUI for running local models via llama.cpp"
 documentation = "https://github.com/llamastash/llamastash"
 categories = ["command-line-utilities"]
-keywords = ["llamastash", "llama-cpp", "llm", "tui", "gguf"]
+keywords = ["llama-cpp", "llm", "tui", "gguf", "openai"]
 repository = "https://github.com/llamastash/llamastash"
 homepage = "https://github.com/llamastash/llamastash"
 readme = "README.md"
@@ -142,6 +142,26 @@ sha2 = { version = "0.10", default-features = false, features = ["std"] }
 # the `command-group` crate would boil down to the same syscall
 # on Unix and is not needed.
 
+# OpenAI-compat proxy router (post-v2 feat). Hyper 1.x is the
+# lightest tokio-compatible HTTP server option and already lives in
+# the dep tree transitively via reqwest. Loopback HTTP/1.1 only —
+# HTTP/2 is intentionally not enabled to keep the ALPN/TLS surface
+# out of the build. See docs/plans/2026-05-21-001-feat-proxy-router-plan.md
+# Key Technical Decisions for the axum-vs-hyper analysis.
+hyper = { version = "1", default-features = false, features = [
+  "http1",
+  "server",
+] }
+# `server-auto` would re-enable hyper's HTTP/2 feature transitively;
+# we use `hyper::server::conn::http1::Builder` directly instead so
+# the build stays HTTP/1.1-only. The `tokio` feature ships the
+# `TokioIo` adapter that bridges hyper's `Io` traits onto
+# `tokio::net::TcpStream`.
+hyper-util = { version = "0.1", default-features = false, features = [
+  "tokio",
+] }
+http-body-util = "0.1"
+
 [lib]
 name = "llamastash"
 path = "src/lib.rs"
@@ -172,6 +192,28 @@ doc = false
 version = "1"
 default-features = false
 features = ["user-hooks"]
+
+# Criterion drives the proxy-overhead bench landed by Unit 7 of the
+# proxy-router plan. Default features pull in `rayon` + `plotters`
+# (the SVG plot backend) which would more than double the dev-dep
+# tree; `html_reports` is sufficient to produce the maintainer-
+# readable summary the runbook expects. The bench itself is feature-
+# gated under `test-fixtures` so plain `cargo build --benches`
+# without that feature is a no-op for downstream packagers.
+[dev-dependencies.criterion]
+version = "0.5"
+default-features = false
+features = ["html_reports"]
+
+# Bench harness for R160 latency validation. `harness = false` is
+# criterion's idiom: we hand-roll `main` in the bench file so
+# criterion's macros own the driver rather than libtest. See
+# `docs/runbooks/proxy-latency-bench.md` for the reproducible run
+# procedure.
+[[bench]]
+name = "proxy_overhead"
+harness = false
+required-features = ["test-fixtures"]
 
 [features]
 test-fixtures = []

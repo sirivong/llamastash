@@ -66,6 +66,71 @@ pub struct Config {
   /// wizard no longer writes this field; it remains as a hand-edited
   /// escape hatch for users overriding a built-in row.
   pub arch_defaults: BTreeMap<String, TypedKnobs>,
+  /// OpenAI-compat proxy router. Enabled by default on
+  /// `127.0.0.1:11434` so agent clients (OpenCode, Pi) can attach to
+  /// one stable URL and route by `body.model`. See
+  /// docs/plans/2026-05-21-001-feat-proxy-router-plan.md for the
+  /// rationale. Unknown keys inside `[proxy]` are rejected loudly so
+  /// a typo never silently falls back to defaults — separate posture
+  /// from the top-level config which tolerates unknown keys for
+  /// forward-compat.
+  pub proxy: ProxyConfig,
+}
+
+/// OpenAI-compat proxy router configuration.
+///
+/// `enabled: true` (the default) starts a hyper listener on
+/// `127.0.0.1:<port>` inside the daemon process. `port` is the only
+/// other knob in v1 — host is fixed at loopback, no auth, no TLS, no
+/// fallback tuning. See the plan's Scope Boundaries for why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct ProxyConfig {
+  /// Whether the daemon binds the proxy listener at startup. When
+  /// `false`, the daemon still runs; `status.proxy.status` reports
+  /// `"disabled"`. Default `true`.
+  #[serde(default = "ProxyConfig::default_enabled")]
+  pub enabled: bool,
+  /// TCP port the listener binds on `127.0.0.1`. Default `11434` —
+  /// matches Ollama's well-known port so OpenAI-client wrappers that
+  /// hard-code that target see llamastash without reconfiguration.
+  /// The collision is documented in the README / troubleshooting; if
+  /// the port is taken the daemon stays up and surfaces
+  /// `proxy.status: "port_in_use"`.
+  #[serde(default = "ProxyConfig::default_port")]
+  pub port: u16,
+  /// How long hyper waits for a client to finish sending request
+  /// headers, in seconds. Default `30`. Bounds partial-request clients
+  /// (crashed agents leaving sockets half-open, slow-loris-style
+  /// mistakes) so they don't pin a serve_connection task forever.
+  /// Raise to e.g. `120` if an agent legitimately streams headers
+  /// across a slow link.
+  #[serde(default = "ProxyConfig::default_header_read_timeout_secs")]
+  pub header_read_timeout_secs: u64,
+}
+
+impl ProxyConfig {
+  fn default_enabled() -> bool {
+    true
+  }
+
+  fn default_port() -> u16 {
+    11434
+  }
+
+  fn default_header_read_timeout_secs() -> u64 {
+    30
+  }
+}
+
+impl Default for ProxyConfig {
+  fn default() -> Self {
+    Self {
+      enabled: Self::default_enabled(),
+      port: Self::default_port(),
+      header_read_timeout_secs: Self::default_header_read_timeout_secs(),
+    }
+  }
 }
 
 /// Typed launch knobs the supervisor argvifies into `llama-server`
@@ -131,6 +196,7 @@ impl Default for Config {
       probe_timeout_secs: 120,
       mouse_focus: false,
       arch_defaults: BTreeMap::new(),
+      proxy: ProxyConfig::default(),
     }
   }
 }
@@ -644,6 +710,73 @@ arch_defaults:
   fn arch_defaults_absent_defaults_to_empty_map() {
     let cfg = Config::default();
     assert!(cfg.arch_defaults.is_empty());
+  }
+
+  #[test]
+  fn proxy_config_defaults_match_plan() {
+    let cfg = Config::default();
+    assert!(cfg.proxy.enabled);
+    assert_eq!(cfg.proxy.port, 11434);
+  }
+
+  #[test]
+  fn proxy_config_round_trips_through_yaml() {
+    let dir = temp_test_dir("proxy-config");
+    let path = dir.join("config.yaml");
+    fs::write(
+      &path,
+      r"
+theme: latte
+proxy:
+  enabled: false
+  port: 13579
+",
+    )
+    .expect("config fixture should be written");
+
+    let loaded = load_config_from_path(&path);
+
+    assert!(loaded.warning.is_none(), "valid config should not warn");
+    assert!(!loaded.config.proxy.enabled);
+    assert_eq!(loaded.config.proxy.port, 13579);
+    fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn proxy_config_partial_inherits_remaining_defaults() {
+    let dir = temp_test_dir("proxy-partial");
+    let path = dir.join("config.yaml");
+    fs::write(&path, "proxy:\n  port: 22222\n").expect("write failed");
+
+    let loaded = load_config_from_path(&path);
+
+    assert!(loaded.warning.is_none());
+    // `enabled` keeps its default when only `port` is supplied.
+    assert!(loaded.config.proxy.enabled);
+    assert_eq!(loaded.config.proxy.port, 22222);
+    fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn proxy_config_unknown_key_is_rejected() {
+    let dir = temp_test_dir("proxy-unknown");
+    let path = dir.join("config.yaml");
+    // `foo` is not part of ProxyConfig; with #[serde(deny_unknown_fields)]
+    // on ProxyConfig the parser must reject the file and the loader
+    // falls back to defaults with a warning naming the offending key.
+    fs::write(&path, "proxy:\n  foo: bar\n").expect("write failed");
+
+    let loaded = load_config_from_path(&path);
+
+    assert_eq!(loaded.config, Config::default());
+    let warning = loaded
+      .warning
+      .expect("unknown proxy key must surface a warning");
+    assert!(
+      warning.contains("foo"),
+      "warning should name the unknown key, got: {warning}"
+    );
+    fs::remove_dir_all(dir).expect("temp test dir should be removed");
   }
 
   #[test]

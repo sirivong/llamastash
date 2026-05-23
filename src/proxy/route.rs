@@ -1,0 +1,510 @@
+//! Pre-flight: turn an inbound HTTP request into a forwarding plan.
+//!
+//! Unit 3 walks every incoming `/v1/...` request through this module
+//! before reaching for the upstream `llama-server`. The output is a
+//! [`RouteDecision`] that captures everything [`super::forward`]
+//! needs to do the pass-through, plus enough context for the error
+//! arms to render an OpenAI-shaped body.
+//!
+//! Hot path:
+//!   1. Buffer the body under a 2 MiB cap ([`http-body-util::Limited`]).
+//!   2. Extract `body.model` with a tolerant `JustModel` parse that
+//!      ignores every other field. Empty / missing → 400.
+//!   3. Build a `Vec<CatalogRow>` from the catalog snapshot and run
+//!      the existing fuzzy resolver ([`crate::cli::resolve::resolve_model`]).
+//!   4. Walk the supervisor snapshot for a Ready entry whose
+//!      [`ModelId`] path matches the resolved catalog row.
+//!
+//! Unit 3 stops at step 4 — no auto-start, no fallback. Unit 4
+//! replaces the [`RouteDecision::NotRunning`] arm with the launch +
+//! single-flight + fallback machinery; the variant intentionally
+//! carries the resolved row + arch so Unit 4 doesn't have to repeat
+//! the lookup.
+//!
+//! Plan: docs/plans/2026-05-21-001-feat-proxy-router-plan.md (Unit 3).
+
+use std::sync::Arc;
+
+use http_body_util::{BodyExt, Limited};
+use hyper::body::{Bytes, Incoming};
+
+use crate::cli::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
+use crate::daemon::supervisor::ManagedState;
+use crate::discovery::DiscoveredModel;
+use crate::gguf::identity::ModelId;
+
+use super::launch::{self, LaunchOutcome};
+use super::mru::{pick_fallback, FallbackCandidate};
+use super::router::ProxyResponse;
+use super::state::ProxyState;
+
+/// Inbound body size cap. The 2 MiB ceiling lets OpenAI-shape chat
+/// completions with multi-thousand-token histories through while
+/// still bounding worst-case memory and refusing accidental
+/// uploads. Anything larger surfaces as HTTP 413 via [`BodyError::TooLarge`].
+pub const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Forwarding plan produced by [`decide`]. Keep this `pub(crate)` —
+/// the router pattern-matches on variants but no external module
+/// constructs them.
+#[derive(Debug)]
+pub(crate) enum RouteDecision {
+  /// Forward to a Ready supervisor on `port`. `served_model_id` is
+  /// the display name of the model actually serving the request;
+  /// equal to `requested_model` on the happy path and diverges on
+  /// fallback (Unit 4). `fallback` gates the `x-llamastash-*`
+  /// response headers in [`super::forward`].
+  ReadyAt {
+    port: u16,
+    served_model_id: String,
+    /// Canonical `(path, header_blake3)` of the supervisor we picked.
+    /// Threaded through so the forward path can re-verify the port
+    /// still binds the same model just before sending the request
+    /// upstream — defends against the Ready→Stopping→port-reuse race
+    /// where a different model could be answering on the same port
+    /// by the time we connect.
+    served_model_key: ModelId,
+    fallback: bool,
+    fallback_reason: Option<String>,
+  },
+  /// The catalog has the model but no Ready supervisor is serving it.
+  /// Dispatched into `handle_not_running` which runs the auto-start +
+  /// single-flight + family-MRU fallback flow. The variant carries the
+  /// resolved row + arch so the launch path doesn't repeat the lookup.
+  NotRunning {
+    requested_model: String,
+    /// Resolved catalog entry consumed by the launch path to build
+    /// `StartParams` for `start_model_inner` without re-running the
+    /// resolver.
+    // dead_code: consumed via destructuring in router::forward_request;
+    // the field itself is moved out, not read by name.
+    #[allow(dead_code)]
+    resolved_row: Box<CatalogRow>,
+    /// Catalog arch metadata (e.g. `"llama"`, `"qwen3"`). `None`
+    /// when discovery couldn't parse the GGUF header. The family-MRU
+    /// fallback pivots on this field.
+    // dead_code: consumed via destructuring in router::forward_request.
+    #[allow(dead_code)]
+    arch: Option<String>,
+  },
+  /// `resolve_model` returned zero matches. Unit 3 emits 404
+  /// `model_not_found` with `matches: []`.
+  NotFound { requested_model: String },
+  /// `resolve_model` returned > 1 matches. Unit 3 emits 400
+  /// `ambiguous_model` with the candidate names.
+  Ambiguous {
+    requested_model: String,
+    candidates: Vec<String>,
+  },
+  /// `body.model` is absent or empty. Unit 3 emits 400
+  /// `invalid_request` with `code: "model_required"`.
+  ModelRequired,
+}
+
+/// Errors raised before [`decide`] returns — these escape the
+/// forwarding-plan layer and propagate to the per-request HTTP
+/// status mapping in [`super::router`].
+#[derive(Debug)]
+pub(crate) enum BodyError {
+  /// Body exceeded the 2 MiB ceiling. HTTP 413.
+  TooLarge,
+  /// Body wasn't valid JSON or `body.model` wasn't a string.
+  /// HTTP 400 `invalid_request`.
+  Malformed { message: String },
+  /// hyper choked reading the request body off the wire. Surface as
+  /// HTTP 400; client-side framing is broken either way.
+  Read { message: String },
+}
+
+/// Minimal-shape body parse: serde ignores all fields it doesn't
+/// know about, so anything beyond `model` is preserved in the
+/// buffered bytes we forward upstream unchanged.
+#[derive(serde::Deserialize)]
+struct JustModel {
+  #[serde(default)]
+  model: Option<String>,
+}
+
+/// Outcome of buffering + extracting. `bytes` is the full body
+/// (capped at [`BODY_LIMIT_BYTES`]); we forward these verbatim, so
+/// no re-encoding ever happens after this point.
+pub(crate) struct ParsedBody {
+  pub bytes: Bytes,
+  pub model: Option<String>,
+}
+
+/// Drain the inbound body under the 2 MiB cap, then peek the
+/// `model` field with a single tolerant parse. The body bytes are
+/// kept as-is for verbatim forwarding.
+pub(crate) async fn buffer_and_extract(body: Incoming) -> Result<ParsedBody, BodyError> {
+  let collected = match Limited::new(body, BODY_LIMIT_BYTES).collect().await {
+    Ok(c) => c,
+    Err(err) => {
+      // `http-body-util::Limited` wraps the inner error inside a
+      // `Box<dyn Error + Send + Sync>`. The cap-overflow case is
+      // exposed as `LengthLimitError`; distinguishing it lets us
+      // emit 413 vs 400 with the right message.
+      if err
+        .downcast_ref::<http_body_util::LengthLimitError>()
+        .is_some()
+      {
+        return Err(BodyError::TooLarge);
+      }
+      return Err(BodyError::Read {
+        message: format!("failed to read request body: {err}"),
+      });
+    }
+  };
+  let bytes = collected.to_bytes();
+
+  // An empty body is allowed in principle — `model` extraction
+  // then returns None and the caller emits `model_required`.
+  let model = if bytes.is_empty() {
+    None
+  } else {
+    match serde_json::from_slice::<JustModel>(&bytes) {
+      Ok(parsed) => parsed
+        .model
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()),
+      Err(err) => {
+        return Err(BodyError::Malformed {
+          message: format!("request body is not valid JSON: {err}"),
+        });
+      }
+    }
+  };
+
+  Ok(ParsedBody { bytes, model })
+}
+
+/// Build a [`RouteDecision`] from the parsed body. Does no I/O
+/// beyond reading shared snapshots (catalog, supervisors). The
+/// forwarding decision is pure — the side-effecting forward call
+/// lives in [`super::forward`].
+pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) -> RouteDecision {
+  let requested = match body_model {
+    Some(m) if !m.is_empty() => m,
+    _ => return RouteDecision::ModelRequired,
+  };
+
+  // Catalog snapshot → CatalogRow vec (the resolver speaks
+  // `&[CatalogRow]`). Built in-process here because the existing
+  // `cli::resolve::fetch_catalog` round-trips through IPC, which
+  // we explicitly want to avoid on the hot path.
+  let snap = state.ctx.catalog.snapshot().await;
+  let rows: Vec<CatalogRow> = snap.iter().map(catalog_row_from_discovered).collect();
+  let resolved = match resolve_model_with_candidates(&rows, &requested) {
+    Ok(r) => r,
+    Err(ResolveError::Empty) | Err(ResolveError::None) => {
+      return RouteDecision::NotFound {
+        requested_model: requested,
+      };
+    }
+    Err(ResolveError::Many(candidates)) => {
+      return RouteDecision::Ambiguous {
+        requested_model: requested,
+        candidates: candidates.into_iter().map(|r| r.name()).collect(),
+      };
+    }
+  };
+
+  // Walk the supervisor snapshot for a Ready entry serving the
+  // resolved row's path. Two HashMap lookups + one state read each
+  // — well within the hot-path budget the plan asks for.
+  let sup_snap = state.ctx.supervisors.snapshot().await;
+  for (_launch_id, model) in sup_snap.into_iter() {
+    if !same_path(&model.id().path, &resolved.path) {
+      continue;
+    }
+    if matches!(model.state().await, ManagedState::Ready) {
+      return RouteDecision::ReadyAt {
+        port: model.port(),
+        served_model_id: served_name_for_row(&resolved),
+        served_model_key: model.id().clone(),
+        fallback: false,
+        fallback_reason: None,
+      };
+    }
+  }
+
+  // Catalog matched but no supervisor is in Ready state — dispatch
+  // into the auto-start + single-flight + family-MRU-fallback flow
+  // implemented by `route::handle_not_running` (Unit 4).
+  let arch = resolved.arch.clone();
+  RouteDecision::NotRunning {
+    requested_model: requested,
+    resolved_row: Box::new(resolved),
+    arch,
+  }
+}
+
+/// Project a discovered-model entry onto the `CatalogRow` shape the
+/// resolver expects. In-process equivalent of
+/// `cli::resolve::parse_catalog_row` (which goes through the JSON
+/// wire); kept here so the proxy doesn't pay a serialize/deserialize
+/// round-trip on the hot path.
+fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
+  let path = m.path.to_string_lossy().into_owned();
+  let parent = m.parent.to_string_lossy().into_owned();
+  let arch = m.metadata.as_ref().and_then(|md| md.arch.clone());
+  let quant = m.metadata.as_ref().map(|md| md.quant.label().to_string());
+  let native_ctx = m.metadata.as_ref().and_then(|md| md.native_ctx);
+  let parameter_label = m
+    .metadata
+    .as_ref()
+    .and_then(|md| md.parameter_label.clone());
+  let weights_bytes = m.metadata.as_ref().and_then(|md| md.weights_bytes);
+  CatalogRow {
+    path,
+    model_id: None,
+    parent,
+    source: m.source.label().to_string(),
+    arch,
+    quant,
+    native_ctx,
+    mode_hint: None,
+    parameter_label,
+    weights_bytes,
+    display_label: m.display_label.clone(),
+    parse_error: m.parse_error.clone(),
+  }
+}
+
+/// Compare a `ModelId::path` (PathBuf) with a `CatalogRow::path`
+/// (String). The catalog row is built from the discovered path's
+/// `to_string_lossy()` view, and `ModelId::path` is canonical too —
+/// equality is exact in production.
+fn same_path(model_id_path: &std::path::Path, row_path: &str) -> bool {
+  model_id_path.to_string_lossy() == row_path
+}
+
+/// Unit 4 entry point — invoked from `router.rs` when a request
+/// hits a catalog row whose model isn't currently Ready.
+///
+/// Drives:
+///   1. Auto-start via [`launch::auto_start`] (single-flight
+///      coalesced; waits for Ready or terminal Error).
+///   2. On Ready → MRU touch + forward (no fallback headers).
+///   3. On Error → pick a family-MRU fallback and forward with
+///      `x-llamastash-served-by` + `x-llamastash-fallback-reason`.
+///      Reason is `launch_failed` when the pick shares the requested
+///      arch (graceful in-family substitution) and `family_mismatch`
+///      when the pick is from a different arch (e.g. an embedding
+///      request fell through to a chat model — the upstream output
+///      will not match request semantics, and clients that care
+///      should branch on the header). If no Ready candidate exists
+///      → 503 `launch_failed` with the running list.
+pub(crate) async fn handle_not_running(
+  state: &Arc<ProxyState>,
+  inbound: super::forward::InboundRequest,
+  requested_model: String,
+  resolved_row: CatalogRow,
+  requested_arch: Option<String>,
+) -> ProxyResponse {
+  let outcome = launch::auto_start(state, &resolved_row).await;
+  match outcome {
+    LaunchOutcome::Ready { port, model_id } => {
+      // Touch the MRU using the supervisor we just confirmed Ready.
+      // The display name for the response header on the happy path
+      // is the requested model name — no fallback, no surprise.
+      state.mru.touch(&model_id).await;
+      let served = served_name_for_row(&resolved_row);
+      super::forward::forward_to_upstream(
+        state,
+        inbound,
+        super::forward::Target {
+          port,
+          served_model_id: &served,
+          served_model_key: &model_id,
+          fallback: false,
+          fallback_reason: None,
+        },
+      )
+      .await
+    }
+    LaunchOutcome::Failed { cause } => {
+      // Family-MRU fallback. Walk the supervisor snapshot, filter
+      // to Ready, attach each entry's catalog arch + MRU
+      // timestamp, then defer to `pick_fallback` for the policy.
+      let candidates = collect_fallback_candidates(state).await;
+      if let Some(pick) = pick_fallback(candidates, requested_arch.as_deref()) {
+        state.mru.touch(&pick.model_id).await;
+        let reason = fallback_reason_for(requested_arch.as_deref(), pick.arch.as_deref());
+        return super::forward::forward_to_upstream(
+          state,
+          inbound,
+          super::forward::Target {
+            port: pick.port,
+            served_model_id: &pick.served_model_id,
+            served_model_key: &pick.model_id,
+            fallback: true,
+            fallback_reason: Some(reason),
+          },
+        )
+        .await;
+      }
+      // No Ready model to fall back to. R155 mandates a 503 with
+      // the `running: []` list inline (empty by construction here:
+      // `pick_fallback` only returns None when zero Ready candidates
+      // exist). Drop the requested model name into the message so
+      // logs surface what was being attempted.
+      launch_failed_response(&cause, &requested_model)
+    }
+  }
+}
+
+/// Pick the `x-llamastash-fallback-reason` value based on whether the
+/// picked candidate is in the same arch family as the failed request.
+///
+/// - `launch_failed`: in-family substitution. Same arch (or both
+///   sides have no arch metadata) — the upstream output shape is
+///   what the client asked for.
+/// - `family_mismatch`: cross-arch fallback. The picked supervisor's
+///   arch differs from the requested arch, or one side is missing
+///   metadata. The upstream output shape is *not* what the client
+///   asked for (e.g. an embedding request answered by a chat model).
+///   Clients that don't read response headers will see surprising
+///   payloads; this is the header that lets them branch.
+fn fallback_reason_for(requested: Option<&str>, picked: Option<&str>) -> &'static str {
+  match (requested, picked) {
+    (Some(a), Some(b)) if a == b => "launch_failed",
+    (None, None) => "launch_failed",
+    _ => "family_mismatch",
+  }
+}
+
+/// Build the 503 `launch_failed` envelope used by the fallback path
+/// when no Ready model is available. The `running: []` field is
+/// always present (R155) and always empty here by construction —
+/// this helper is only reached when `pick_fallback` returned None,
+/// which means zero Ready supervisors existed. The message surfaces
+/// the supervisor's `cause` so clients see *why* the launch failed.
+pub(crate) fn launch_failed_response(cause: &str, requested_model: &str) -> ProxyResponse {
+  use super::openai::{ErrorObject, ErrorResponse};
+  use http_body_util::{combinators::BoxBody, BodyExt, Full};
+  use hyper::body::Bytes;
+  use hyper::Response;
+
+  let message =
+    format!("auto-start of `{requested_model}` failed and no running model is available: {cause}");
+  let error = ErrorObject::new("launch_failed", message).with_running(Vec::<String>::new());
+  let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
+  let body: BoxBody<Bytes, super::router::BodyError> = Full::new(Bytes::from(bytes))
+    .map_err(|never| match never {})
+    .boxed();
+  Ok(
+    Response::builder()
+      .status(hyper::StatusCode::SERVICE_UNAVAILABLE)
+      .header(hyper::header::CONTENT_TYPE, "application/json")
+      .body(body)
+      .expect("static headers always parse"),
+  )
+}
+
+/// Resolve a display name for a CatalogRow that mirrors what
+/// `/v1/models` returns. `display_label` (Ollama's `<name>:<tag>`)
+/// wins when present; otherwise fall back to the file stem via
+/// [`crate::util::paths::model_display_name`] so the value of
+/// `x-llamastash-served-by` is byte-equal to the corresponding
+/// `/v1/models` `id` for the same model (closes R-11).
+fn served_name_for_row(row: &CatalogRow) -> String {
+  if let Some(label) = &row.display_label {
+    return label.clone();
+  }
+  crate::util::paths::model_display_name(std::path::Path::new(&row.path))
+}
+
+/// Build the candidate list the fallback selector picks from. Reads
+/// the supervisor snapshot (filtering to Ready), joins each row
+/// against the catalog snapshot to find the matching `arch`, and
+/// stamps the latest MRU timestamp.
+async fn collect_fallback_candidates(state: &Arc<ProxyState>) -> Vec<FallbackCandidate> {
+  let sup_snap = state.ctx.supervisors.snapshot().await;
+  // Build a `path -> CatalogRow` lookup from the catalog snapshot
+  // so we can attach arch + display label without re-walking the
+  // catalog for each supervisor entry. The catalog is small (tens
+  // to hundreds of rows in v1) so a HashMap build is fine on this
+  // path — only triggered when an auto-start has just failed.
+  let cat_snap = state.ctx.catalog.snapshot().await;
+  let mut by_path: std::collections::HashMap<String, &DiscoveredModel> =
+    std::collections::HashMap::with_capacity(cat_snap.len());
+  for m in cat_snap.iter() {
+    by_path.insert(m.path.to_string_lossy().into_owned(), m);
+  }
+
+  let mut out: Vec<FallbackCandidate> = Vec::with_capacity(sup_snap.len());
+  for (_launch_id, model) in sup_snap.into_iter() {
+    if !matches!(model.state().await, ManagedState::Ready) {
+      continue;
+    }
+    let id = model.id().clone();
+    let path_key = id.path.to_string_lossy().into_owned();
+    let catalog_entry = by_path.get(&path_key);
+    let arch = catalog_entry
+      .and_then(|m| m.metadata.as_ref())
+      .and_then(|md| md.arch.clone());
+    let served_model_id = catalog_entry
+      .and_then(|m| m.display_label.clone())
+      .unwrap_or_else(|| crate::util::paths::model_display_name(&id.path));
+    let last_request_at = state.mru.last_request_at(&id).await;
+    out.push(FallbackCandidate {
+      model_id: id,
+      arch,
+      last_request_at,
+      port: model.port(),
+      served_model_id,
+    });
+  }
+  out
+}
+
+// Matcher behaviour is covered by `cli::resolve` unit tests, which
+// exercise `resolve_model_with_candidates` directly. End-to-end
+// ambiguity / not_found handling (proxy → 400 / 404) is covered by
+// `tests/proxy_routing.rs`.
+
+#[cfg(test)]
+mod tests {
+  use super::fallback_reason_for;
+
+  // The four arms of `fallback_reason_for` decide whether the
+  // x-llamastash-fallback-reason header reads "launch_failed" (the
+  // picked model is in the same family as what the client asked for
+  // — output shape parity holds) or "family_mismatch" (cross-arch
+  // pick — output shape parity does not hold). Embedding/rerank
+  // clients branch on this header, so the four cases need explicit
+  // coverage rather than relying on the one integration test that
+  // happens to hit the `(None, Some)` branch.
+
+  #[test]
+  fn same_arch_on_both_sides_is_launch_failed() {
+    assert_eq!(
+      fallback_reason_for(Some("llama"), Some("llama")),
+      "launch_failed"
+    );
+  }
+
+  #[test]
+  fn no_arch_on_either_side_is_launch_failed() {
+    assert_eq!(fallback_reason_for(None, None), "launch_failed");
+  }
+
+  #[test]
+  fn requested_arch_missing_is_family_mismatch() {
+    assert_eq!(fallback_reason_for(None, Some("llama")), "family_mismatch");
+  }
+
+  #[test]
+  fn picked_arch_missing_is_family_mismatch() {
+    assert_eq!(fallback_reason_for(Some("llama"), None), "family_mismatch");
+  }
+
+  #[test]
+  fn different_arches_is_family_mismatch() {
+    assert_eq!(
+      fallback_reason_for(Some("bert"), Some("llama")),
+      "family_mismatch"
+    );
+  }
+}

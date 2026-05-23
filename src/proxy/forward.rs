@@ -1,0 +1,366 @@
+//! Byte-pipe forwarding of `/v1/...` requests to a Ready upstream
+//! `llama-server`.
+//!
+//! Once [`super::route::decide`] produces a [`RouteDecision::ReadyAt`],
+//! the router hands the buffered body + the target port off to
+//! [`forward_to_upstream`]. The contract is intentionally minimal:
+//!
+//! - Mirror inbound method, path, query, and headers (stripping
+//!   hop-by-hop entries per RFC 7230).
+//! - Send the **buffered body bytes unchanged** — never re-encode,
+//!   never rewrite `body.model`. The plan's Risks row "rewrites
+//!   body.model" makes the case for this; the echo-verification
+//!   test in `tests/proxy_echo_verification.rs` keeps it honest.
+//! - Stream the upstream response body through `http_body_util::StreamBody`
+//!   so SSE chunks land at the client as they arrive. No buffering,
+//!   no per-chunk parse.
+//! - Stamp `x-llamastash-served-by` + `x-llamastash-fallback-reason`
+//!   only when [`RouteDecision::fallback == true`]. Unit 3 always
+//!   produces `false`; Unit 4 supplies the `true` case once the
+//!   family-MRU fallback path lands.
+//!
+//! Plan: docs/plans/2026-05-21-001-feat-proxy-router-plan.md (Unit 3).
+
+use std::sync::Arc;
+
+use futures::TryStreamExt;
+use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
+use hyper::body::{Bytes, Frame};
+use hyper::header::{HeaderName, HeaderValue};
+use hyper::{HeaderMap, Method, Request, Response, StatusCode};
+
+use super::router::{BodyError, ProxyResponse};
+use super::state::ProxyState;
+
+/// Hop-by-hop header set — RFC 7230 §6.1. Stripped on both the
+/// outbound request (so we don't leak the inbound peer's keep-alive
+/// state into the upstream connection) and the inbound response (so
+/// the client doesn't see contradictory framing). Lower-case keys
+/// because `HeaderName::as_str()` is lower-case canonical.
+const HOP_BY_HOP: &[&str] = &[
+  "connection",
+  "keep-alive",
+  "transfer-encoding",
+  "te",
+  "trailers",
+  "upgrade",
+  "proxy-authorization",
+  "proxy-authenticate",
+];
+
+/// Inbound-request slice consumed by [`forward_to_upstream`]. Bundled
+/// so the forwarding fn stays under clippy's argument limit and so
+/// the call-site reads as "here is the inbound request, here is the
+/// target" rather than five positional strings.
+pub(crate) struct InboundRequest {
+  pub method: Method,
+  pub uri: hyper::Uri,
+  pub headers: HeaderMap,
+  pub body_bytes: Bytes,
+}
+
+/// Target the inbound request should be forwarded to. Populated by
+/// [`super::route::decide`] into a [`super::route::RouteDecision::ReadyAt`]
+/// variant; the forwarding fn lifts the fields off the variant.
+pub(crate) struct Target<'a> {
+  pub port: u16,
+  pub served_model_id: &'a str,
+  /// Canonical id of the supervisor that owns `port` at decision
+  /// time. Used to re-verify the binding immediately before send so
+  /// a Ready→Stopping→port-reuse race can't silently route to a
+  /// different model.
+  pub served_model_key: &'a crate::gguf::identity::ModelId,
+  pub fallback: bool,
+  pub fallback_reason: Option<&'a str>,
+}
+
+/// Forward an inbound `hyper::Request` to the upstream
+/// `llama-server` on `target.port`, stream the response back to the
+/// caller.
+///
+/// `inbound.body_bytes` is the already-buffered (and length-checked)
+/// inbound body; the caller has run
+/// [`super::route::buffer_and_extract`] so we don't repeat the cap
+/// enforcement here.
+pub(crate) async fn forward_to_upstream(
+  state: &Arc<ProxyState>,
+  inbound: InboundRequest,
+  target: Target<'_>,
+) -> ProxyResponse {
+  let InboundRequest {
+    method: inbound_method,
+    uri: inbound_uri,
+    headers: inbound_headers,
+    body_bytes,
+  } = inbound;
+  let Target {
+    port,
+    served_model_id,
+    served_model_key,
+    fallback,
+    fallback_reason,
+  } = target;
+  // Re-verify the supervisor at `port` is still the one we picked.
+  // Without this, a Ready→Stopping→port-reuse window between
+  // `route::decide` and now can silently route the request to a
+  // different model on the recycled port.
+  if !verify_port_binding(state, port, served_model_key).await {
+    return Ok(error_envelope(
+      StatusCode::BAD_GATEWAY,
+      "upstream_unreachable",
+      "model exited before forwarding could begin",
+    ));
+  }
+  // Compose upstream URL: path + query from the original request,
+  // host always 127.0.0.1 (loopback only — see plan §Scope Boundaries).
+  let path_and_query = inbound_uri
+    .path_and_query()
+    .map(|p| p.as_str())
+    .unwrap_or("/");
+  let upstream_url = format!("http://127.0.0.1:{port}{path_and_query}");
+
+  // Translate hyper::Method into reqwest::Method. Both crates share
+  // the underlying `http` types so this is a structural conversion
+  // rather than a string round-trip — and hyper has already validated
+  // the inbound method before we reach this point, so the parse can't
+  // fail in practice.
+  let upstream_method = reqwest::Method::from_bytes(inbound_method.as_str().as_bytes())
+    .expect("hyper-validated method round-trips to reqwest");
+
+  // Forwarded headers: drop hop-by-hop entries and anything named in
+  // the inbound `Connection: <list>` header (RFC 7230 §6.1 extends
+  // the hop-by-hop set per-request).
+  let connection_listed = collect_connection_listed(&inbound_headers);
+  let mut outbound_headers = reqwest::header::HeaderMap::new();
+  for (name, value) in inbound_headers.iter() {
+    let n = name.as_str();
+    if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+      continue;
+    }
+    if connection_listed.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+      continue;
+    }
+    // `host` would mislabel the upstream-side virtual host; reqwest
+    // computes the correct host from the URL we hand it.
+    if n.eq_ignore_ascii_case("host") {
+      continue;
+    }
+    // `content-length` is recomputed by reqwest from the body we
+    // pass in; skip the inbound value (in particular when it's `0`
+    // for an empty body, the upstream still gets the right framing).
+    if n.eq_ignore_ascii_case("content-length") {
+      continue;
+    }
+    // Convert reqwest <- hyper. Both libs use the `http` crate's
+    // `HeaderName` / `HeaderValue` so the bytes round-trip cleanly.
+    let outbound_name = match reqwest::header::HeaderName::from_bytes(n.as_bytes()) {
+      Ok(n) => n,
+      Err(_) => continue,
+    };
+    let outbound_value = match reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+      Ok(v) => v,
+      Err(_) => continue,
+    };
+    outbound_headers.append(outbound_name, outbound_value);
+  }
+
+  let request = state
+    .http_client
+    .request(upstream_method, &upstream_url)
+    .headers(outbound_headers)
+    .body(body_bytes);
+
+  let upstream = match request.send().await {
+    Ok(r) => r,
+    Err(err) => {
+      // Connect refused / DNS / mid-handshake error before the
+      // status line came back. The model was Ready a moment ago but
+      // the kernel disagrees — surface as 502 with a recognisable
+      // OpenAI body so clients can branch on it.
+      return Ok(error_envelope(
+        StatusCode::BAD_GATEWAY,
+        "upstream_unreachable",
+        &format!("failed to reach upstream llama-server: {err}"),
+      ));
+    }
+  };
+
+  build_streaming_response(upstream, served_model_id, fallback, fallback_reason)
+}
+
+/// Translate `reqwest::Response` into `hyper::Response`, preserving
+/// status + headers (minus hop-by-hop) and piping the body chunks
+/// through `StreamBody` so SSE chunks reach the client as they
+/// arrive upstream.
+fn build_streaming_response(
+  upstream: reqwest::Response,
+  served_model_id: &str,
+  fallback: bool,
+  fallback_reason: Option<&str>,
+) -> ProxyResponse {
+  let status = upstream.status();
+  let inbound_headers = upstream.headers().clone();
+
+  // `bytes_stream()` yields `Result<Bytes, reqwest::Error>`. Wrap
+  // each `Bytes` in a `Frame::data` and box the reqwest error into
+  // the proxy's wider `BodyError` type. When the upstream errors
+  // mid-stream the StreamBody surfaces it as a frame error; hyper
+  // drops the client connection in turn, which is the desired
+  // "mid-stream upstream death" behaviour the plan calls for.
+  let stream = upstream
+    .bytes_stream()
+    .map_ok(Frame::data)
+    .map_err(|e| -> BodyError {
+      log::debug!("proxy: upstream stream error: {e}");
+      Box::new(e)
+    });
+  let stream_body = StreamBody::new(stream);
+  let body: BoxBody<Bytes, BodyError> = stream_body.boxed();
+
+  // Strip the static hop-by-hop set AND anything named in the upstream's
+  // own `Connection: <list>` header — RFC 7230 §6.1 extends hop-by-hop
+  // per-message. Mirrors the request-side stripping above.
+  let upstream_connection_listed = collect_connection_listed(&inbound_headers);
+  let mut builder = Response::builder().status(status_to_hyper(status));
+  if let Some(map) = builder.headers_mut() {
+    for (name, value) in inbound_headers.iter() {
+      let n = name.as_str();
+      if HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(n)) {
+        continue;
+      }
+      if upstream_connection_listed
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(n))
+      {
+        continue;
+      }
+      let Ok(hyper_name) = HeaderName::from_bytes(n.as_bytes()) else {
+        continue;
+      };
+      let Ok(hyper_value) = HeaderValue::from_bytes(value.as_bytes()) else {
+        continue;
+      };
+      map.append(hyper_name, hyper_value);
+    }
+    if fallback {
+      // Sanitize served_model_id for the HeaderValue alphabet (visible
+      // ASCII): non-ASCII bytes are replaced with `_` so the header
+      // can never silently drop on a model with CJK/emoji in its name.
+      let sanitized = sanitize_header_value(served_model_id);
+      if let Ok(v) = HeaderValue::from_str(&sanitized) {
+        map.insert(HeaderName::from_static("x-llamastash-served-by"), v);
+      }
+      if let Some(reason) = fallback_reason {
+        if let Ok(v) = HeaderValue::from_str(reason) {
+          map.insert(HeaderName::from_static("x-llamastash-fallback-reason"), v);
+        }
+      }
+    }
+  }
+
+  Ok(builder.body(body).expect("static headers always parse"))
+}
+
+/// reqwest exposes `StatusCode` from the `http` crate; hyper too.
+/// They're the same type but re-exported, so we go via the wire
+/// number for safety.
+fn status_to_hyper(s: reqwest::StatusCode) -> hyper::StatusCode {
+  hyper::StatusCode::from_u16(s.as_u16()).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Confirm the supervisor currently bound to `port` is still the
+/// one we picked at `route::decide` time. Returns `false` if the
+/// port no longer maps to `expected_id` (model stopped, port reused
+/// by a different model, or supervisor no longer Ready). Best-effort:
+/// the supervisor could still disappear between this check and the
+/// reqwest send, but that window collapses to "ms," not "stop+start"
+/// — small enough that a stale ManagedState read is acceptable.
+async fn verify_port_binding(
+  state: &Arc<ProxyState>,
+  port: u16,
+  expected_id: &crate::gguf::identity::ModelId,
+) -> bool {
+  let snap = state.ctx.supervisors.snapshot().await;
+  for (_launch_id, model) in snap.into_iter() {
+    if model.port() != port {
+      continue;
+    }
+    if model.id() != expected_id {
+      log::warn!(
+        "proxy: port {port} now bound to a different model than expected; rejecting forward"
+      );
+      return false;
+    }
+    return matches!(
+      model.state().await,
+      crate::daemon::supervisor::ManagedState::Ready
+    );
+  }
+  false
+}
+
+/// Parse a `Connection: <list>` header into a lower-case list of
+/// header names that should be stripped per RFC 7230 §6.1.
+fn collect_connection_listed(headers: &HeaderMap) -> Vec<String> {
+  headers
+    .get_all(hyper::header::CONNECTION)
+    .iter()
+    .filter_map(|v| v.to_str().ok())
+    .flat_map(|s| s.split(','))
+    .map(|tok| tok.trim().to_ascii_lowercase())
+    .filter(|tok| !tok.is_empty())
+    .collect()
+}
+
+/// Coerce an arbitrary string into something `HeaderValue::from_str`
+/// will accept (visible ASCII, no control characters). Non-ASCII
+/// bytes and ASCII controls are replaced with `_` so a model with
+/// CJK / emoji / whitespace in its display name still produces a
+/// usable `x-llamastash-served-by` header instead of silently
+/// dropping it.
+fn sanitize_header_value(input: &str) -> String {
+  input
+    .chars()
+    .map(|c| {
+      if (' '..='~').contains(&c) && c != '\u{007f}' {
+        c
+      } else {
+        '_'
+      }
+    })
+    .collect()
+}
+
+/// Construct an OpenAI-shaped error response with a [`BoxBody`] body
+/// alias compatible with the streaming arm. Mirrors the helper in
+/// `router.rs` but lives here so the forwarding arm can emit 502s
+/// for upstream-unreachable cases without bouncing through the
+/// router (which is where the public error-envelope helper lives).
+fn error_envelope(
+  status: StatusCode,
+  kind: &str,
+  message: &str,
+) -> Response<BoxBody<Bytes, BodyError>> {
+  let envelope = super::openai::ErrorResponse {
+    error: super::openai::ErrorObject::new(kind, message),
+  };
+  let bytes = serde_json::to_vec(&envelope).expect("json encoding of fixed shape");
+  let body: BoxBody<Bytes, BodyError> = Full::new(Bytes::from(bytes))
+    .map_err(|never| match never {})
+    .boxed();
+  Response::builder()
+    .status(status)
+    .header(hyper::header::CONTENT_TYPE, "application/json")
+    .body(body)
+    .expect("static headers always parse")
+}
+
+/// Helper to massage a hyper::Request<Incoming> into the parts the
+/// forwarding fn wants. Pulled out so the router's match arms stay
+/// short.
+pub(crate) fn deconstruct(
+  req: Request<hyper::body::Incoming>,
+) -> (Method, hyper::Uri, HeaderMap, hyper::body::Incoming) {
+  let (parts, body) = req.into_parts();
+  (parts.method, parts.uri, parts.headers, body)
+}

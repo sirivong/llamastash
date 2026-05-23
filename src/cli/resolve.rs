@@ -174,12 +174,45 @@ fn parse_catalog_row(row: Value) -> CatalogRow {
 /// message names every candidate when matches > 1 so callers can
 /// re-issue with a tighter reference.
 pub fn resolve_model(rows: &[CatalogRow], reference: &str) -> Result<CatalogRow, CliExit> {
-  let needle = reference.trim();
-  if needle.is_empty() {
-    return Err(CliExit::new(
+  match resolve_model_with_candidates(rows, reference) {
+    Ok(row) => Ok(row),
+    Err(ResolveError::Empty) => Err(CliExit::new(
       MODEL_NOT_FOUND,
       "empty model reference; supply a name substring, absolute path, or short id",
-    ));
+    )),
+    Err(ResolveError::None) => Err(CliExit::new(
+      MODEL_NOT_FOUND,
+      format!("no model matches `{reference}` ({} known)", rows.len()),
+    )),
+    Err(ResolveError::Many(candidates)) => {
+      let names: Vec<String> = candidates.iter().map(|r| r.name()).collect();
+      Err(CliExit::new(
+        MODEL_NOT_FOUND,
+        format!(
+          "`{reference}` matches {} models: {}\nrefine the reference (full path or unique substring) and retry",
+          candidates.len(),
+          names.join(", ")
+        ),
+      ))
+    }
+  }
+}
+
+/// Variant of [`resolve_model`] that preserves the distinction between
+/// "zero candidates" and "many candidates" so callers (the HTTP proxy
+/// uses this to emit 404 vs 400 with `matches: [...]`) can branch
+/// without re-running the substring matcher themselves.
+///
+/// Tiers + precedence are identical to [`resolve_model`]; the only
+/// difference is that the multi-match error carries the candidate
+/// list rather than a flattened error message.
+pub fn resolve_model_with_candidates(
+  rows: &[CatalogRow],
+  reference: &str,
+) -> Result<CatalogRow, ResolveError> {
+  let needle = reference.trim();
+  if needle.is_empty() {
+    return Err(ResolveError::Empty);
   }
 
   // Tier 1: exact path / exact name. A full canonical path is
@@ -202,23 +235,27 @@ pub fn resolve_model(rows: &[CatalogRow], reference: &str) -> Result<CatalogRow,
     })
     .collect();
   match candidates.len() {
-    0 => Err(CliExit::new(
-      MODEL_NOT_FOUND,
-      format!("no model matches `{reference}` ({} known)", rows.len()),
-    )),
+    0 => Err(ResolveError::None),
     1 => Ok(candidates[0].clone()),
-    _ => {
-      let names: Vec<String> = candidates.iter().map(|r| r.name()).collect();
-      Err(CliExit::new(
-        MODEL_NOT_FOUND,
-        format!(
-          "`{reference}` matches {} models: {}\nrefine the reference (full path or unique substring) and retry",
-          candidates.len(),
-          names.join(", ")
-        ),
-      ))
-    }
+    _ => Err(ResolveError::Many(
+      candidates.into_iter().cloned().collect(),
+    )),
   }
+}
+
+/// Distinguishes the three resolver failure modes the HTTP proxy
+/// needs to surface as distinct HTTP responses (and which the CLI
+/// folds together into a single `MODEL_NOT_FOUND` exit).
+#[derive(Debug, Clone)]
+pub enum ResolveError {
+  /// Reference was empty after trimming.
+  Empty,
+  /// Zero candidates matched the reference. Proxy emits 404
+  /// `model_not_found`.
+  None,
+  /// More than one candidate matched. Proxy emits 400
+  /// `ambiguous_model` with the candidate list in `matches`.
+  Many(Vec<CatalogRow>),
 }
 
 /// Fetch the supervisor + external snapshot via `status`.
@@ -242,12 +279,19 @@ pub async fn fetch_status(client: &mut Client) -> Result<StatusSnapshot, CliExit
   // verbatim so the CLI `status --json` mirrors the IPC contract.
   let host = body.get("host").cloned().unwrap_or(Value::Null);
   let daemon = body.get("daemon").and_then(parse_daemon_health);
+  // Preserve the proxy block verbatim — the CLI `status --json` is
+  // byte-shape-identical to the IPC wire format per the plan's
+  // R161 contract. Older daemons that don't surface the field land
+  // as `Value::Null` and the projection in `status_json` drops the
+  // key entirely.
+  let proxy = body.get("proxy").cloned().unwrap_or(Value::Null);
   Ok(StatusSnapshot {
     models,
     external,
     gpu,
     host,
     daemon,
+    proxy,
   })
 }
 
@@ -267,6 +311,12 @@ pub struct StatusSnapshot {
   /// `active_connections`). Older daemons may omit the field, in
   /// which case this is `None` — the formatter silently skips it.
   pub daemon: Option<DaemonHealth>,
+  /// Proxy listener block — `{enabled, listen, status, bind_error}`.
+  /// Verbatim copy of the daemon's wire shape (Unit 5 / R161); the
+  /// CLI `status --json` rewrites it byte-for-byte so agents that
+  /// parse the IPC and the CLI see identical shapes. `Value::Null`
+  /// when talking to a pre-Unit-5 daemon that omits the field.
+  pub proxy: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -478,6 +528,35 @@ mod tests {
     let msg = err.to_string();
     assert!(msg.contains("qwen-coder-7b.gguf"), "got: {msg}");
     assert!(msg.contains("qwen-coder-13b.gguf"), "got: {msg}");
+  }
+
+  #[test]
+  fn with_candidates_returns_many_for_ambiguous() {
+    let rows = vec![
+      row("/m/qwen-coder-7b.gguf", "/m"),
+      row("/m/qwen-coder-13b.gguf", "/m"),
+    ];
+    match resolve_model_with_candidates(&rows, "qwen-coder") {
+      Err(ResolveError::Many(cands)) => assert_eq!(cands.len(), 2),
+      other => panic!("expected Many(2); got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn with_candidates_returns_none_for_unmatched() {
+    let rows = vec![row("/m/llama.gguf", "/m")];
+    match resolve_model_with_candidates(&rows, "phi") {
+      Err(ResolveError::None) => {}
+      other => panic!("expected None; got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn with_candidates_returns_empty_for_blank_reference() {
+    match resolve_model_with_candidates(&[], "   ") {
+      Err(ResolveError::Empty) => {}
+      other => panic!("expected Empty; got {other:?}"),
+    }
   }
 
   #[test]

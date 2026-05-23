@@ -21,6 +21,9 @@ pub async fn handle(args: StatusArgs, cli: &Cli, config: &Config) -> CliResult {
       gpu: snap.gpu.clone(),
       host: snap.host.clone(),
       daemon: snap.daemon.clone(),
+      // Preserve the proxy block — `status <target>` filters the
+      // launches list but doesn't redact daemon-level surfaces.
+      proxy: snap.proxy.clone(),
     },
     None => snap,
   };

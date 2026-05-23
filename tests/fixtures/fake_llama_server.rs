@@ -241,6 +241,13 @@ async fn handle(
       let want_fail = query.contains("fail=400") || body_text.contains("__TEST_INJECT_FAIL_400__");
       let want_malformed =
         query.contains("malformed-sse=1") || body_text.contains("__TEST_INJECT_MALFORMED_SSE__");
+      // Mirror real llama-server's OpenAI-compat behavior: echo
+      // `body.model` into every emitted frame's `model` field so
+      // proxy/router code paths can rely on the pass-through
+      // contract without per-chunk rewriting. See the proxy plan
+      // (docs/plans/2026-05-21-001-feat-proxy-router-plan.md)
+      // Risks row "rewrites body.model" for the falsifying outcome.
+      let echoed_model = extract_body_model(body_text).unwrap_or_else(|| args.model_path.clone());
       if want_fail {
         write_response(
           &mut wr,
@@ -250,14 +257,20 @@ async fn handle(
         )
         .await?;
       } else if want_malformed {
-        let stream = b"event: noise\ndata: {not json at all\n\n\
-                       event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
-                       event: done\ndata: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-        write_response(&mut wr, 200, "text/event-stream", stream).await?;
+        let stream = format!(
+          "event: noise\ndata: {{not json at all\n\n\
+           event: message\ndata: {{\"model\":\"{m}\",\"choices\":[{{\"delta\":{{\"content\":\"hi\"}}}}]}}\n\n\
+           event: done\ndata: {{\"model\":\"{m}\",\"choices\":[{{\"finish_reason\":\"stop\"}}]}}\n\n",
+          m = echoed_model
+        );
+        write_response(&mut wr, 200, "text/event-stream", stream.as_bytes()).await?;
       } else {
-        let stream = b"event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
-                       event: done\ndata: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-        write_response(&mut wr, 200, "text/event-stream", stream).await?;
+        let stream = format!(
+          "event: message\ndata: {{\"model\":\"{m}\",\"choices\":[{{\"delta\":{{\"content\":\"hi\"}}}}]}}\n\n\
+           event: done\ndata: {{\"model\":\"{m}\",\"choices\":[{{\"finish_reason\":\"stop\"}}]}}\n\n",
+          m = echoed_model
+        );
+        write_response(&mut wr, 200, "text/event-stream", stream.as_bytes()).await?;
       }
     }
     ("POST", "/v1/embeddings") => {
@@ -297,6 +310,15 @@ async fn handle(
   }
   let _ = wr.shutdown().await;
   Ok(())
+}
+
+/// Cheap `body.model` extractor.
+///
+/// Returns `None` if the body isn't valid JSON or no `model` field is
+/// present.
+fn extract_body_model(body: &str) -> Option<String> {
+  let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+  parsed.get("model")?.as_str().map(|s| s.to_string())
 }
 
 async fn write_response<W>(wr: &mut W, status: u16, ctype: &str, body: &[u8]) -> std::io::Result<()>

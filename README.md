@@ -70,6 +70,14 @@ Either source flips on click-to-focus for the Models list, the right pane, and t
 
 Full subcommand reference: [`docs/usage.md`](docs/usage.md). Architecture and IPC contract: [`docs/architecture.md`](docs/architecture.md). When things go wrong: [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
+## Connecting agents (OpenCode, Pi)
+
+LlamaStash ships a built-in OpenAI-compatible proxy at `http://127.0.0.1:11434/v1` so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), Cline, llm-cli, the OpenAI SDKs — can drive every discovered model through one stable URL. Point the client at that base URL, send `body.model: "<discovered-name>"` (substring resolution + fuzzy match are honored, same rules as `llamastash start <ref>`), and any value as the API key — the proxy ignores auth and is loopback-only. If the named model isn't running yet, the proxy auto-starts it. If the launch fails and another model is already Ready, the proxy falls back to it and tags the response with `x-llamastash-served-by` + `x-llamastash-fallback-reason` (`launch_failed` for in-family substitution, `family_mismatch` for cross-arch picks) so clients can audit the substitution. The listener is enabled by default; flip `proxy.enabled: false` in `config.yaml` to turn it off. The full endpoint table, error envelopes, response headers, and config keys live in [`docs/usage.md`](docs/usage.md#proxy-openai-compatible-listener); the manual OpenCode + Pi smoke runbook is at [`tests/proxy_real_client_smoke.md`](tests/proxy_real_client_smoke.md).
+
+The proxy also exposes Ollama's discovery surface (`GET /api/tags`, `GET /api/version`, `GET /api/ps`, `POST /api/show`) so tools that auto-detect Ollama via `OLLAMA_HOST` or by probing `GET /api/tags` recognise llamastash and fall through to the OpenAI-compat endpoints for inference. Ollama's *inference* endpoints (`/api/chat`, `/api/generate`, `/api/embed`) are not implemented — point Ollama-shape inference clients at the OpenAI-compat endpoints listed above. Tracked in [`TODO.md`](TODO.md) §R2.
+
+> **Auth posture:** the proxy has **no authentication**. This is intentional for the local-machine single-user threat model — anyone with localhost access on your box can issue requests. Don't bind to a LAN address (the proxy refuses anyway: host is hard-coded to `127.0.0.1`); don't expose loopback to other UIDs you don't trust; don't run the daemon on a shared host.
+
 ## Features
 
 Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs, contracts, and links into [`docs/usage.md`](docs/usage.md).
@@ -115,7 +123,7 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 ### [Built to be safe to run](FEATURES.md#built-to-be-safe-to-run)
 
-- [Unix-socket peercred auth (`0600`)](FEATURES.md#unix-socket-peercred-auth-0600) — only your UID; no network surface in v1.
+- [Unix-socket peercred auth (`0600`)](FEATURES.md#unix-socket-peercred-auth-0600) — only your UID; the OpenAI-compat proxy ([Connecting agents](#connecting-agents-opencode-pi)) is the only network listener and is loopback-only.
 - [Hardened fetch substrate](FEATURES.md#hardened-fetch-substrate) — HTTPS-only, host allowlist, redirect/body-size caps, IP-literal refusal.
 - [Archive-bomb defenses on installers](FEATURES.md#archive-bomb-defenses-on-installers) — entry/size/ratio caps; SHA-256 verified before extract.
 - [Atomic, mode-checked config + state writes](FEATURES.md#atomic-mode-checked-config--state-writes) — `0600` final mode; corrupt state quarantined, not fatal.
@@ -193,7 +201,7 @@ Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel). Windows support is on 
 Tracked in detail in [`TODO.md`](TODO.md). The headline items on deck after the first release:
 
 - **llama.cpp version pinning** — prevent silent drift / incompatibility on `brew upgrade`.
-- **HTTP and MCP server surfaces** — drive the daemon over the network and through the Model Context Protocol, not just the Unix socket.
+- **MCP and LAN-exposed HTTP surfaces** — Model Context Protocol, plus auth + TLS + LAN binding for the proxy. The loopback OpenAI-compatible proxy ships today (see [Connecting agents](#connecting-agents-opencode-pi)); the rest of the v1 R34 deferral (Anthropic compat, MCP, network exposure) stays on the roadmap.
 - **Anthropic API compatibility** — `/v1/messages` shim on top of the existing OpenAI-compatible endpoints.
 - **Per-PID VRAM attribution** via NVML's `nvmlDeviceGetComputeRunningProcesses`. Today the right pane shows per-model RAM + CPU%; VRAM is reported only at the host level.
 - **GPU/CPU offload split UI** — first-class control over which layers go where.

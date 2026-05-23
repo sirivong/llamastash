@@ -18,5 +18,5 @@ pub mod writer;
 #[allow(unused_imports)]
 pub use loader::{
   config_path, config_path_from, load_config, load_config_from_path, validate_scan_settings,
-  CachePathsConfig, Config, LoadedConfig, PortRange, ScanSettingsError, TypedKnobs,
+  CachePathsConfig, Config, LoadedConfig, PortRange, ProxyConfig, ScanSettingsError, TypedKnobs,
 };

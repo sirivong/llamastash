@@ -1,10 +1,12 @@
-//! Top-middle info-row pane: daemon endpoint, build, llama-server,
-//! discovery counters, and a one-line running summary.
+//! Top-middle info-row pane: daemon socket + pid + uptime,
+//! llama-server binary, OpenAI-compat proxy listener, discovery
+//! counters, and a one-line running summary.
 //!
 //! Five label-prefixed rows. Long paths left-truncate with `…/`. The
 //! `running` line collapses to `—` when nothing is supervised. Width
 //! is flexible — this panel takes whatever's between Host (fixed 32)
-//! and Logo (fixed 25 when present).
+//! and Logo (fixed 25 when present). Build version lives on the
+//! title row (`render_title_left`) and is not repeated here.
 
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -18,13 +20,14 @@ use crate::util::paths::model_display_name;
 
 const LABEL_WIDTH: usize = 8;
 const LABEL_SOCKET: &str = "socket  ";
-const LABEL_UPTIME: &str = "uptime  ";
 const LABEL_SERVER: &str = "server  ";
 const LABEL_MODELS: &str = "models  ";
 const LABEL_RUNNING: &str = "running ";
+const LABEL_PROXY: &str = "proxy   ";
 
 /// Render the Daemon info panel into `area`. The block title is
-/// `Daemon`; inner content is five label-prefixed rows.
+/// `Daemon`; inner content is five label-prefixed rows (socket,
+/// server, proxy, counts, running).
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let block = palette.panel_block(" Daemon ", true);
   let inner = block.inner(area);
@@ -33,69 +36,90 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let row_budget = inner.width.saturating_sub(LABEL_WIDTH as u16) as usize;
   let lines: Vec<Line<'_>> = vec![
     socket_row(app, row_budget, palette),
-    uptime_build_row(app, palette),
     server_row(app, row_budget, palette),
+    proxy_row(app, palette),
     counts_row(app, palette),
     running_row(app, row_budget, palette),
   ];
   frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn socket_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
-  // Layout: `socket  …/daemon.sock  pid 1234`. The pid is fixed-width
-  // (small int + label), so allocate its width first and let the
-  // socket path consume the rest with `…/` left-truncation. When the
-  // daemon doesn't surface a socket path (older builds), fall back
-  // to `pid` alone so the row still carries useful identity.
-  let pid_chunk = app
-    .daemon_info
-    .pid
-    .map(|pid| format!("pid {pid}"))
-    .unwrap_or_else(|| "—".into());
-  let value = match app.daemon_info.socket_path.as_deref() {
-    Some(path) => {
-      // Reserve `  pid 1234` worth of width (two-space separator +
-      // pid chunk); truncate the path with the remainder. When the
-      // remaining path budget is too small to render a recognisable
-      // socket path (less than ~12 cols — enough for `…/daemon.sock`),
-      // drop the path entirely and just show the pid. A one- or
-      // two-character socket prefix is worse than no path at all.
-      const MIN_PATH_BUDGET: usize = 12;
-      let separator = "  ";
-      let reserved = pid_chunk.width() + separator.width();
-      let path_budget = budget.saturating_sub(reserved);
-      if path_budget < MIN_PATH_BUDGET {
-        ellipsise(&pid_chunk, budget)
-      } else {
-        let path_truncated = ellipsise(path, path_budget);
-        format!("{path_truncated}{separator}{pid_chunk}")
+/// Render the proxy listener's state. Always on (the third row): when
+/// the proxy is up, the row reports `listening 127.0.0.1:<port>` so
+/// the live OpenAI-compat endpoint is one glance away; when disabled
+/// or absent, the row renders an explicit `disabled` / `—` so the
+/// reader can tell the difference between "off by config" and "not
+/// reported yet". Labels match the wire `status` values (R161) and
+/// the success/error palette signals liveness without forcing the
+/// user to read the endpoint.
+fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
+  let (body, body_style) = match app.daemon_info.proxy.as_ref() {
+    None => ("—".to_string(), palette.muted_style()),
+    Some(info) => {
+      let listen = info.listen.as_deref().unwrap_or("");
+      match info.status.as_str() {
+        "listening" => (format!("listening {listen}"), palette.success_style()),
+        "port_in_use" => (format!("port_in_use {listen}"), palette.error_style()),
+        "unbound" => {
+          let cause = info.bind_error.as_deref().unwrap_or("bind failed");
+          (format!("unbound {listen} ({cause})"), palette.error_style())
+        }
+        "disabled" => ("disabled".to_string(), palette.muted_style()),
+        other => (format!("{other} {listen}"), palette.muted_style()),
       }
     }
-    None => ellipsise(&pid_chunk, budget),
   };
   Line::from(vec![
-    Span::styled(LABEL_SOCKET, palette.label_style()),
-    Span::styled(value, palette.text_style()),
+    Span::styled(LABEL_PROXY, palette.label_style()),
+    Span::styled(body, body_style),
   ])
 }
 
-fn uptime_build_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
-  let uptime = match (app.daemon_connected, app.daemon_info.uptime_seconds) {
+fn socket_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
+  // Layout: `socket  …/daemon.sock  pid 1234  up 3h12m`. `pid` and
+  // `up` render in the panel's label colour (matching `socket` itself
+  // and the row 4/5 label rhythm); the numeric values render in text
+  // colour. The path takes whatever width is left after reserving the
+  // trailing chunks, left-truncated with `…/`. When the path doesn't
+  // fit at all or the daemon hasn't surfaced one (older builds), the
+  // row drops it and renders just the trailing chunks.
+  let pid_val = app
+    .daemon_info
+    .pid
+    .map(|p| p.to_string())
+    .unwrap_or_else(|| "—".into());
+  let uptime_val = match (app.daemon_connected, app.daemon_info.uptime_seconds) {
     (true, Some(secs)) => format_uptime(secs),
     _ => "—".into(),
   };
-  let build = app
-    .daemon_info
-    .build
-    .clone()
-    .map(|v| format!("v{v}"))
-    .unwrap_or_else(|| "—".into());
-  Line::from(vec![
-    Span::styled(LABEL_UPTIME, palette.label_style()),
-    Span::styled(uptime, palette.text_style()),
-    Span::styled("   build  ", palette.label_style()),
-    Span::styled(build, palette.text_style()),
-  ])
+
+  // Width budget for the path. Match the rendered trailing layout
+  // `  pid <val>  up <val>` exactly so the path truncation lines up
+  // with what ratatui draws.
+  let trailing_visual_w = "  pid ".width() + pid_val.width() + "  up ".width() + uptime_val.width();
+  const MIN_PATH_BUDGET: usize = 12;
+  let path_display = app.daemon_info.socket_path.as_deref().and_then(|path| {
+    let path_budget = budget.saturating_sub(trailing_visual_w);
+    if path_budget < MIN_PATH_BUDGET {
+      None
+    } else {
+      Some(ellipsise(path, path_budget))
+    }
+  });
+
+  let mut spans: Vec<Span<'a>> = Vec::with_capacity(6);
+  spans.push(Span::styled(LABEL_SOCKET, palette.label_style()));
+  let pid_label = if let Some(p) = path_display {
+    spans.push(Span::styled(p, palette.text_style()));
+    "  pid "
+  } else {
+    "pid "
+  };
+  spans.push(Span::styled(pid_label, palette.label_style()));
+  spans.push(Span::styled(pid_val, palette.text_style()));
+  spans.push(Span::styled("  up ", palette.label_style()));
+  spans.push(Span::styled(uptime_val, palette.text_style()));
+  Line::from(spans)
 }
 
 fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
@@ -463,36 +487,39 @@ mod tests {
   }
 
   #[test]
-  fn uptime_row_shows_em_dash_when_daemon_disconnected() {
+  fn socket_row_shows_em_dash_uptime_when_daemon_disconnected() {
     let mut app = App::new(AppOptions::default());
     app.daemon_connected = false;
     app.daemon_info = DaemonInfo {
       uptime_seconds: Some(120),
+      pid: Some(1234),
       ..Default::default()
     };
     let rows = render_lines(&app);
-    // The uptime field should be `—`, not `2m`, because the
+    // The uptime chunk should read `up —`, not `up 2m`, because the
     // connection went down — the cached value is stale.
-    let uptime_row = rows.iter().find(|r| r.contains("uptime")).unwrap();
+    let socket_row = rows.iter().find(|r| r.contains("socket")).unwrap();
     assert!(
-      uptime_row.contains("—"),
-      "expected em-dash on uptime row when daemon disconnected, got: {uptime_row:?}"
+      socket_row.contains("up —"),
+      "expected `up —` chunk when daemon disconnected, got: {socket_row:?}"
     );
   }
 
   #[test]
-  fn uptime_row_shows_uptime_when_daemon_connected() {
+  fn socket_row_shows_uptime_chunk_when_daemon_connected() {
     let mut app = App::new(AppOptions::default());
     app.daemon_connected = true;
     app.daemon_info = DaemonInfo {
       uptime_seconds: Some(3 * 3600 + 12 * 60),
-      build: Some("0.1.0".into()),
+      pid: Some(1234),
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let uptime_row = rows.iter().find(|r| r.contains("uptime")).unwrap();
-    assert!(uptime_row.contains("3h12m"));
-    assert!(uptime_row.contains("v0.1.0"));
+    let socket_row = rows.iter().find(|r| r.contains("socket")).unwrap();
+    assert!(
+      socket_row.contains("up 3h12m"),
+      "expected `up 3h12m` chunk, got: {socket_row:?}"
+    );
   }
 
   #[test]
@@ -691,6 +718,120 @@ mod tests {
     assert!(
       !server_row.contains('('),
       "flavor must be suppressed when binary is unresolved: {server_row:?}"
+    );
+  }
+
+  #[test]
+  fn proxy_row_renders_listening_endpoint_when_set() {
+    use crate::tui::app::ProxyInfo;
+    let mut app = App::new(AppOptions::default());
+    app.daemon_info = DaemonInfo {
+      proxy: Some(ProxyInfo {
+        enabled: true,
+        listen: Some("127.0.0.1:11434".into()),
+        status: "listening".into(),
+        bind_error: None,
+      }),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let proxy_row = rows
+      .iter()
+      .find(|r| r.contains("proxy"))
+      .expect("proxy row must render when daemon_info.proxy is set");
+    assert!(
+      proxy_row.contains("listening 127.0.0.1:11434"),
+      "expected `listening 127.0.0.1:11434`: {proxy_row:?}"
+    );
+  }
+
+  #[test]
+  fn proxy_row_renders_port_in_use_with_endpoint() {
+    use crate::tui::app::ProxyInfo;
+    let mut app = App::new(AppOptions::default());
+    app.daemon_info = DaemonInfo {
+      proxy: Some(ProxyInfo {
+        enabled: true,
+        listen: Some("127.0.0.1:11434".into()),
+        status: "port_in_use".into(),
+        bind_error: None,
+      }),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let proxy_row = rows.iter().find(|r| r.contains("proxy")).unwrap();
+    assert!(
+      proxy_row.contains("port_in_use"),
+      "expected `port_in_use` label: {proxy_row:?}"
+    );
+  }
+
+  #[test]
+  fn proxy_row_renders_em_dash_when_no_proxy_info() {
+    // The proxy row is always present in the 5-row layout; when the
+    // daemon hasn't reported a proxy block yet (or a pre-Unit-5
+    // daemon omits it entirely), the row reads `proxy   —` instead
+    // of being hidden — so the reader can tell "not reported" apart
+    // from `disabled` (config off) or `listening` (live).
+    let app = App::new(AppOptions::default());
+    let rows = render_lines(&app);
+    let proxy_row = rows
+      .iter()
+      .find(|r| r.contains("proxy"))
+      .expect("proxy row must always render");
+    assert!(
+      proxy_row.contains("—"),
+      "expected em-dash placeholder when daemon_info.proxy is None: {proxy_row:?}"
+    );
+  }
+
+  #[test]
+  fn proxy_row_renders_disabled_when_config_disabled() {
+    use crate::tui::app::ProxyInfo;
+    let mut app = App::new(AppOptions::default());
+    app.daemon_info = DaemonInfo {
+      proxy: Some(ProxyInfo {
+        enabled: false,
+        listen: None,
+        status: "disabled".into(),
+        bind_error: None,
+      }),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let proxy_row = rows.iter().find(|r| r.contains("proxy")).unwrap();
+    assert!(
+      proxy_row.contains("disabled"),
+      "expected `disabled` body for disabled status, got: {proxy_row:?}"
+    );
+  }
+
+  #[test]
+  fn server_and_proxy_rows_render_simultaneously() {
+    use crate::tui::app::ProxyInfo;
+    let mut app = App::new(AppOptions::default());
+    app.daemon_info = DaemonInfo {
+      server_path: Some("/usr/bin/llama-server".into()),
+      proxy: Some(ProxyInfo {
+        enabled: true,
+        listen: Some("127.0.0.1:11434".into()),
+        status: "listening".into(),
+        bind_error: None,
+      }),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    assert!(
+      rows
+        .iter()
+        .any(|r| r.contains("server") && r.contains("llama-server")),
+      "expected server row alongside the proxy row: {rows:#?}"
+    );
+    assert!(
+      rows
+        .iter()
+        .any(|r| r.contains("proxy") && r.contains("listening 127.0.0.1:11434")),
+      "expected proxy row alongside the server row: {rows:#?}"
     );
   }
 }

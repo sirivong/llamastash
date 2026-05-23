@@ -84,7 +84,7 @@ a new file.
 The v1 contract — these are deliberate omissions, not gaps:
 
 - **Loopback-only, same-UID.** The daemon binds a Unix domain socket (mode `0600`) with peercred auth. There is no network listener and no v1 path to one. `--host` / `--listen` / `--bind` / `--api-key` / `--ssl-*` are refused if passed via `advanced[]` to `start_model`, and `LLAMA_ARG_*` env vars are stripped before spawn.
-- **No HTTP or MCP surfaces.** Deferred from v1 (R34); v2 keeps the deferral. Re-evaluate post-v2.
+- **OpenAI-compat proxy carved out of the v1 R34 deferral.** A loopback HTTP/1.1 listener on `127.0.0.1:11434` (default, enabled by default) speaks `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` so OpenAI-compatible agents (OpenCode, Pi, OpenAI SDKs) attach via one stable URL. Same-machine threat model — no auth, no TLS, no LAN binding, no peercred (the listener is plain loopback HTTP, not the IPC socket). The rest of R34 — Anthropic `/v1/messages`, MCP, network exposure, auth/TLS, idle eviction, fallback tuning — stays deferred. See `docs/plans/2026-05-21-001-feat-proxy-router-plan.md`.
 - **`llamastash pull`** graduated in v2 from the v1 `unimplemented!` shim. MVP shape: `llamastash pull <owner/repo[:filename.gguf]>` — downloads via the [`hf-hub`](https://crates.io/crates/hf-hub) crate (0.5 line, resolves the same `reqwest 0.12` we pin elsewhere) into the canonical HF cache layout that discovery already scans. The TUI's `d` HuggingFace pull dialog is the interactive face of this primitive; the CLI `llamastash pull <slug>` stays the only non-TUI browse surface (the dialog is TUI-only, no HTTP / MCP equivalent in v2). The `cli/output.rs::list_json` / `favorites_json` / `CatalogRow::name` JSON shapes stay byte-stable.
 - **`llamastash init` / `llamastash doctor`** are v2 surfaces. Init is the first-run wizard + maintenance tool; doctor is the read-only diagnostic. Both honor `--json` per the v2 plan §"init/doctor mode/flag decision matrix". `init` is **interactive by default**; agents that need non-interactive runs pass `--recommended` (`--yes` remains a hidden alias with identical behavior, and both flags can be combined) and may pre-answer individual prompts with `--install`, `--model`, and `--config-step`.
 - **CLI color policy.** Every human-readable output uses ANSI colors when stdout is a TTY, `NO_COLOR` is unset, and `--no-colors` was not passed. Any one of those three conditions silences color. `--json` output is byte-stable regardless of the color policy. Padded report tables (`list`, `status`, `presets list`, `favorites list`, `last-params`, `daemon status`) are TTY-gated by the same three off-conditions: when piped or color-disabled, every command emits the same `\t`-separated rows as before so `awk -F\t` / `column -t` pipelines keep working. Agents pin against `--json`, not the TTY rendering.
@@ -128,7 +128,8 @@ For full path isolation (e.g. integration tests, the maintainer UAT command, sid
 ## Architecture in one breath
 
 ```
-TUI / CLI ──attach──► Unix-socket JSON-RPC server (peercred)
+TUI / CLI ──attach──► Unix-socket JSON-RPC server (peercred, 0600)
+OpenCode / Pi / SDK ──HTTP──► Proxy listener (127.0.0.1:11434, loopback, no auth)
                           │
                           ├── Discovery (scan + watch + caches)
                           ├── GGUF parser (metadata + identity)
@@ -179,6 +180,7 @@ The `status` method response carries the following top-level objects beyond the 
 - `daemon.build` — semver string from `CARGO_PKG_VERSION`; matches `--version`.
 - `daemon.server_path` — absolute path to the `llama-server` binary the daemon resolved at startup. `null` when unset.
 - Per-model rows in `models[]` carry `latest_rss_bytes: Option<u64>` and `latest_cpu_pct: Option<f32>` from the per-launch resource sampler. Both are `None` until one tick (~1 s) after launch.
+- `proxy` — `{enabled: bool, listen: Option<String>, status: "disabled" | "listening" | "port_in_use" | "unbound", bind_error: Option<String>}`. `listen` is the attempted address (`"127.0.0.1:<port>"`) on every state except `disabled`, where it is `null`. `bind_error` is non-null only on `unbound` (unexpected bind failure beyond port-in-use).
 
 `status.gpu` is **live**: when the host-metrics sampler is attached, it reflects the freshest GPU probe. Late driver loads / hotplug changes propagate within one sampler tick rather than staying pinned to the boot snapshot.
 
