@@ -239,21 +239,22 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
   // the prefix; in LIST the canonical `g → GoTop` still fires
   // immediately so the single-stroke vim motion isn't laggy. After
   // `g` is queued, the next key resolves:
-  //   - `t`        → cycle to the next right-pane tab
-  //   - `T` (⇧t)   → cycle to the previous right-pane tab
+  //   - `t`        → `Action::NextFocus` (same as `Tab` / `l`)
+  //   - `T` (⇧t)   → `Action::PrevFocus` (same as `Shift+Tab` / `h`)
   //   - anything   → drop the prefix and fall through to normal dispatch
-  // Side-effect: `gt` from LIST also moves the list cursor to the top
-  // (the queued GoTop fired on the first `g`). Cursor moves on the
-  // left pane while the tab cycles on the right pane — harmless.
+  // gt/gT are vim-flavored aliases for the full Tab cycle, not a
+  // separate right-pane-tabs-only walker. Side-effect: `gt` from LIST
+  // also moves the list cursor to top (the queued GoTop fired on the
+  // first `g`), then focus advances — harmless.
   if app.pending_g_prefix {
     app.pending_g_prefix = false;
     match (key.code, key.modifiers) {
       (KeyCode::Char('t'), KeyModifiers::NONE) => {
-        app.cycle_right_tab();
+        apply_action(app, Action::NextFocus, writer);
         return;
       }
       (KeyCode::Char('T'), KeyModifiers::SHIFT) => {
-        app.cycle_right_tab_prev();
+        apply_action(app, Action::PrevFocus, writer);
         return;
       }
       _ => {}
@@ -3208,29 +3209,24 @@ mod tests {
   }
 
   #[test]
-  fn vim_gt_cycles_right_tabs_from_list_focus_too() {
-    // The original bug: `gt` from Models list didn't queue the prefix,
-    // so `t` fell through to CycleTheme. Now `g` in LIST fires GoTop
-    // immediately AND queues the prefix so the follow-up `t` cycles
-    // the right tab instead of the theme.
+  fn vim_gt_mirrors_tab_from_list_focus() {
+    // `gt` reuses the Tab focus-cycle path (`Action::NextFocus`). From
+    // LIST that walks to the first reachable right-pane focus. The
+    // queued `g → GoTop` still fires immediately so the single-stroke
+    // motion stays snappy; the theme must NOT cycle (original bug).
     let mut app = App::new(Default::default());
     app.models = vec![fake_model_for_events("/m/a.gguf", "/m")];
     app.focus = Focus::List;
-    let tabs = app.available_right_tabs();
-    if tabs.len() < 2 {
-      pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
-      assert!(app.pending_g_prefix);
-      pump_input(&mut app, key(KeyCode::Char('t'), KeyModifiers::NONE));
-      assert!(!app.pending_g_prefix);
-      return;
-    }
-    let starting_tab = app.right_tab;
+    let starting_focus = app.focus;
     let starting_theme = app.options.theme;
     pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
     assert!(app.pending_g_prefix, "`g` in LIST must queue the prefix");
     pump_input(&mut app, key(KeyCode::Char('t'), KeyModifiers::NONE));
     assert!(!app.pending_g_prefix);
-    assert_ne!(app.right_tab, starting_tab, "`gt` must cycle the right tab");
+    assert_ne!(
+      app.focus, starting_focus,
+      "`gt` must walk focus forward, just like Tab"
+    );
     assert_eq!(
       app.options.theme, starting_theme,
       "`gt` must NOT also cycle the theme — that was the original bug"
@@ -3238,31 +3234,26 @@ mod tests {
   }
 
   #[test]
-  fn vim_gt_cycles_right_tabs_from_right_pane() {
-    // `g` queues the prefix in right-pane focus; `t` then cycles to
-    // the next available right tab. `gT` (shift) cycles backward.
+  fn vim_gt_mirrors_tab_from_right_pane() {
+    // `gt` from RightPane advances focus just like Tab does. `gT`
+    // (shift) walks backward.
     let mut app = App::new(Default::default());
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
-    let tabs = app.available_right_tabs();
-    if tabs.len() < 2 {
-      // Empty-state fallback: only Settings is reachable, so `gt` is
-      // a no-op. Pin that rather than skip.
-      pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
-      pump_input(&mut app, key(KeyCode::Char('t'), KeyModifiers::NONE));
-      assert_eq!(app.right_tab, RightTab::Settings);
-      assert!(!app.pending_g_prefix, "prefix must clear after second key");
-      return;
-    }
+    let starting_focus = app.focus;
     pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
     assert!(app.pending_g_prefix, "`g` in right pane queues the prefix");
     pump_input(&mut app, key(KeyCode::Char('t'), KeyModifiers::NONE));
     assert!(!app.pending_g_prefix);
-    assert_ne!(
-      app.right_tab,
-      RightTab::Settings,
-      "`gt` should cycle to a new tab"
-    );
+    // Focus chain has at least List + RightPane, so NextFocus always
+    // moves somewhere. Don't pin the exact destination — the chain
+    // depends on which right tabs are reachable.
+    assert_ne!(app.focus, starting_focus, "`gt` must advance focus");
+
+    // gT walks back to the original.
+    pump_input(&mut app, key(KeyCode::Char('g'), KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    assert_eq!(app.focus, starting_focus, "`gT` must reverse the cycle");
   }
 
   #[test]
