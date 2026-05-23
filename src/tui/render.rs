@@ -35,7 +35,7 @@ const INFO_ROW_HEIGHT: u16 = 7;
 /// so the gradient is `< 20 → placeholder`, `20–23 → title + body`,
 /// `≥ 24 → title + info row + body`.
 const MIN_HEIGHT_FOR_INFO_ROW: u16 = 24;
-const HOST_PANEL_WIDTH: u16 = 28;
+const HOST_PANEL_WIDTH: u16 = 25;
 /// Lower bound on what `render()` will paint a full dashboard into.
 /// Matches the `--render-size` parser's minimum (60×20). Anything
 /// smaller renders the placeholder instead so a sub-minimum terminal
