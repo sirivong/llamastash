@@ -37,12 +37,13 @@ const INFO_ROW_HEIGHT: u16 = 7;
 const MIN_HEIGHT_FOR_INFO_ROW: u16 = 24;
 const HOST_PANEL_WIDTH: u16 = 28;
 /// Lower bound on what `render()` will paint a full dashboard into.
-/// Matches the `--render-size` parser's minimum (80×20). Anything
+/// Matches the `--render-size` parser's minimum (60×20). Anything
 /// smaller renders the placeholder instead so a sub-minimum terminal
-/// doesn't silently clip every panel (audit §5 #9). 80×20 matches the
-/// classic POSIX terminal baseline — narrower, and the Models pane
-/// columns truncate past the point of readability.
-const MIN_RENDER_WIDTH: u16 = 80;
+/// doesn't silently clip every panel (audit §5 #9). 60 cells is the
+/// "compact" floor — below 100 the right pane hides by default and
+/// the left list runs the marker column + a generous Name column
+/// (data columns drop by rank — see `list_pane::layout_columns`).
+const MIN_RENDER_WIDTH: u16 = 60;
 const MIN_RENDER_HEIGHT: u16 = 20;
 // COMPACT_BANNER is 8 cells wide; +1 cell padding each side + 2
 // border cells = 12.

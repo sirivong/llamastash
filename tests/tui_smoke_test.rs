@@ -66,7 +66,9 @@ fn empty_app_renders_title_info_and_empty_state() {
   // Wider terminal so the full title row (brand + hint strip) fits.
   // The hint strip grew with the Q:kill daemon chip and now needs
   // ~120 cells to coexist with the connecting-daemon label.
-  let frame = render_to_string(&mut app, 130, 20);
+  // Need ≥ MIN_HEIGHT_FOR_INFO_ROW (24) rows for the Host/Daemon/Logo
+  // strip to render. 20-row terminals drop the info row by design.
+  let frame = render_to_string(&mut app, 130, 24);
   assert!(
     frame.contains("LlamaStash"),
     "title row missing brand: {frame}"
@@ -312,7 +314,9 @@ fn theme_cycle_swaps_palette_without_restart() {
   pump_input(&mut app, key(KeyCode::Char('t'), KeyModifiers::NONE));
   assert_ne!(app.options.theme, ThemeName::Macchiato);
   // Render still produces a coherent frame with the new theme.
-  let frame = render_to_string(&mut app, 80, 12);
+  // 80x20 sits exactly at the dashboard floor — anything smaller
+  // surfaces the "too small" placeholder instead.
+  let frame = render_to_string(&mut app, 80, 20);
   assert!(frame.contains("LlamaStash"));
 }
 
@@ -471,7 +475,7 @@ fn picker_warns_when_focused_model_already_has_active_instance() {
 fn list_pane_renders_est_mem_badge() {
   let mut app = App::new(AppOptions::default());
   app.models = vec![fake_model("/m/qwen.gguf", "/m")];
-  let frame = render_to_string(&mut app, 120, 12);
+  let frame = render_to_string(&mut app, 120, 20);
   // Fixture sets weights_bytes = 4_200_000_000 → ~3.9 GiB. The
   // badge formatter prints in binary GiB so the visible value is
   // "3.9G", not the raw "4.2G" the SI count would suggest.
@@ -599,12 +603,43 @@ fn rerank_enter_in_candidate_field_with_empty_buffer_toasts() {
 
 #[test]
 fn narrow_terminal_does_not_crash_render() {
-  // Plan edge case: terminal width 60 cols → renderer must
-  // tolerate the constraint without panicking.
+  // 60x20 is the compact floor — the renderer paints the full
+  // dashboard (left list, no right pane) without panicking.
   let mut app = App::new(AppOptions::default());
   app.models = vec![fake_model("/m/very-long-model-name-2.5b-Q4_K_M.gguf", "/m")];
-  let frame = render_to_string(&mut app, 60, 12);
+  let frame = render_to_string(&mut app, 60, 20);
   assert!(frame.contains("LlamaStash"));
+}
+
+#[test]
+fn compact_width_drops_low_priority_columns_via_layout_picker() {
+  // At 60 cells the list pane is squeezed, and the column picker
+  // sheds the lowest-rank headers (Mode rank 50, Port rank 60) so
+  // the higher-priority data columns (Size / Quant) keep their slot.
+  // Pins the ranked-picker contract from the rendered surface, not
+  // just the unit tests in `list_pane.rs`.
+  let mut app = App::new(AppOptions::default());
+  app.models = vec![fake_model("/m/qwen.gguf", "/m")];
+  let frame = render_to_string(&mut app, 60, 20);
+  // Anchor on surrounding spaces so the assertion targets the column
+  // header row (each label is left-padded to its column width) rather
+  // than matching `Mode` in `Models [1]` or `Port` anywhere else.
+  assert!(
+    frame.contains(" Size "),
+    "Size header should survive: {frame}"
+  );
+  assert!(
+    frame.contains(" Quant "),
+    "Quant header should survive: {frame}"
+  );
+  assert!(
+    !frame.contains(" Mode "),
+    "Mode header should drop at 60 cells: {frame}"
+  );
+  assert!(
+    !frame.contains(" Port "),
+    "Port header should drop at 60 cells: {frame}"
+  );
 }
 
 #[test]
@@ -631,7 +666,7 @@ fn narrow_terminal_truncates_long_model_names_with_ellipsis() {
   let mut app = App::new(AppOptions::default());
   let very_long = "a-very-very-very-long-model-name-that-easily-overflows-sixty-columns.gguf";
   app.models = vec![fake_model(&format!("/m/{very_long}"), "/m")];
-  let frame = render_to_string(&mut app, 60, 12);
+  let frame = render_to_string(&mut app, 60, 20);
   assert!(
     frame.contains('…'),
     "expected ellipsis truncation glyph in:\n{frame}"

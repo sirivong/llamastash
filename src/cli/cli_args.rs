@@ -101,9 +101,9 @@ pub fn parse_render_size(raw: &str) -> Result<(u16, u16), String> {
     .trim()
     .parse()
     .map_err(|_| format!("invalid height in `{raw}`"))?;
-  if w < 80 || h < 20 {
+  if w < 60 || h < 20 {
     return Err(format!(
-      "render size `{raw}` is too small; minimum is 80x20"
+      "render size `{raw}` is too small; minimum is 60x20"
     ));
   }
   Ok((w, h))
@@ -1423,7 +1423,9 @@ mod tests {
   #[test]
   fn parse_render_size_accepts_canonical_form() {
     assert_eq!(parse_render_size("120x40").unwrap(), (120, 40));
-    assert_eq!(parse_render_size("80x20").unwrap(), (80, 20));
+    // 60x20 is the compact floor — pane geometry hides the right
+    // pane by default and the list shrinks to marker + Name.
+    assert_eq!(parse_render_size("60x20").unwrap(), (60, 20));
   }
 
   #[test]
@@ -1434,6 +1436,12 @@ mod tests {
     // Below the minimum that still lets the layout split into the
     // title row + info row + body without collapsing into nonsense.
     assert!(parse_render_size("20x5").is_err());
+    // 59x20 is one short of the compact floor — sub-60 widths
+    // render the "too small" placeholder, so the parser rejects them
+    // to keep `--render --render-size` honest.
+    assert!(parse_render_size("59x20").is_err());
+    // 60x19 is one short on the height axis.
+    assert!(parse_render_size("60x19").is_err());
   }
 
   #[test]
