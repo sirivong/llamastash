@@ -410,19 +410,134 @@ const HIGHLIGHT_GUTTER: usize = 0;
 /// border breathing room, glyph, trailing separator. Replaces the
 /// pre-split `STATUS_W + FAV_W = 6` chrome with a flat 3 cells.
 const MARKER_W: usize = 3;
-const COL_ARCH_W: usize = 8;
-const COL_QUANT_W: usize = 7;
-const COL_CTX_W: usize = 7;
-const COL_SIZE_W: usize = 6;
-const COL_MODE_W: usize = 10;
-/// `:port` for a u16 → max 6 cells (`:65535`). Keep the column flush
-/// at 6 cells so the header label "Port" lines up with values.
-const COL_PORT_W: usize = 6;
-const COL_SEP_W: usize = 1; // space between columns
-const RIGHT_COLS_W: usize =
-  COL_ARCH_W + COL_QUANT_W + COL_CTX_W + COL_SIZE_W + COL_MODE_W + COL_PORT_W + COL_SEP_W * 6;
+const COL_SEP_W: usize = 1; // space before each data column
 /// Minimum number of columns the Name column always reserves.
 const MIN_NAME_W: usize = 8;
+
+/// Identifies which model field a data column renders. Lets the
+/// [`Column`] table stay `const` while the value extraction lives
+/// at the call site (the row's per-field data isn't in scope at
+/// table-definition time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnId {
+  Arch,
+  Quant,
+  Ctx,
+  Size,
+  Mode,
+  Port,
+}
+
+/// One data column in the right-side strip. `rank` decides which
+/// columns survive under width pressure (lower = stickier — see
+/// [`layout_columns`]); the declaration order in [`COLUMNS`] is the
+/// canonical left-to-right display order, so visible columns keep
+/// their familiar positions as the terminal resizes — only the
+/// less-important ones drop out.
+#[derive(Debug, Clone, Copy)]
+struct Column {
+  id: ColumnId,
+  label: &'static str,
+  width: usize,
+  rank: u8,
+}
+
+/// Right-side data columns, ordered left-to-right as they appear in
+/// the rendered list. Ranks are explicit (lower = stickier):
+///
+/// - `Size` (10): top decision driver — "will it fit in VRAM".
+/// - `Quant` (20): quality/fit signal, second most asked.
+/// - `Ctx`   (30): use-case fit (context length).
+/// - `Arch`  (40): mostly inferable from the name.
+/// - `Mode`  (50): almost always `Chat`; low entropy.
+/// - `Port`  (60): only meaningful for the small subset of running
+///   rows, and the marker glyph already encodes "this is running".
+///
+/// Source order is the display order. Picker reorders by rank only
+/// for the visibility decision.
+const COLUMNS: &[Column] = &[
+  Column {
+    id: ColumnId::Arch,
+    label: "Arch",
+    width: 8,
+    rank: 40,
+  },
+  Column {
+    id: ColumnId::Quant,
+    label: "Quant",
+    width: 7,
+    rank: 20,
+  },
+  Column {
+    id: ColumnId::Ctx,
+    label: "Ctx",
+    width: 7,
+    rank: 30,
+  },
+  Column {
+    id: ColumnId::Size,
+    label: "Size",
+    width: 6,
+    rank: 10,
+  },
+  Column {
+    id: ColumnId::Mode,
+    label: "Mode",
+    width: 10,
+    rank: 50,
+  },
+  // `:port` for a u16 maxes at 6 cells (`:65535`); the column
+  // stays flush at 6 so the header label "Port" lines up.
+  Column {
+    id: ColumnId::Port,
+    label: "Port",
+    width: 6,
+    rank: 60,
+  },
+];
+
+/// Layout decision for one render pass: which data columns survive
+/// the width budget, and how many cells are left for the flexible
+/// Name column.
+struct ColumnLayout {
+  /// Columns to render, in left-to-right display order (source
+  /// order from [`COLUMNS`]). Empty when the pane is too narrow
+  /// for any data column.
+  visible: Vec<&'static Column>,
+  /// Cells the Name column gets after the marker and visible data
+  /// columns are subtracted. Floors at [`MIN_NAME_W`].
+  name_w: usize,
+}
+
+/// Greedy-fit data columns into the budget left after marker +
+/// `MIN_NAME_W` are reserved. Lower-rank columns win first. Any
+/// budget the picker doesn't spend rolls back into the Name column
+/// so a wide pane gives Name room to breathe.
+fn layout_columns(content_w: usize) -> ColumnLayout {
+  let budget = content_w.saturating_sub(MARKER_W + MIN_NAME_W);
+  let mut by_rank: Vec<(usize, &'static Column)> = COLUMNS.iter().enumerate().collect();
+  by_rank.sort_by_key(|(_, c)| c.rank);
+
+  let mut taken: Vec<(usize, &'static Column)> = Vec::with_capacity(COLUMNS.len());
+  let mut spent = 0usize;
+  for (idx, c) in by_rank {
+    let cost = c.width + COL_SEP_W;
+    if spent + cost <= budget {
+      spent += cost;
+      taken.push((idx, c));
+    }
+  }
+  // Restore declaration order so columns disappear from less-
+  // important slots while the survivors keep their familiar
+  // positions on screen.
+  taken.sort_by_key(|(idx, _)| *idx);
+  let visible: Vec<&'static Column> = taken.into_iter().map(|(_, c)| c).collect();
+
+  let name_w = content_w
+    .saturating_sub(MARKER_W + spent)
+    .max(MIN_NAME_W);
+  ColumnLayout { visible, name_w }
+}
 
 /// Filter-input state for the Models block title. When the filter
 /// is active the `/:filter` chip is replaced by an inline input
@@ -513,7 +628,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, palette: &Palette, input: Rende
   // so columns stay column-aligned).
   let inner_w = area.width.saturating_sub(2) as usize;
   let content_w = inner_w.saturating_sub(HIGHLIGHT_GUTTER);
-  let name_w = column_name_budget(content_w);
+  let layout = layout_columns(content_w);
 
   let rows = input.rows;
   let safe_selected = if rows.is_empty() {
@@ -526,7 +641,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, palette: &Palette, input: Rende
     .enumerate()
     .map(|(i, r)| {
       let is_selected = Some(i) == safe_selected;
-      render_row(r, palette, name_w, content_w, is_selected)
+      render_row(r, palette, &layout, content_w, is_selected)
     })
     .collect();
   let title_line = build_block_title(input.title, input.filter_chip_label, palette, input.focused);
@@ -566,21 +681,6 @@ fn highlight_style(_palette: &Palette) -> Style {
   Style::default()
     .add_modifier(Modifier::REVERSED)
     .add_modifier(Modifier::BOLD)
-}
-
-/// Decide how many cells the flexible Name column gets. When the
-/// pane is wide enough to fit every right-side column, Name takes
-/// whatever is left. When the pane is too narrow even for that,
-/// Name shrinks to `MIN_NAME_W` and the columns spill — they get
-/// clipped at the right border, which is the same way a too-narrow
-/// pane has always behaved. Returning a usize keeps callers simple.
-fn column_name_budget(content_w: usize) -> usize {
-  let reserved = MARKER_W.saturating_add(RIGHT_COLS_W);
-  if content_w > reserved + MIN_NAME_W {
-    content_w - reserved
-  } else {
-    MIN_NAME_W
-  }
 }
 
 /// Build the Models block title as a styled `Line`. Order
@@ -784,13 +884,44 @@ fn marker_span(
   Span::raw("   ".to_string())
 }
 
+/// Resolve the rendered value for one `(column, model-row)` pair.
+/// Centralises the per-column extraction so the [`COLUMNS`] table
+/// stays declarative and both the table-header and model-row paths
+/// share one source of truth.
+fn column_value(id: ColumnId, model: &ListRow) -> String {
+  let ListRow::Model {
+    arch,
+    quant,
+    native_ctx,
+    weights_bytes,
+    mode_hint,
+    port,
+    ..
+  } = model
+  else {
+    return String::new();
+  };
+  match id {
+    ColumnId::Arch => arch.clone(),
+    ColumnId::Quant => quant.clone(),
+    ColumnId::Ctx => native_ctx.map(format_tokens).unwrap_or_else(|| "—".into()),
+    ColumnId::Size => weights_bytes
+      .map(format_bytes)
+      .unwrap_or_else(|| "—".into()),
+    ColumnId::Mode => mode_hint.clone(),
+    ColumnId::Port => port.map(|p| format!(":{p}")).unwrap_or_else(|| "—".into()),
+  }
+}
+
 fn render_row<'a>(
   row: &'a ListRow,
   palette: &Palette,
-  name_w: usize,
+  layout: &ColumnLayout,
   content_w: usize,
   is_selected: bool,
 ) -> ListItem<'a> {
+  let name_w = layout.name_w;
+  let cols = layout.visible.as_slice();
   match row {
     ListRow::TableHeader => {
       // Label cells line up with model-row value cells: same widths,
@@ -800,18 +931,10 @@ fn render_row<'a>(
       let mut line = String::with_capacity(content_w);
       line.push_str(&" ".repeat(MARKER_W));
       line.push_str(&cell("Name", name_w));
-      line.push(' ');
-      line.push_str(&cell("Arch", COL_ARCH_W));
-      line.push(' ');
-      line.push_str(&cell("Quant", COL_QUANT_W));
-      line.push(' ');
-      line.push_str(&cell("Ctx", COL_CTX_W));
-      line.push(' ');
-      line.push_str(&cell("Size", COL_SIZE_W));
-      line.push(' ');
-      line.push_str(&cell("Mode", COL_MODE_W));
-      line.push(' ');
-      line.push_str(&cell("Port", COL_PORT_W));
+      for c in cols {
+        line.push(' ');
+        line.push_str(&cell(c.label, c.width));
+      }
       ListItem::new(Line::from(Span::styled(
         line,
         Style::default()
@@ -846,14 +969,8 @@ fn render_row<'a>(
     }
     ListRow::Model {
       name,
-      arch,
-      quant,
-      native_ctx,
-      weights_bytes,
-      mode_hint,
       favorite,
       state,
-      port,
       ..
     } => {
       // The whole row carries a single semantic foreground via
@@ -867,25 +984,13 @@ fn render_row<'a>(
       // rows; the selection cursor leaves fg unset so REVERSED
       // flips it with the rest of the row.
       let fg = row_fg(*state, palette);
-      let mut spans: Vec<Span<'a>> = vec![marker_span(*state, *favorite, is_selected, palette)];
+      let mut spans: Vec<Span<'a>> = Vec::with_capacity(2 + cols.len() * 2);
+      spans.push(marker_span(*state, *favorite, is_selected, palette));
       spans.push(Span::raw(cell(name.as_str(), name_w)));
-      spans.push(Span::raw(" "));
-      spans.push(Span::raw(cell(arch.as_str(), COL_ARCH_W)));
-      spans.push(Span::raw(" "));
-      spans.push(Span::raw(cell(quant.as_str(), COL_QUANT_W)));
-      spans.push(Span::raw(" "));
-      let ctx = native_ctx.map(format_tokens).unwrap_or_else(|| "—".into());
-      spans.push(Span::raw(cell(&ctx, COL_CTX_W)));
-      spans.push(Span::raw(" "));
-      let size = weights_bytes
-        .map(format_bytes)
-        .unwrap_or_else(|| "—".into());
-      spans.push(Span::raw(cell(&size, COL_SIZE_W)));
-      spans.push(Span::raw(" "));
-      spans.push(Span::raw(cell(mode_hint.as_str(), COL_MODE_W)));
-      spans.push(Span::raw(" "));
-      let port_str = port.map(|p| format!(":{p}")).unwrap_or_else(|| "—".into());
-      spans.push(Span::raw(cell(&port_str, COL_PORT_W)));
+      for c in cols {
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(cell(&column_value(c.id, row), c.width)));
+      }
       // `ListItem::style` is the canonical place to apply
       // `Modifier::REVERSED` to the *whole* row uniformly. Setting
       // fg here makes every unset-fg span (name + columns +
@@ -1610,19 +1715,79 @@ mod tests {
     assert_eq!(row_fg(SurfaceState::External, p), p.fg);
   }
 
-  #[test]
-  fn name_budget_reserves_columns_when_pane_is_wide() {
-    // Pane wide enough for every right column plus generous Name.
-    let big = column_name_budget(200);
-    assert_eq!(big, 200 - MARKER_W - RIGHT_COLS_W);
+  /// Total cost (cells) of every declared column, including its
+  /// leading separator. Pulled out of the inline tests so the
+  /// ranked picker (and any future budget calculation) can verify
+  /// against the same source of truth.
+  fn all_columns_cost() -> usize {
+    COLUMNS.iter().map(|c| c.width + COL_SEP_W).sum()
   }
 
   #[test]
-  fn name_budget_falls_back_to_min_name_when_pane_is_narrow() {
-    // 30-col content area is far below chrome + RIGHT_COLS_W + MIN.
-    // Name floors at MIN_NAME_W; the right columns spill into the
-    // border-clipped overflow (same behaviour as v0).
-    assert_eq!(column_name_budget(30), MIN_NAME_W);
+  fn layout_picks_every_column_when_pane_is_wide() {
+    // Pane wide enough for every data column plus generous Name.
+    let layout = layout_columns(200);
+    assert_eq!(
+      layout.visible.len(),
+      COLUMNS.len(),
+      "all columns must fit at 200 cells"
+    );
+    assert_eq!(layout.name_w, 200 - MARKER_W - all_columns_cost());
+  }
+
+  #[test]
+  fn layout_drops_no_columns_when_only_zero_budget_remains() {
+    // content_w = chrome + MIN_NAME_W → budget == 0. Nothing fits.
+    // Name parks exactly at MIN_NAME_W.
+    let layout = layout_columns(MARKER_W + MIN_NAME_W);
+    assert!(layout.visible.is_empty());
+    assert_eq!(layout.name_w, MIN_NAME_W);
+  }
+
+  #[test]
+  fn layout_keeps_lowest_rank_column_when_only_one_fits() {
+    // Budget == one Size column (rank 10, cost 6+1=7). Name still
+    // at MIN_NAME_W.
+    let layout = layout_columns(MARKER_W + MIN_NAME_W + 7);
+    assert_eq!(layout.visible.len(), 1);
+    assert_eq!(layout.visible[0].id, ColumnId::Size);
+    assert_eq!(layout.name_w, MIN_NAME_W);
+  }
+
+  #[test]
+  fn layout_preserves_declaration_order_when_high_rank_columns_drop() {
+    // Budget = 32 cells (= Arch+Quant+Ctx+Size cost). Mode (11) and
+    // Port (7) don't both fit, but neither does either alone after
+    // the rank-ordered greedy takes the cheaper ones first.
+    let layout = layout_columns(MARKER_W + MIN_NAME_W + 32);
+    let ids: Vec<ColumnId> = layout.visible.iter().map(|c| c.id).collect();
+    // Source order preserved — Size (best rank) does not jump to
+    // the front of the strip.
+    assert_eq!(
+      ids,
+      vec![ColumnId::Arch, ColumnId::Quant, ColumnId::Ctx, ColumnId::Size]
+    );
+  }
+
+  #[test]
+  fn layout_can_keep_lowest_priority_column_if_a_higher_one_overflows() {
+    // Budget = 39 cells. Greedy by rank takes Size+Quant+Ctx+Arch
+    // (32), can't fit Mode (11 would put it over), but still fits
+    // Port (7) at the tail. The visible set is non-contiguous in
+    // declaration order — Port renders right after Size with no
+    // Mode column between them.
+    let layout = layout_columns(MARKER_W + MIN_NAME_W + 39);
+    let ids: Vec<ColumnId> = layout.visible.iter().map(|c| c.id).collect();
+    assert_eq!(
+      ids,
+      vec![
+        ColumnId::Arch,
+        ColumnId::Quant,
+        ColumnId::Ctx,
+        ColumnId::Size,
+        ColumnId::Port
+      ]
+    );
   }
 
   #[test]
