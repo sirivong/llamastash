@@ -12,9 +12,10 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use llamastash::config::loader::PortRange;
+use llamastash::daemon::probe::{poll_until_ready, ProbeOptions, ProbeOutcome};
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
-use llamastash::ipc::{client::ClientError, Client};
+use llamastash::ipc::Client;
 use llamastash::tui::events::Event;
 use llamastash::tui::oai_client::{embed, rerank, spawn_chat_stream, ChatStreamMsg};
 use serde_json::json;
@@ -112,29 +113,38 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
     .expect("launch_id")
     .to_string();
   let port = start_body["port"].as_u64().expect("port") as u16;
-  // Wait briefly for Ready.
-  let deadline = std::time::Instant::now() + Duration::from_secs(5);
-  loop {
-    match Client::connect(&socket).await {
-      Ok(mut status_client) => match status_client.call("status", None).await {
-        Ok(body) => {
-          let models = body["models"].as_array().expect("models");
-          if let Some(m) = models.iter().find(|m| m["launch_id"] == launch_id) {
-            if m["state"]["state"] == json!("ready") {
-              break;
+  match poll_until_ready(
+    port,
+    ProbeOptions {
+      interval: Duration::from_millis(100),
+      timeout: Duration::from_secs(15),
+    },
+  )
+  .await
+  {
+    ProbeOutcome::Ready => {}
+    ProbeOutcome::Timeout { last_status } => {
+      let mut detail = format!("supervisor never reached Ready on port {port}");
+      if let Ok(mut status_client) = Client::connect(&socket).await {
+        if let Ok(body) = status_client.call("status", None).await {
+          if let Some(m) = body["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|m| m["launch_id"] == launch_id))
+          {
+            let state = m["state"]["state"].as_str().unwrap_or("unknown");
+            let cause = m["state"]["cause"].as_str().unwrap_or("");
+            if cause.is_empty() {
+              detail.push_str(&format!(" (status={state}, last_health={last_status:?})"));
+            } else {
+              detail.push_str(&format!(
+                " (status={state}, cause={cause}, last_health={last_status:?})"
+              ));
             }
           }
         }
-        Err(ClientError::Connect(_) | ClientError::Frame(_) | ClientError::Timeout(_)) => {}
-        Err(err) => panic!("status: {err}"),
-      },
-      Err(ClientError::Connect(_)) => {}
-      Err(err) => panic!("status connect: {err}"),
+      }
+      panic!("{detail}");
     }
-    if std::time::Instant::now() > deadline {
-      panic!("supervisor never reached Ready");
-    }
-    tokio::time::sleep(Duration::from_millis(40)).await;
   }
   (port, daemon, socket)
 }
