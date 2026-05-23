@@ -339,19 +339,8 @@ fn render_info_row(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palet
 }
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-  let show_right = app.right_pane_visible();
-  let split = if show_right {
-    Layout::default()
-      .direction(Direction::Horizontal)
-      .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-      .split(area)
-  } else {
-    // Hidden right pane → Models list owns the whole body width.
-    Layout::default()
-      .direction(Direction::Horizontal)
-      .constraints([Constraint::Percentage(100)])
-      .split(area)
-  };
+  let show_right = app.right_pane_visible_at(area.width);
+  let split = body_split(area, show_right, app);
   let rows = app.rendered_rows();
   let title = build_models_title(app, split[0].width as usize, &rows);
   let filter_chip = models_filter_chip(app);
@@ -392,6 +381,36 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) 
   if show_right {
     right_pane::render(frame, split[1], app, palette, right_focused);
   }
+}
+
+/// Decide the body's horizontal split based on width and whether
+/// the right pane is currently showing.
+///
+/// - **Right hidden** → list owns the whole body, regardless of
+///   width. Covers both `models.is_empty()` and compact-mode with
+///   focus on the list.
+/// - **Wide mode** (`area.width ≥ COMPACT_WIDTH_THRESHOLD`) →
+///   `65 / 35` (the established wide-mode split).
+/// - **Compact mode, drilled in** → `35 / 65`. The list collapses
+///   to its marker + Name column (the ranked-column picker drops
+///   everything else as the budget shrinks), and the right pane
+///   gets the larger slice for chat / settings / logs content.
+fn body_split(area: Rect, show_right: bool, _app: &App) -> std::rc::Rc<[Rect]> {
+  if !show_right {
+    return Layout::default()
+      .direction(Direction::Horizontal)
+      .constraints([Constraint::Percentage(100)])
+      .split(area);
+  }
+  let constraints = if area.width >= crate::tui::app::COMPACT_WIDTH_THRESHOLD {
+    [Constraint::Percentage(65), Constraint::Percentage(35)]
+  } else {
+    [Constraint::Percentage(35), Constraint::Percentage(65)]
+  };
+  Layout::default()
+    .direction(Direction::Horizontal)
+    .constraints(constraints)
+    .split(area)
 }
 
 /// True when the Models pane currently owns keyboard focus. The

@@ -27,6 +27,13 @@ use crate::tui::tabs::{tabs_for_mode, RightTab};
 /// transient yank confirmations from sticking around forever.
 const TOAST_TTL: Duration = Duration::from_secs(3);
 
+/// Body width (cells) at which the dashboard flips from wide-pane
+/// to compact-pane mode. At ≥ 100 cells both panes render side by
+/// side (current 65/35 layout). Below 100 cells the right pane is
+/// "drill-in only" — hidden by default, visible whenever focus
+/// lives inside it (see [`App::right_pane_visible_at`]).
+pub const COMPACT_WIDTH_THRESHOLD: u16 = 100;
+
 /// Map the daemon's wire-stable `gpu_backend` label
 /// (`"nvidia"`/`"amd"`/...) to the recommender's per-backend key
 /// (`"cuda"`/`"hip"`/...). Kept here so the dialog stays decoupled
@@ -469,12 +476,42 @@ impl App {
     self.clear_frame_caches();
   }
 
-  /// True when the right pane should render. We always show it as
-  /// long as the user has at least one discovered model — the pane
-  /// follows the cursor and surfaces Settings (and Logs/Chat when
-  /// running) for whatever model is currently selected.
-  pub fn right_pane_visible(&self) -> bool {
-    !self.models.is_empty()
+  /// True when the right pane should render at the supplied body
+  /// width.
+  ///
+  /// **Wide** (`body_width >= COMPACT_WIDTH_THRESHOLD`): pane is
+  /// always visible as long as the user has at least one discovered
+  /// model — it follows the cursor and surfaces Settings (and
+  /// Logs/Chat when running) for the focused row.
+  ///
+  /// **Compact** (`body_width < COMPACT_WIDTH_THRESHOLD`): pane is
+  /// "drill-in only" — hidden by default, opens when focus moves
+  /// into it (`open_launch_picker` from `Enter` on a model row, or
+  /// any focus chord that lands in the right pane). `Esc` /
+  /// `close_launch_picker` moves focus back to `List` and the pane
+  /// disappears, expanding the list back to full width.
+  ///
+  /// Focus is the single source of truth in compact mode — no
+  /// separate flag — so every existing path that moves focus
+  /// (Cancel, FocusList, close_launch_picker) already implicitly
+  /// closes the pane.
+  pub fn right_pane_visible_at(&self, body_width: u16) -> bool {
+    if self.models.is_empty() {
+      return false;
+    }
+    body_width >= COMPACT_WIDTH_THRESHOLD || self.right_pane_focused()
+  }
+
+  /// True when focus currently lives inside the right pane (or one
+  /// of its tab-bound input fields). Used by `right_pane_visible_at`
+  /// to keep the pane open in compact mode whenever the user has
+  /// drilled in. Mirrors the predicate in `render::right_is_focused`
+  /// — keep them in sync.
+  pub fn right_pane_focused(&self) -> bool {
+    matches!(
+      self.focus,
+      Focus::RightPane | Focus::ChatInput | Focus::EmbedInput | Focus::RerankInput
+    )
   }
 
   /// Toggle the modal help overlay. Bound to `?`. Esc also closes
@@ -1762,9 +1799,15 @@ mod tests {
     // the pane open if no model is currently running.
     assert_eq!(app.focus, Focus::RightPane);
     assert_eq!(app.right_tab, RightTab::Settings);
+    // Wide width: pane shows regardless of focus (models non-empty).
     assert!(
-      app.right_pane_visible(),
-      "right pane must be visible after open_launch_picker"
+      app.right_pane_visible_at(120),
+      "right pane must be visible after open_launch_picker (wide)"
+    );
+    // Compact width: pane shows because focus drilled into RightPane.
+    assert!(
+      app.right_pane_visible_at(60),
+      "right pane must be visible after open_launch_picker (compact)"
     );
   }
 

@@ -612,33 +612,90 @@ fn narrow_terminal_does_not_crash_render() {
 }
 
 #[test]
-fn compact_width_drops_low_priority_columns_via_layout_picker() {
-  // At 60 cells the list pane is squeezed, and the column picker
-  // sheds the lowest-rank headers (Mode rank 50, Port rank 60) so
-  // the higher-priority data columns (Size / Quant) keep their slot.
-  // Pins the ranked-picker contract from the rendered surface, not
-  // just the unit tests in `list_pane.rs`.
+fn compact_width_hides_right_pane_and_drops_lowest_priority_column() {
+  // At 60 cells the dashboard is in compact mode — the right pane
+  // is hidden by default (focus lives on the List), so the list
+  // gets the whole 60 cells. The ranked-column picker fits five of
+  // the six data columns and drops only Port (rank 60). Pins both
+  // contracts (compact pane mode + ranked picker) from the
+  // rendered surface.
   let mut app = App::new(AppOptions::default());
   app.models = vec![fake_model("/m/qwen.gguf", "/m")];
   let frame = render_to_string(&mut app, 60, 20);
-  // Anchor on surrounding spaces so the assertion targets the column
-  // header row (each label is left-padded to its column width) rather
-  // than matching `Mode` in `Models [1]` or `Port` anywhere else.
-  assert!(
-    frame.contains(" Size "),
-    "Size header should survive: {frame}"
-  );
-  assert!(
-    frame.contains(" Quant "),
-    "Quant header should survive: {frame}"
-  );
-  assert!(
-    !frame.contains(" Mode "),
-    "Mode header should drop at 60 cells: {frame}"
-  );
+  for label in [" Arch ", " Quant ", " Ctx ", " Size ", " Mode "] {
+    assert!(
+      frame.contains(label),
+      "header {label:?} should survive at 60 cells: {frame}"
+    );
+  }
+  // Anchored on surrounding spaces so it doesn't false-match the
+  // Models block title.
   assert!(
     !frame.contains(" Port "),
-    "Port header should drop at 60 cells: {frame}"
+    "Port header (rank 60) should drop at 60 cells: {frame}"
+  );
+  // Settings / Logs tab labels live only inside the right pane —
+  // their absence proves the pane is hidden in compact mode.
+  assert!(
+    !frame.contains("Settings"),
+    "right pane should be hidden in compact mode by default: {frame}"
+  );
+}
+
+#[test]
+fn compact_width_opens_right_pane_when_focus_drills_in() {
+  // Drill-in via `Enter` on a model row: open_launch_picker moves
+  // focus to RightPane → the right pane appears in compact mode.
+  // The list collapses to 35% of the body so the right pane gets
+  // the larger slice for content.
+  use llamastash::tui::keybindings::Focus;
+  let mut app = App::new(AppOptions::default());
+  app.models = vec![fake_model("/m/qwen.gguf", "/m")];
+  // Cursor on the only model row (after TableHeader + folder header).
+  app.list_cursor = 2;
+  app.open_launch_picker();
+  assert_eq!(app.focus, Focus::RightPane);
+  let frame = render_to_string(&mut app, 60, 20);
+  // Settings tab is now visible — the drill-in surfaces the right
+  // pane.
+  assert!(
+    frame.contains("Settings"),
+    "right pane should appear after open_launch_picker in compact mode: {frame}"
+  );
+}
+
+#[test]
+fn compact_width_closes_right_pane_when_focus_returns_to_list() {
+  // Round-trip: drill in, then Esc back to the list. close_launch_picker
+  // moves focus to Focus::List → right pane disappears.
+  use llamastash::tui::keybindings::Focus;
+  let mut app = App::new(AppOptions::default());
+  app.models = vec![fake_model("/m/qwen.gguf", "/m")];
+  app.list_cursor = 2;
+  app.open_launch_picker();
+  assert_eq!(app.focus, Focus::RightPane);
+  app.close_launch_picker();
+  assert_eq!(app.focus, Focus::List);
+  let frame = render_to_string(&mut app, 60, 20);
+  assert!(
+    !frame.contains("Settings"),
+    "right pane should be hidden after close_launch_picker in compact mode: {frame}"
+  );
+}
+
+#[test]
+fn wide_width_always_shows_right_pane_regardless_of_focus() {
+  // At ≥100 cells the right pane renders no matter where focus is —
+  // mirrors the established wide-mode contract.
+  use llamastash::tui::keybindings::Focus;
+  let mut app = App::new(AppOptions::default());
+  app.models = vec![fake_model("/m/qwen.gguf", "/m")];
+  // Focus on List — in compact mode this would hide the pane.
+  app.focus = Focus::List;
+  let frame = render_to_string(&mut app, 120, 24);
+  assert!(
+    frame.contains("Settings"),
+    "right pane must render in wide mode even with focus on List: {frame}"
   );
 }
 
