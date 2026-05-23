@@ -648,9 +648,10 @@ fn handle_filter_input(app: &mut App, key: KeyEvent) {
       // with the filter buffer intact.
       app.filter_input.exit_edit();
       app.focus = Focus::List;
-      if app.focused_name().is_some() {
-        app.open_launch_picker();
-      }
+      // `drill_into_focused_model` is the right semantic here:
+      // running rows show the read-only view (no auto-stage), idle
+      // rows stage the picker so the next Enter launches.
+      app.drill_into_focused_model();
     }
     InputOutcome::PassThrough => match key.code {
       // Resting + empty buffer + Esc → close the filter entirely
@@ -686,7 +687,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::OpenFilter => app.open_filter(),
     Action::ClearFilter => app.clear_filter(),
     Action::ToggleFavorite => apply_toggle_favorite(app, writer),
-    Action::OpenLaunchPicker => app.open_launch_picker(),
+    Action::OpenLaunchPicker => app.drill_into_focused_model(),
     Action::OpenHfDialog => apply_open_hf_dialog(app),
     Action::Submit => match app.focus {
       Focus::EmbedInput => apply_embed_submit(app),
@@ -1669,7 +1670,17 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
   // Without this, Enter on a fresh Settings focus silently dropped
   // because `launch_picker` was None — the user had to tap an arrow
   // first to materialise the form, then Enter to launch.
+  //
+  // Running rows opt out of the auto-stage: Enter without a staged
+  // picker just shows the read-only running view. Otherwise tapping
+  // Enter on a running row would silently launch a duplicate before
+  // the user has any chance to edit params — the chip strip leads
+  // with `e:edit for launch` precisely so the user stages
+  // intentionally before dispatching.
   if app.launch_picker.is_none() {
+    if app.focused_managed().is_some() {
+      return;
+    }
     app.open_launch_picker();
   }
   let picker = match app.launch_picker.as_ref() {

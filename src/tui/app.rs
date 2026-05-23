@@ -1142,10 +1142,46 @@ impl App {
     Some(state)
   }
 
+  /// Drill into the focused model row — the action `Enter` fires on
+  /// the Models list. Two branches:
+  ///
+  /// - **Focused row is running** (`focused_managed().is_some()`):
+  ///   focus the right pane in its read-only running view. *No*
+  ///   picker is staged — pressing `Enter` alone shouldn't silently
+  ///   spin up a duplicate launch before the user has any chance to
+  ///   inspect or edit the params. The bottom-strip chip leads with
+  ///   `e:edit for launch`; the user goes `e → edit fields → Enter`
+  ///   to launch a new instance.
+  /// - **Focused row is idle**: stage the launch picker with
+  ///   last-used params so the next `Enter` (on the Settings tab)
+  ///   dispatches the launch.
+  ///
+  /// Header rows / empty selections no-op. This is the "show or
+  /// focus the right pane" gesture; the heavy-handed
+  /// [`open_launch_picker`](Self::open_launch_picker) gate is
+  /// reserved for the explicit `e:edit for launch` flow that
+  /// dispatches from running view.
+  pub fn drill_into_focused_model(&mut self) {
+    if self.focused_name().is_none() {
+      return;
+    }
+    if self.focused_managed().is_some() {
+      self.right_tab = RightTab::Settings;
+      self.focus = Focus::RightPane;
+      self.running_view_scroll.set(0);
+      return;
+    }
+    self.open_launch_picker();
+  }
+
   /// Open the launch picker for the focused model. Seeds from
   /// persisted `last_params` (R20) when the daemon has reported any
   /// for the focused path, so a returning user lands on the params
   /// they last shipped. No-op when the cursor is on a header.
+  ///
+  /// Called by `e:edit for launch` (the explicit stage-over-running
+  /// gate) and by `Enter`-on-list for idle rows via
+  /// [`drill_into_focused_model`](Self::drill_into_focused_model).
   pub fn open_launch_picker(&mut self) {
     let mut picker = match self.build_default_picker() {
       Some(p) => p,
@@ -1782,6 +1818,70 @@ mod tests {
     assert!(
       app.launch_picker.is_none(),
       "header focus must not open a picker"
+    );
+  }
+
+  #[test]
+  fn drill_into_focused_model_stages_picker_when_idle() {
+    // Idle row: Enter-on-list → drill stages the picker so the
+    // *next* Enter dispatches a launch.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/a.gguf", "/m")];
+    app.list_cursor = 2;
+    assert!(app.focused_managed().is_none());
+    app.drill_into_focused_model();
+    assert!(
+      app.launch_picker.is_some(),
+      "idle drill must stage the picker so Enter → launch reads"
+    );
+    assert_eq!(app.focus, Focus::RightPane);
+    assert_eq!(app.right_tab, RightTab::Settings);
+  }
+
+  #[test]
+  fn drill_into_focused_model_skips_picker_when_running() {
+    // Running row: Enter-on-list should *not* stage a launch
+    // picker — it just shows the read-only running view. The
+    // user explicitly stages via `e:edit for launch`, then Enter
+    // launches. Avoids accidentally dispatching a duplicate
+    // instance from a stray Enter.
+    let m = fake("/m/a.gguf", "/m");
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![m.clone()];
+    app.managed = vec![ManagedRow {
+      launch_id: "L1".into(),
+      path: m.path.clone(),
+      port: 41100,
+      state: SurfaceState::Ready,
+      rss_bytes: None,
+      cpu_pct: None,
+    }];
+    app.list_cursor = 2;
+    assert!(app.focused_managed().is_some());
+    app.drill_into_focused_model();
+    assert!(
+      app.launch_picker.is_none(),
+      "running drill must NOT stage a picker — only `e` does that"
+    );
+    assert_eq!(
+      app.focus,
+      Focus::RightPane,
+      "drill still focuses the right pane (read-only running view)"
+    );
+    assert_eq!(app.right_tab, RightTab::Settings);
+  }
+
+  #[test]
+  fn drill_into_focused_model_noop_on_header_focus() {
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/a.gguf", "/m")];
+    app.list_cursor = 0;
+    app.drill_into_focused_model();
+    assert!(app.launch_picker.is_none());
+    assert_ne!(
+      app.focus,
+      Focus::RightPane,
+      "header drill must not move focus"
     );
   }
 
