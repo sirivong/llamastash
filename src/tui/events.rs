@@ -2079,8 +2079,8 @@ pub async fn run(
   daemon_opts: Option<crate::daemon::DaemonOptions>,
 ) -> Result<()> {
   use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
   };
   use crossterm::execute;
   use crossterm::terminal::{

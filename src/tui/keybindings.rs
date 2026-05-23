@@ -777,7 +777,6 @@ fn build_default_bindings() -> Vec<Binding> {
   v
 }
 
-
 // ─── Runtime keymap (config overrides) ──────────────────────────
 //
 // The compile-time `DEFAULT_BINDINGS` slice above stays the source
