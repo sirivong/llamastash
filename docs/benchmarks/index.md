@@ -6,7 +6,7 @@ Read [methodology.md](methodology.md) before any individual page; it explains th
 
 ## Results
 
-- [2026-05-23](results-2026-05-23.md) — first hardware run. Scope: `small` GGUF (gemma-4-E2B-Q4_K_M), AMD ROCm gfx1151 (Strix Halo / Radeon 8060S), defaults mode only, `chat_turn` + `agent_decode` workloads, LlamaStash vs Ollama. Raw `llama-server` (Suite A baseline) and LM Studio are deferred — see the scope note on the page itself.
+- [2026-05-23](results-2026-05-23.md) — first hardware run. Scope: `small` GGUF (gemma-4-E2B-Q4_K_M), AMD ROCm gfx1151 (Strix Halo / Radeon 8060S), defaults mode only, `chat_turn` + `agent_decode` workloads, LlamaStash + raw `llama-server` (b9282 HIP) + Ollama. LM Studio is deferred — see the scope note on the page itself.
 
 ## Raw data
 
