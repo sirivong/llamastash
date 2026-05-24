@@ -85,18 +85,30 @@ pub fn new_status_cell() -> StatusCell {
 /// [`serve_with_options`] instead.
 pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How many ports above the configured `proxy.port` the listener will
+/// probe for a free slot before giving up. With the default value the
+/// listener walks `port..=port+5` (six attempts), matching Ollama's
+/// well-known port window so a running Ollama on `11434` doesn't kick
+/// llamastash's proxy entirely offline — it lands on `11435` instead.
+pub const DEFAULT_PORT_SCAN_MAX_OFFSET: u16 = 5;
+
 /// Tunable knobs for the listener. Kept as a struct so future
-/// additions don't churn the [`serve`] signature; in v1 only the
-/// header-read timeout is configurable.
+/// additions don't churn the [`serve`] signature.
 #[derive(Clone, Copy, Debug)]
 pub struct ServeOptions {
   pub header_read_timeout: Duration,
+  /// Maximum offset above the configured port that the listener will
+  /// try when the lower ports are all `AddrInUse`. `0` reverts to
+  /// strict single-port behaviour (used by the port-collision test).
+  /// See [`DEFAULT_PORT_SCAN_MAX_OFFSET`] for the production default.
+  pub port_scan_max_offset: u16,
 }
 
 impl Default for ServeOptions {
   fn default() -> Self {
     Self {
       header_read_timeout: DEFAULT_HEADER_READ_TIMEOUT,
+      port_scan_max_offset: DEFAULT_PORT_SCAN_MAX_OFFSET,
     }
   }
 }
@@ -120,6 +132,50 @@ pub async fn serve(
   serve_with_options(state, addr, shutdown, status, ServeOptions::default()).await
 }
 
+/// Outcome of [`bind_with_scan`]. The two failure variants split
+/// `AddrInUse` from every other bind error because the IPC `status`
+/// surface reports the two cases as distinct states (`PortInUse` vs
+/// `Unbound { bind_error }`).
+enum BindOutcome {
+  Bound(TcpListener),
+  AllPortsInUse {
+    /// The highest port we actually attempted. Surfaced via `status`
+    /// so the user knows which port the listener gave up on.
+    last_addr: SocketAddr,
+  },
+  Failed {
+    addr: SocketAddr,
+    error: std::io::Error,
+  },
+}
+
+/// Walk `[port, port + max_offset]` looking for a free slot.
+/// `AddrInUse` advances to the next port; any other error is fatal
+/// (no point pretending the next port will fare better than e.g.
+/// EACCES on a privileged range). A zero `max_offset` collapses to a
+/// single bind attempt — same shape as the v0 code path.
+async fn bind_with_scan(base: SocketAddr, max_offset: u16) -> BindOutcome {
+  let mut last_addr = base;
+  for offset in 0..=max_offset {
+    let Some(port) = base.port().checked_add(offset) else {
+      break;
+    };
+    let candidate = SocketAddr::new(base.ip(), port);
+    last_addr = candidate;
+    match TcpListener::bind(&candidate).await {
+      Ok(l) => return BindOutcome::Bound(l),
+      Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+      Err(error) => {
+        return BindOutcome::Failed {
+          addr: candidate,
+          error,
+        }
+      }
+    }
+  }
+  BindOutcome::AllPortsInUse { last_addr }
+}
+
 /// `serve` plus per-listener tuning knobs. Same semantics as
 /// [`serve`]; lifted out so the daemon can forward
 /// `proxy.header_read_timeout_secs` without forcing every caller
@@ -131,25 +187,31 @@ pub async fn serve_with_options(
   status: StatusCell,
   options: ServeOptions,
 ) -> Result<()> {
-  let listener = match TcpListener::bind(&addr).await {
-    Ok(l) => l,
-    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-      log::warn!(
-        "proxy listener: port {} already in use; daemon continues without the proxy",
-        addr
-      );
-      write_status(&status, ProxyStatus::PortInUse { addr });
+  let listener = match bind_with_scan(addr, options.port_scan_max_offset).await {
+    BindOutcome::Bound(l) => l,
+    BindOutcome::AllPortsInUse { last_addr } => {
+      let base = addr.port();
+      let high = base.saturating_add(options.port_scan_max_offset);
+      if base == high {
+        log::warn!(
+          "proxy listener: port {base} already in use; daemon continues without the proxy"
+        );
+      } else {
+        log::warn!(
+          "proxy listener: ports {base}..={high} all in use; daemon continues without the proxy"
+        );
+      }
+      write_status(&status, ProxyStatus::PortInUse { addr: last_addr });
       return Ok(());
     }
-    Err(e) => {
+    BindOutcome::Failed { addr, error } => {
       log::warn!(
-        "proxy listener: failed to bind {}: {e}; daemon continues without the proxy",
-        addr
+        "proxy listener: failed to bind {addr}: {error}; daemon continues without the proxy"
       );
       // Cap the bind_error string so a pathological OS message cannot
       // bloat the IPC status payload. 256 chars is roomy for typical
       // io::Error strings ("permission denied", etc.).
-      let bind_error: String = e.to_string().chars().take(256).collect();
+      let bind_error: String = error.to_string().chars().take(256).collect();
       write_status(&status, ProxyStatus::Unbound { addr, bind_error });
       return Ok(());
     }
@@ -455,19 +517,89 @@ mod tests {
       .expect("camp bind");
     let camp_addr = camp.local_addr().expect("camp addr");
     // Now ask the proxy to bind the same port — must surface
-    // PortInUse and exit cleanly.
+    // PortInUse and exit cleanly. Strict single-port mode
+    // (`port_scan_max_offset: 0`) so the scan can't silently land on
+    // an adjacent free port and turn the assertion green for the
+    // wrong reason.
     let ctx = MethodContext::new(ShutdownToken::new());
     let state = ProxyState::from_context(&ctx);
     let token = ctx.shutdown.clone();
     let status = new_status_cell();
-    serve(state, camp_addr, token, Arc::clone(&status))
-      .await
-      .expect("bind failure must not error");
+    serve_with_options(
+      state,
+      camp_addr,
+      token,
+      Arc::clone(&status),
+      ServeOptions {
+        port_scan_max_offset: 0,
+        ..ServeOptions::default()
+      },
+    )
+    .await
+    .expect("bind failure must not error");
     let observed = status.read().unwrap().clone();
     match observed {
       ProxyStatus::PortInUse { addr } => assert_eq!(addr, camp_addr),
       other => panic!("expected PortInUse, got {other:?}"),
     }
+    drop(camp);
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn bind_scans_to_next_free_port_when_base_taken() {
+    // Camp on a real port; the proxy will try to bind the same port
+    // and must land one slot up. Bound to localhost ephemeral so the
+    // test never collides with whatever's listening on 11434 on the
+    // dev box.
+    let camp = tokio::net::TcpListener::bind(loopback_addr(0))
+      .await
+      .expect("camp bind");
+    let camp_addr = camp.local_addr().expect("camp addr");
+    let ctx = MethodContext::new(ShutdownToken::new());
+    let state = ProxyState::from_context(&ctx);
+    let token = ctx.shutdown.clone();
+    let status = new_status_cell();
+    // Run the listener under a shutdown so the test can clean up; the
+    // scan should land on `camp_addr.port() + 1` (or higher if that
+    // is also taken on the test host, but the assertion below only
+    // requires "different from camp").
+    let token_for_serve = token.clone();
+    let status_clone = Arc::clone(&status);
+    let handle = tokio::spawn(async move {
+      serve(state, camp_addr, token_for_serve, status_clone)
+        .await
+        .expect("proxy serve returns Ok even on bind failure");
+    });
+    // Poll the status cell until Listening lands — the scan may sleep
+    // a few ms across a few syscalls on a loaded box.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let bound_addr = loop {
+      if let ProxyStatus::Listening { addr } = status.read().unwrap().clone() {
+        break addr;
+      }
+      if std::time::Instant::now() > deadline {
+        panic!(
+          "proxy never reached Listening; status = {:?}",
+          status.read().unwrap().clone()
+        );
+      }
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_ne!(
+      bound_addr, camp_addr,
+      "scan should not have re-bound the camp port"
+    );
+    assert_eq!(
+      bound_addr.ip(),
+      camp_addr.ip(),
+      "scan must stay on the same loopback IP"
+    );
+    let offset = bound_addr.port() - camp_addr.port();
+    assert!(
+      (1..=DEFAULT_PORT_SCAN_MAX_OFFSET).contains(&offset),
+      "scan landed at +{offset}, expected within 1..={DEFAULT_PORT_SCAN_MAX_OFFSET}"
+    );
+    shutdown_proxy(token, handle).await;
     drop(camp);
   }
 

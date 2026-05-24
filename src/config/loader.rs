@@ -91,11 +91,14 @@ pub struct ProxyConfig {
   /// `"disabled"`. Default `true`.
   #[serde(default = "ProxyConfig::default_enabled")]
   pub enabled: bool,
-  /// TCP port the listener binds on `127.0.0.1`. Default `11434` —
-  /// matches Ollama's well-known port so OpenAI-client wrappers that
-  /// hard-code that target see llamastash without reconfiguration.
-  /// The collision is documented in the README / troubleshooting; if
-  /// the port is taken the daemon stays up and surfaces
+  /// Base TCP port for the loopback listener on `127.0.0.1`. Default
+  /// `11434` — matches Ollama's well-known port so OpenAI-client
+  /// wrappers that hard-code that target see llamastash without
+  /// reconfiguration. If the base port is taken (e.g. an actual
+  /// Ollama install is already running), the listener walks up to
+  /// the next five ports (`port..=port+5`) and binds the first free
+  /// slot — see `proxy.status.listen` for the chosen address. If all
+  /// six are taken, the daemon stays up and surfaces
   /// `proxy.status: "port_in_use"`.
   #[serde(default = "ProxyConfig::default_port")]
   pub port: u16,

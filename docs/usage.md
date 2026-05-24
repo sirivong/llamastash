@@ -306,7 +306,7 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 
 ## Proxy (OpenAI-compatible listener)
 
-The daemon binds a single OpenAI-compatible HTTP proxy on `127.0.0.1:11434` (default) so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), the OpenAI SDKs, Cline, llm-cli — can talk to every discovered model through one stable URL. The proxy resolves `body.model` against the same fuzzy matcher `llamastash start <ref>` uses, forwards the request byte-for-byte to the matching `llama-server` child, and streams the response back. If the named model isn't running, the proxy auto-starts it (replaying `last_params`, else `arch_defaults`). If the launch fails and another model is already Ready, the proxy falls back to it and stamps `x-llamastash-served-by` + `x-llamastash-fallback-reason: launch_failed` headers on the response. Substitution is observable; no extra round-trip is needed to discover what served the request. The full mechanism — coalesced launches, family-MRU fallback selection, scope boundaries — is documented in [`docs/plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
+The daemon binds a single OpenAI-compatible HTTP proxy on `127.0.0.1:11434` (default) so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), the OpenAI SDKs, Cline, llm-cli — can talk to every discovered model through one stable URL. If `11434` is taken (e.g. a real Ollama install is already running), the listener walks `proxy.port..=proxy.port+5` and binds the first free port — the actual address is reported via `llamastash status` / the TUI Daemon pane under `proxy.listen`. The proxy resolves `body.model` against the same fuzzy matcher `llamastash start <ref>` uses, forwards the request byte-for-byte to the matching `llama-server` child, and streams the response back. If the named model isn't running, the proxy auto-starts it (replaying `last_params`, else `arch_defaults`). If the launch fails and another model is already Ready, the proxy falls back to it and stamps `x-llamastash-served-by` + `x-llamastash-fallback-reason: launch_failed` headers on the response. Substitution is observable; no extra round-trip is needed to discover what served the request. The full mechanism — coalesced launches, family-MRU fallback selection, scope boundaries — is documented in [`docs/plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
 
 ### Connecting an agent
 
@@ -336,8 +336,8 @@ Shape, all four states:
 { "enabled": true,  "listen": "127.0.0.1:11434", "status": "listening",   "bind_error": null }
 // Config has proxy.enabled: false:
 { "enabled": false, "listen": null,              "status": "disabled",    "bind_error": null }
-// Port already taken (Ollama, etc.):
-{ "enabled": true,  "listen": "127.0.0.1:11434", "status": "port_in_use", "bind_error": null }
+// All six ports in the scan range (port..=port+5) taken:
+{ "enabled": true,  "listen": "127.0.0.1:11439", "status": "port_in_use", "bind_error": null }
 // Bind failed for some other reason (EACCES, EADDRNOTAVAIL, …):
 { "enabled": true,  "listen": "127.0.0.1:80",    "status": "unbound",     "bind_error": "permission denied" }
 ```

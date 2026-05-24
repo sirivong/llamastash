@@ -335,6 +335,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     let status_for_proxy = std::sync::Arc::clone(&proxy_status_cell);
     let serve_opts = proxy::server::ServeOptions {
       header_read_timeout: std::time::Duration::from_secs(opts.proxy.header_read_timeout_secs),
+      ..proxy::server::ServeOptions::default()
     };
     supervisor::spawn_supervised("proxy_listener", async move {
       if let Err(e) = proxy::server::serve_with_options(

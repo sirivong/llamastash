@@ -58,7 +58,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
 
 - [x] ~~Daemon does not restart on ctrl+r~~ — `handle_restart_daemon` was waiting for the old daemon's socket to become unconnectable, but the daemon releases its lockfile _after_ the listener drops (accept-loop exit → drain → `stop_all_managed` → remove socket → drop lockfile). The replacement child's `acquire` raced into that window, hit a contended `flock`, exited with `AlreadyRunning`, and `start_detached` reported a failure with no new daemon coming up — the TUI then stuck on "daemon connecting…" until the user retried. Fix: poll `existing_daemon_pid` (now `pub(crate)`) for `None` instead of socket connectivity, and bump the deadline from 3s → 8s to cover the worst-case `stop_all_managed` grace.
 - [ ] Remap ctrl+r: think to something else
-- [ ] Proxy port should use next available in 1143x range, not hardcoded to 11434. It should start with 11434 and keep trying next if unavailable, up to 11439.
+- [x] ~~Proxy port should use next available in 1143x range, not hardcoded to 11434. It should start with 11434 and keep trying next if unavailable, up to 11439.~~ — `ServeOptions::port_scan_max_offset` (default `5`) drives a sequential `bind_with_scan` over `port..=port+5`; the listener binds the first free slot and reports the actual address via `proxy.listen`. `AddrInUse` advances; any other bind error is fatal (no point pretending the next port will fare better than `EACCES`). All six taken → `proxy.status: "port_in_use"` (same surface as v0). Strict single-port behaviour is preserved for callers (and the regression test) that pass `port_scan_max_offset: 0`.
 - [ ] DRY/YAGNI audit. Move to libs etc.
 
 ### Release checklist

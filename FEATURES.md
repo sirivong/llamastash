@@ -157,6 +157,8 @@ Pin HF downloads to a specific commit for agent and CI workflows. Threaded into 
 
 LlamaStash ships a built-in OpenAI-compatible proxy at `http://127.0.0.1:11434/v1` so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), Cline, llm-cli, the OpenAI SDKs — drives every discovered model through one stable URL. Point the client at the base URL, send `body.model: "<discovered-name>"` (substring + fuzzy match, same rules as `llamastash start <ref>`), and any value as the API key — the proxy ignores auth and is loopback-only.
 
+If `11434` is already taken (e.g. an actual Ollama install is running), the listener walks `11434..=11439` and binds the first free port — `llamastash status` (and the TUI's Settings tab) shows the chosen address under `proxy.listen`. Configure a different base via `proxy.port` in `config.yaml`; the same `port..=port+5` window applies.
+
 If the named model isn't running yet, the proxy auto-starts it. If the launch fails and another model is already `Ready`, the proxy falls back to it and tags the response with `x-llamastash-served-by` + `x-llamastash-fallback-reason` (`launch_failed` for in-family substitution, `family_mismatch` for cross-arch picks) so clients can audit the substitution. The listener is enabled by default; flip `proxy.enabled: false` in `config.yaml` to turn it off.
 
 The full endpoint table, error envelopes, response headers, and config keys live in [`docs/usage.md` § Proxy (OpenAI-compatible listener)](docs/usage.md#proxy-openai-compatible-listener); the manual OpenCode + Pi smoke runbook is at [`tests/proxy_real_client_smoke.md`](tests/proxy_real_client_smoke.md).
