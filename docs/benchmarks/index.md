@@ -6,6 +6,7 @@ Read [methodology.md](methodology.md) before any individual page; it explains th
 
 ## Results
 
+- [2026-05-24](results-2026-05-24.md) — HIP vs Vulkan engine A/B on AMD Strix Halo (gfx1151). Same `small` GGUF, same upstream llama.cpp commit (b9282) built two ways; isolates engine perf from tool perf. **Vulkan ~20% faster than HIP** at decode on this hardware. LlamaStash + raw `llama-server` stay within ~1% on either engine.
 - [2026-05-23](results-2026-05-23.md) — first hardware run. Scope: `small` GGUF (gemma-4-E2B-Q4_K_M, byte-identical across all four tools), AMD ROCm gfx1151 (Strix Halo / Radeon 8060S), both `defaults` + `normalized` modes, `chat_turn` + `agent_decode` workloads, **all four tools** (LlamaStash, raw `llama-server`, Ollama, LM Studio). Each tool uses its own bundled inference engine — same model bytes, different engines.
 
 ## Raw data
