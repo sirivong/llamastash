@@ -77,39 +77,72 @@ class LmStudioDriver(Driver):
     require_on_path("lms", self.INSTALL_HINT)
     self._ensure_server_running()
 
-    argv: list[str] = ["lms", "load", handle.name, "-y"]
-    if mode == Mode.NORMALIZED and knobs is not None:
-      self._append_knobs(argv, knobs)
-
-    load = subprocess.run(
-      argv,
-      capture_output=True,
-      text=True,
-      # `lms load` is the expensive step on a cold model — first
-      # touch of a multi-GB GGUF can outrun the 180s readiness
-      # default. Triple the budget so slow disk reads don't get
-      # surfaced as a driver-error.
-      timeout=max(ready_timeout_from_env() * 3, 600.0),
-      check=False,
-    )
-    if load.returncode != 0:
-      raise DriverError(
-        f"lms load {handle.name} failed: "
-        f"{load.stderr.strip() or load.stdout.strip()}"
-      )
-    self._loaded_key = handle.name
-
+    # Discovered (2026-05-24): `lms load <key>` CLI rejects variant
+    # qualifiers like `google/gemma-4-31b@q4_k_m` and also runs into
+    # opaque "Error loading model. Exit code: null" failures mid-
+    # session on this hardware. The OpenAI-compat shim
+    # (`POST /v1/chat/completions` with `model: "<key>"`) accepts the
+    # same variant qualifiers AND auto-loads on first request — much
+    # more reliable. We do a tiny preflight chat to trigger the load,
+    # which lets the bench's normal warmup rep see a warm model.
     try:
       wait_for_http_200(f"{self._base_url}/v1/models", ready_timeout_from_env())
     except ReadinessTimeoutError as exc:
-      self.stop()
       raise ReadinessTimeoutError(
         f"lmstudio OpenAI shim not ready at {self._base_url} ({exc})"
       ) from exc
+
+    preflight_url = f"{self._base_url}/v1/chat/completions"
+    preflight_payload = {
+      "model": handle.name,
+      "messages": [{"role": "user", "content": "ping"}],
+      "max_tokens": 1,
+      "stream": False,
+      "temperature": 0.0,
+    }
+    try:
+      import urllib.error
+      import urllib.request
+
+      req = urllib.request.Request(
+        preflight_url,
+        data=json.dumps(preflight_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+      )
+      timeout_s = max(ready_timeout_from_env() * 3, 600.0)
+      with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        if resp.status >= 400:
+          raise DriverError(
+            f"lmstudio preflight chat for {handle.name!r} returned HTTP {resp.status}"
+          )
+    except urllib.error.HTTPError as exc:
+      body = exc.read().decode("utf-8", errors="replace")[:200]
+      raise DriverError(
+        f"lmstudio preflight chat for {handle.name!r} returned HTTP "
+        f"{exc.code}: {body}"
+      ) from exc
+    except (urllib.error.URLError, OSError) as exc:
+      raise DriverError(
+        f"lmstudio preflight chat for {handle.name!r} failed: {exc}"
+      ) from exc
+
+    self._loaded_key = handle.name
+    if mode == Mode.NORMALIZED and knobs is not None:
+      # Normalized-mode knobs that the shim doesn't expose (everything
+      # except `ctx` via per-request params) land on unfair_knobs by
+      # virtue of normalized_knobs_supported(); no extra setup here.
+      pass
     return self._base_url
 
   def stop(self) -> None:
     if not self._loaded_key:
+      return
+    # Honour `LLAMASTASH_BENCH_KEEP_IMPORTS=1` so back-to-back cells
+    # against the same modelKey don't pay the ~30s reload cost on
+    # every cell — mirrors the Ollama driver's behaviour.
+    if os.environ.get("LLAMASTASH_BENCH_KEEP_IMPORTS") == "1":
+      self._loaded_key = None
       return
     # `lms unload <modelKey>` releases the loaded slot.
     subprocess.run(
