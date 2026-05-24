@@ -641,7 +641,10 @@ mod tests {
       ..TypedKnobs::default()
     };
     let argv = strs(&argvify(&knobs));
-    assert!(argv.is_empty(), "Some(false) bare bools must not emit the flag");
+    assert!(
+      argv.is_empty(),
+      "Some(false) bare bools must not emit the flag"
+    );
   }
 
   #[test]
