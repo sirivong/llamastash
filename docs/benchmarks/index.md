@@ -6,7 +6,7 @@ Read [methodology.md](methodology.md) before any individual page; it explains th
 
 ## Results
 
-- [2026-05-24](results-2026-05-24.md) — ROCm vs Vulkan engine A/B across **three tools** (LlamaStash, raw `llama-server`, LM Studio) on AMD Strix Halo (gfx1151). For our local upstream llama.cpp builds (b9282), **Vulkan ~17–20% faster than HIP**. For LM Studio's bundled v2.16.0 backends, ROCm ≈ Vulkan within noise — the upstream Vulkan optimisations aren't in LMS's bundle. LlamaStash + raw `llama-server` stay within ~1% on either engine.
+- [2026-05-24](results-2026-05-24.md) — ROCm vs Vulkan engine A/B across **three tools** (LlamaStash, raw `llama-server`, LM Studio) on AMD Strix Halo (gfx1151). For our local upstream llama.cpp builds (b9282), **Vulkan ~17–20% faster than HIP** — consistent with [llama.cpp Issue #13565 (open)](https://github.com/ggml-org/llama.cpp/issues/13565) which tracks poor HIP perf on gfx1151. Our HIP build is missing `GGML_HIP_ROCWMMA_FATTN=ON` (an upstream-documented gfx1151 optimisation) so the HIP number is a **lower bound** — re-run with the proper flag pending. For LM Studio's bundled v2.16.0 backends, ROCm ≈ Vulkan within noise — *cause unverified*. LlamaStash + raw `llama-server` stay within ~1% on either engine.
 - [2026-05-23](results-2026-05-23.md) — first hardware run. Scope: `small` GGUF (gemma-4-E2B-Q4_K_M, byte-identical across all four tools), AMD ROCm gfx1151 (Strix Halo / Radeon 8060S), both `defaults` + `normalized` modes, `chat_turn` + `agent_decode` workloads, **all four tools** (LlamaStash, raw `llama-server`, Ollama, LM Studio). Each tool uses its own bundled inference engine — same model bytes, different engines.
 
 ## Raw data
