@@ -171,7 +171,10 @@ class LlamaStashDriver(Driver):
     if knobs.n_gpu_layers is not None:
       raw_after_dashdash += ["--n-gpu-layers", str(knobs.n_gpu_layers)]
     if knobs.flash_attn is True:
-      raw_after_dashdash += ["--flash-attn"]
+      # Modern llama-server (b9000+) requires `--flash-attn on|off|auto`
+      # and rejects the bare flag; passing it bare causes the next argv
+      # entry to be parsed as the flash-attn value.
+      raw_after_dashdash += ["--flash-attn", "on"]
     if knobs.kv_cache_type is not None:
       raw_after_dashdash += [
         "--cache-type-k", knobs.kv_cache_type,

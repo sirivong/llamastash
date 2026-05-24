@@ -224,13 +224,17 @@ def test_llamacpp_normalized_knobs_emitted_in_canonical_order() -> None:
       ubatch_size=512,
     ),
   )
-  # ctx → -c <N>; n_gpu_layers → --n-gpu-layers <N>; flash → --flash-attn; etc.
+  # ctx → -c <N>; n_gpu_layers → --n-gpu-layers <N>;
+  # flash_attn=True MUST emit `--flash-attn on` (not the bare flag) for
+  # modern llama-server (b9000+), otherwise the next argv entry gets
+  # swallowed as the flash-attn value.
   expected_tail = [
     "-c",
     "4096",
     "--n-gpu-layers",
     "99",
     "--flash-attn",
+    "on",
     "--cache-type-k",
     "q8_0",
     "--cache-type-v",
@@ -337,7 +341,9 @@ def test_llamastash_normalized_knobs_use_long_form() -> None:
   # forwarded to llama-server after `--`.
   assert "--ctx" in argv
   assert "--n-gpu-layers" in raw
-  assert "--flash-attn" in raw
+  # MUST emit `--flash-attn on` to match modern llama-server (b9000+).
+  fa_idx = raw.index("--flash-attn")
+  assert raw[fa_idx + 1] == "on"
 
 
 # ---- find_free_port / env defaults -------------------------------

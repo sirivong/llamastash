@@ -34,11 +34,9 @@ pub fn parse_tail_args(tokens: &[OsString]) -> Result<(TypedKnobs, Vec<OsString>
           // is honoured so a user override actually disables a knob
           // an inherited layer set to `true`. Space-form is consumed
           // only when the next token is a recognised on/off spelling
-          // — upstream llama.cpp PR #15434 (merged 2025-08-30,
-          // first in tag b6325) made `--flash-attn` tri-state
-          // requiring `on|off|auto`, so we mirror the new syntax
-          // here. Anything else stays unconsumed and routes through
-          // extras like before.
+          // — modern llama-server's `--flash-attn` now requires
+          // `on|off|auto`, so we mirror that. Anything else stays
+          // unconsumed and routes through extras like before.
           ValueKind::Bool => {
             if let Some(v) = inline.clone() {
               Some(v)
@@ -265,10 +263,9 @@ mod tests {
 
   #[test]
   fn boolean_space_form_consumes_on_off_value() {
-    // Upstream llama.cpp PR #15434 (first in tag b6325, 2025-08-30)
-    // made `--flash-attn` tri-state: the user's space-form value
-    // must be absorbed rather than left as an orphan positional that
-    // llama-server then rejects.
+    // Modern llama-server requires `--flash-attn on|off|auto`; the
+    // bench harness emits the space form, so the parser must absorb
+    // the value rather than leaving it as an orphan positional.
     let (knobs_on, extras_on) = parse_tail_args(&osvec(&["--flash-attn", "on"])).unwrap();
     assert_eq!(knobs_on.flash_attn, Some(true));
     assert!(

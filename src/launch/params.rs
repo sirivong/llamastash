@@ -250,14 +250,9 @@ fn push_bool(out: &mut Vec<OsString>, canonical: &str, value: Option<bool>) {
   }
 }
 
-/// Upstream llama.cpp [PR #15434](https://github.com/ggml-org/llama.cpp/pull/15434)
-/// (merged 2025-08-30, first in tag **b6325**) made `--flash-attn`
-/// a tri-state argument requiring `on|off|auto` and defaulted it to
-/// `auto`. Any `llama-server` >= b6325 rejects the bare flag —
-/// passing `--flash-attn` alone causes the next argv entry to be
-/// parsed as the flash-attn value. We always emit the explicit
-/// `on`/`off` form so a user-level `Some(false)` actually disables
-/// an inherited `Some(true)` rather than silently dropping.
+/// Modern llama-server (b9000+) requires `--flash-attn on|off|auto`
+/// and rejects the bare flag — passing `--flash-attn` alone causes
+/// the next argv entry to be parsed as the flash-attn value.
 fn push_flash_attn(out: &mut Vec<OsString>, canonical: &str, value: Option<bool>) {
   match value {
     Some(true) => {
@@ -646,10 +641,7 @@ mod tests {
       ..TypedKnobs::default()
     };
     let argv = strs(&argvify(&knobs));
-    assert!(
-      argv.is_empty(),
-      "Some(false) bare bools must not emit the flag"
-    );
+    assert!(argv.is_empty(), "Some(false) bare bools must not emit the flag");
   }
 
   #[test]

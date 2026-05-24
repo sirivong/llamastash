@@ -46,7 +46,7 @@ class LlamaCppDriver(Driver):
     self._proc: Optional[subprocess.Popen] = None
     self._argv: list[str] = []
     self._port: Optional[int] = None
-    self._log_file = None
+    self._stderr_log: Optional[Path] = None
 
   def version_string(self) -> Optional[str]:
     return _capture_version("llama-server")
@@ -76,25 +76,49 @@ class LlamaCppDriver(Driver):
     if mode == Mode.NORMALIZED and knobs is not None:
       self._append_knobs(argv, knobs)
 
+    import tempfile
+
+    self._stderr_log = Path(
+      tempfile.NamedTemporaryFile(
+        prefix="llamacpp-bench-stderr-",
+        suffix=".log",
+        delete=False,
+      ).name
+    )
     self._argv = list(argv)
     self._proc = subprocess.Popen(
       argv,
       stdout=subprocess.DEVNULL,
-      stderr=subprocess.DEVNULL,
+      stderr=self._stderr_log.open("w"),
       **popen_kwargs(),
     )
     base_url = f"http://127.0.0.1:{self._port}"
     try:
       wait_for_http_200(f"{base_url}/v1/models", ready_timeout_from_env())
-    except ReadinessTimeoutError:
+    except ReadinessTimeoutError as exc:
+      log_path = self._stderr_log
+      tail = ""
+      if log_path is not None:
+        try:
+          tail = "\n".join(log_path.read_text().splitlines()[-20:])
+        except OSError:
+          pass
       self.stop()
-      raise
+      raise ReadinessTimeoutError(
+        f"{exc}\nlast stderr lines (from {log_path}):\n{tail}"
+      ) from exc
     return base_url
 
   def stop(self) -> None:
     terminate_process(self._proc)
     self._proc = None
     self._port = None
+    if self._stderr_log is not None:
+      try:
+        self._stderr_log.unlink(missing_ok=True)
+      except OSError:
+        pass
+    self._stderr_log = None
 
   def normalized_knobs_supported(self) -> set[str]:
     return {"ctx", "n_gpu_layers", "flash_attn", "kv_cache_type", "batch_size", "ubatch_size"}
@@ -118,7 +142,10 @@ class LlamaCppDriver(Driver):
     if knobs.n_gpu_layers is not None:
       argv += ["--n-gpu-layers", str(knobs.n_gpu_layers)]
     if knobs.flash_attn is True:
-      argv += ["--flash-attn"]
+      # Modern llama-server (b9000+) requires `--flash-attn on|off|auto`
+      # and rejects the bare flag. Bare form caused the next argv entry
+      # (often `--cache-type-k`) to be parsed as the flash-attn value.
+      argv += ["--flash-attn", "on"]
     if knobs.kv_cache_type is not None:
       argv += ["--cache-type-k", knobs.kv_cache_type, "--cache-type-v", knobs.kv_cache_type]
     if knobs.batch_size is not None:
