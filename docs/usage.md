@@ -346,6 +346,43 @@ Set the OpenAI base URL to `http://127.0.0.1:11435/v1` (default mode) or `http:/
 
 Verify the exact env var name against the client's current docs if you're automating — names drift. The manual smoke runbook at [`tests/proxy_real_client_smoke.md`](../tests/proxy_real_client_smoke.md) carries the maintainer's verified OpenCode + Pi sequences.
 
+#### OpenCode setup
+
+Point OpenCode at the proxy's current `proxy.listen` address. The
+default is `http://127.0.0.1:11435/v1`, but if that port is busy
+llamastash will roam up to the next free port (for example `11436`), so
+check `llamastash status --json | jq -r .proxy.listen` first.
+
+```json
+"llamastash": {
+  "npm": "@ai-sdk/openai-compatible",
+  "name": "llamastash proxy (local)",
+  "options": {
+    "baseURL": "http://127.0.0.1:11436/v1"
+  },
+  "models": {
+    "Qwen3.6-27B-Q4_K_M": {
+      "name": "Qwen3.6 27B Q4_K_M (via llamastash)",
+      "limit": {
+        "context": 262144,
+        "output": 16384
+      }
+    },
+    "Qwen3.6-27B-Q6_K": {
+      "name": "Qwen3.6 27B Q6_K (via llamastash)",
+      "limit": {
+        "context": 262144,
+        "output": 16384
+      }
+    }
+  }
+}
+```
+
+The model keys must match what you send in `body.model`; llamastash
+will resolve that name against the catalog and auto-start the target if
+needed.
+
 > **Auth posture.** The proxy has **no authentication** by design. It binds loopback-only (`127.0.0.1`), so the threat model is "same machine, any UID can issue requests." Don't run llamastash on a shared host or expose the port; the proxy refuses to bind anything but loopback and the daemon ships no `--host` / `--bind` / `--api-key` knob. LAN exposure, auth, and TLS are deferred follow-ups (see the roadmap in [`TODO.md`](../TODO.md) and the v1 R34 deferral kept in [`AGENTS.md`](../AGENTS.md)).
 
 ### Is the proxy up?
@@ -358,7 +395,7 @@ Shape, all four states:
 
 ```json
 // Listening on the configured port:
-{ "enabled": true,  "listen": "127.0.0.1:11434", "status": "listening",   "bind_error": null }
+{ "enabled": true,  "listen": "127.0.0.1:11435", "status": "listening",   "bind_error": null }
 // Config has proxy.enabled: false:
 { "enabled": false, "listen": null,              "status": "disabled",    "bind_error": null }
 // All six ports in the scan range (port..=port+5) taken:
