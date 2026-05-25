@@ -6,6 +6,7 @@ LlamaStash spawns the **unmodified upstream `llama-server`**. Two distinct quest
 |---|---|---|
 | **A — overhead regression** | Does `llamastash start <model>` add measurable overhead on top of raw `llama-server` for the same effective argv? | [`docs/benchmarks/overhead/`](benchmarks/overhead/) |
 | **B — cross-tool comparison** | How does LlamaStash-as-shipped compare to Ollama and LM Studio on the same model, same hardware, driven through their OpenAI-compatible HTTP endpoints? | [`docs/benchmarks/runs/`](benchmarks/runs/) |
+| **C — proxy overhead** | Does going through the LlamaStash OpenAI-compat proxy cost anything vs hitting the same `llama-server` directly? | [`docs/benchmarks/proxy/`](benchmarks/proxy/) |
 
 Both suites are driven by the harness under `scripts/bench/`. Per-cell JSONs are checked into the repo so every published chart is reproducible from source — see [§Re-running](#re-running) below.
 
@@ -55,6 +56,12 @@ Suite A runs `llamastash start <model>` and raw `llama-server` back-to-back with
 
 The orchestrator also asserts argv **byte-equality** (after stripping `--port`) so there's no place for a hidden tweak to hide. Per-host results land in [`docs/benchmarks/overhead/<host-id>/`](benchmarks/overhead/). Thresholds are tunable in `scripts/bench/overhead/thresholds.json`.
 
+## Proxy overhead (Suite C)
+
+Suite C brings up one model via `llamastash start --port <N>`, then runs `chat_turn` alternating between the direct `llama-server` port and the proxy on `127.0.0.1:11434`. Same `llama-server` process behind both URLs — the delta isolates the proxy's per-request cost (header parse, model resolve, route decision, upstream connect; the SSE body is forwarded byte-pure).
+
+First result on `deepu-flowz13-arch` (gemma-4-E2B-it-Q4_K_M, 15 measured reps): **TTFT p50 +0.45 ms** (52.37 → 52.82 ms), **decode p50 unchanged** (92.80 → 92.70 tok/s). Full method + per-rep distribution → [`docs/benchmarks/proxy/results.md`](benchmarks/proxy/results.md).
+
 ## Re-running
 
 Both suites are maintainer-run; nothing in CI fires them.
@@ -63,6 +70,7 @@ Both suites are maintainer-run; nothing in CI fires them.
 make bench-end-to-end -- --dry-run   # print the planned Suite B matrix
 make bench-end-to-end                 # run Suite B (cross-tool)
 make bench-overhead                   # run Suite A (overhead)
+scripts/bench/proxy/run.sh --model <gguf>   # run Suite C (proxy vs direct)
 make bench-test                       # harness unit tests only — no benchmark spawn
 make bench-table                      # pivot existing JSONs into the headline summary
 ```
@@ -77,6 +85,8 @@ docs/benchmarks/
 ├── runs/                         # Suite B per-host JSONs (cross-tool)
 │   └── <host-id>/<YYYY-MM-DD>-<hms>-<sha>.json
 ├── overhead/                     # Suite A per-host JSONs (overhead regression)
+│   └── <host-id>/<YYYY-MM-DD>-<sha>.json
+├── proxy/                        # Suite C per-host JSONs (proxy vs direct)
 │   └── <host-id>/<YYYY-MM-DD>-<sha>.json
 ├── methodology.md                # The fairness contract — read first
 ├── index.md                      # Chronological index of all published runs

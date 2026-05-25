@@ -130,7 +130,7 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 ## Benchmarks
 
-LlamaStash spawns the unmodified upstream `llama-server`. Two suites track what that means in practice — **Suite A** asserts the wrapper adds no measurable overhead vs raw `llama-server`, **Suite B** compares LlamaStash-as-shipped against Ollama + LM Studio on the same hardware through their OpenAI-compatible endpoints. Full write-up + per-workload tables: [`docs/benchmarks.md`](docs/benchmarks.md).
+LlamaStash spawns the unmodified upstream `llama-server`. Three suites track what that means in practice — **Suite A** asserts the wrapper adds no measurable overhead vs raw `llama-server`, **Suite B** compares LlamaStash-as-shipped against Ollama + LM Studio on the same hardware through their OpenAI-compatible endpoints, **Suite C** measures the proxy hop vs hitting `llama-server` directly (TTFT p50 +0.45 ms, decode unchanged). Full write-up + per-workload tables: [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ### AMD APU - Linux (Ryzen AI Max+ 395 / Radeon 8060S, `gfx1151`, llama.cpp `b9282`)
 
