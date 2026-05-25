@@ -57,6 +57,12 @@ bench-end-to-end: .venv/bin/python
 bench-overhead: .venv/bin/python
 	@scripts/bench/overhead/run.sh $(filter-out $@,$(MAKECMDGOALS))
 
+## Suite C proxy-overhead runner: chat_turn alternating between the direct
+## llama-server port and the proxy on 127.0.0.1:11434 against one model.
+## Forwards args (e.g. `--model <gguf>`, `--measured 15`) to the orchestrator.
+bench-proxy: .venv/bin/python
+	@scripts/bench/proxy/run.sh $(filter-out $@,$(MAKECMDGOALS))
+
 ## Run the bench harness's own pytest suite (unit tests for schema,
 ## drivers, workloads, render). Real benchmarks are launched via the
 ## `bench-*` targets above; this only exercises the harness code.

@@ -58,9 +58,11 @@ The orchestrator also asserts argv **byte-equality** (after stripping `--port`) 
 
 ## Proxy overhead (Suite C)
 
-Suite C brings up one model via `llamastash start --port <N>`, then runs `chat_turn` alternating between the direct `llama-server` port and the proxy on `127.0.0.1:11434`. Same `llama-server` process behind both URLs — the delta isolates the proxy's per-request cost (header parse, model resolve, route decision, upstream connect; the SSE body is forwarded byte-pure).
+Suite C answers a simple question: if you talk to the LlamaStash proxy instead of `llama-server` directly, does it cost you anything?
 
-First result on `deepu-flowz13-arch` (gemma-4-E2B-it-Q4_K_M, 15 measured reps): **TTFT p50 +0.45 ms** (52.37 → 52.82 ms), **decode p50 unchanged** (92.80 → 92.70 tok/s). Full method + per-rep distribution → [`docs/benchmarks/proxy/results.md`](benchmarks/proxy/results.md).
+The harness brings up one model, then sends the same chat request to both URLs (direct port + proxy on `127.0.0.1:11434`), alternating one-for-one. Same `llama-server` behind both.
+
+First result on `deepu-flowz13-arch` (gemma-4-E2B-it-Q4_K_M, 15 requests each side): **time-to-first-token +0.45 ms at the median** (52.37 → 52.82 ms), **tokens/sec unchanged** (92.80 → 92.70). Full numbers and method → [`docs/benchmarks/proxy/results.md`](benchmarks/proxy/results.md).
 
 ## Re-running
 
@@ -70,7 +72,7 @@ Both suites are maintainer-run; nothing in CI fires them.
 make bench-end-to-end -- --dry-run   # print the planned Suite B matrix
 make bench-end-to-end                 # run Suite B (cross-tool)
 make bench-overhead                   # run Suite A (overhead)
-scripts/bench/proxy/run.sh --model <gguf>   # run Suite C (proxy vs direct)
+make bench-proxy -- --model <gguf>    # run Suite C (proxy vs direct)
 make bench-test                       # harness unit tests only — no benchmark spawn
 make bench-table                      # pivot existing JSONs into the headline summary
 ```

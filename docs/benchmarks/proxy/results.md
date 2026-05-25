@@ -1,57 +1,50 @@
 # Proxy overhead — LlamaStash proxy vs direct `llama-server`
 
-**Headline:** the LlamaStash OpenAI-compat proxy adds no measurable
-per-request overhead compared to hitting the same `llama-server`
-process directly. TTFT delta is sub-ms at the median; decode
-throughput is unchanged.
+**Question:** if a client hits the LlamaStash proxy instead of talking
+to `llama-server` directly, does it slow anything down?
 
-## Setup
+**Answer:** no. Time-to-first-token is within half a millisecond at
+the median; tokens-per-second is the same.
 
-- Host: `deepu-flowz13-arch` (Ryzen AI Max+ 395, Radeon 8060S gfx1151, 121 GiB)
-- llama.cpp: HIP build, b9282
-- Model: `gemma-4-E2B-it-Q4_K_M.gguf` (small class)
-- Workload: `chat_turn` (short prompt, 64-token decode), 1 warmup + 15
-  measured reps per phase, alternating direct/proxy per rep so any
-  warmup or thermal drift hits both sides equally
-- Daemon was already up; the same `llama-server` was started via
-  `llamastash start --port 18000`, then queried both directly
-  (`http://127.0.0.1:18000`) and via the proxy
-  (`http://127.0.0.1:11434`)
+## What was tested
 
-Run the harness yourself:
+Started one model with `llamastash start --port 18000`, then sent the
+same chat request to two URLs back-to-back:
 
-```sh
-scripts/bench/proxy/run.sh --model /path/to/gemma-4-E2B-it-Q4_K_M.gguf --measured 15
-```
+- **Direct:** `http://127.0.0.1:18000/v1/chat/completions`
+- **Proxy:** `http://127.0.0.1:11434/v1/chat/completions`
 
-## Numbers
+Same `llama-server` process behind both URLs. 1 warmup + 15 measured
+chat requests per URL, alternating one direct → one proxy → one
+direct → … so any timing drift hits both sides equally.
 
-| Path   | TTFT mean (ms) | TTFT p50 (ms) | TTFT max (ms) | decode mean (tok/s) | decode p50 (tok/s) |
-|--------|---:|---:|---:|---:|---:|
-| direct | 52.26 | 52.37 | 61.05 | 93.89 | 92.80 |
-| proxy  | 54.91 | 52.82 | 83.69 | 94.17 | 92.70 |
-| **Δ**  | **+2.65** | **+0.45** | — | **+0.28** | **−0.10** |
+- Host: AMD Strix Halo (Ryzen AI Max+ 395, Radeon 8060S, 121 GiB)
+- Model: `gemma-4-E2B-it-Q4_K_M`
+- Request: ~50 tokens in, 64 tokens out
 
-- TTFT mean delta is dominated by one proxy outlier (rep 12, 83.7 ms);
-  excluding it brings the proxy mean to ~52.8 ms — same as direct p50.
-- Decode throughput is identical at the median; the +0.28 tok/s mean
-  delta is well inside the ±3.6% stddev of the proxy phase.
+## Results
+
+|        | TTFT median | TTFT mean | tok/s median | tok/s mean |
+|--------|---:|---:|---:|---:|
+| Direct | 52.37 ms | 52.26 ms | 92.80 | 93.89 |
+| Proxy  | 52.82 ms | 54.91 ms | 92.70 | 94.17 |
+| **Δ**  | **+0.45 ms** | **+2.65 ms** | **−0.10** | **+0.28** |
+
+TTFT = time-to-first-token (how long before the first output chunk
+arrives). Lower is better. tok/s = output throughput after the first
+token. Higher is better.
+
+The TTFT mean delta of +2.65 ms is from a single proxy request that
+took 83 ms (vs ~52 ms for everything else). Drop that one outlier and
+the means match too.
 
 Raw run: [`deepu-flowz13-arch/2026-05-25-98506aedc023.json`](deepu-flowz13-arch/2026-05-25-98506aedc023.json).
 
-## Why decode throughput is unchanged
+## Run it yourself
 
-Measured separately, but consistent with the proxy's implementation:
-`build_streaming_response` in `src/proxy/forward.rs` uses
-`reqwest::Response::bytes_stream()` and pipes the chunks through
-hyper's `StreamBody` without inspecting or re-encoding them. SSE bytes
-flow upstream → client as-is, so the only place the proxy *can* add
-latency is the request-path work (header parse, model resolution,
-route decision, opening the upstream connection). That request-path
-cost is what the small TTFT delta captures.
+```sh
+make bench-proxy -- --model /path/to/gemma-4-E2B-it-Q4_K_M.gguf --measured 15
+```
 
-## Verdict
-
-R1 ship-blocker: cleared. The proxy is a free hop for clients that
-want the routing/discovery layer and is interchangeable with a direct
-`llama-server` endpoint for raw chat-completion performance.
+Requires the daemon running (`llamastash daemon start`) and the
+proxy enabled (it is by default — see `llamastash status --json`).

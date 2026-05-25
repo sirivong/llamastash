@@ -27,7 +27,7 @@ Each subdirectory is one folder per host-id; files are named `<YYYY-MM-DD>-<comm
 ```sh
 make bench-end-to-end           # Suite B (cross-tool)
 make bench-overhead             # Suite A (overhead vs raw llama-server)
-scripts/bench/proxy/run.sh ...  # Suite C (proxy vs direct llama-server) — see results.md for invocation
+make bench-proxy -- --model <gguf>  # Suite C (proxy vs direct llama-server) — see proxy/results.md
 make bench-test                 # harness unit tests only — no real benchmark spawn
 ```
 

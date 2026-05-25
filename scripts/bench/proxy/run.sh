@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Suite C wrapper. Bootstraps .venv if needed and forwards args to
-# the Python orchestrator.
+# the Python orchestrator. Usually invoked via `make bench-proxy`.
 #
-#   scripts/bench/proxy/run.sh --dry-run
-#   scripts/bench/proxy/run.sh --model /path/to/gemma-4-E2B-it-Q4_K_M.gguf
+#   make bench-proxy -- --dry-run
+#   make bench-proxy -- --model /path/to/gemma-4-E2B-it-Q4_K_M.gguf
 #
 # Output JSON lands under docs/benchmarks/proxy/<host-id>/<date>-<sha>.json.
 
