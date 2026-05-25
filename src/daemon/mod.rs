@@ -87,8 +87,9 @@ pub struct DaemonOptions {
   /// from an empty `Cli` and silently ignores the user's flags.
   pub propagated_cli_args: Vec<std::ffi::OsString>,
   /// OpenAI-compat proxy router config (enabled flag + loopback
-  /// port). Sourced from the user's `[proxy]` section; defaults to
-  /// enabled on `127.0.0.1:11434`. Tests that don't care about the
+  /// port). Sourced from the user's `[proxy]` section; enabled by
+  /// default. Normal mode prefers `127.0.0.1:11435`; Ollama-compat
+  /// mode prefers `127.0.0.1:11434`. Tests that don't care about the
   /// proxy can keep the default — the listener binds on an
   /// unprivileged port and is best-effort (bind failure is
   /// non-fatal).

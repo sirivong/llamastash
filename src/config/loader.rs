@@ -66,9 +66,11 @@ pub struct Config {
   /// wizard no longer writes this field; it remains as a hand-edited
   /// escape hatch for users overriding a built-in row.
   pub arch_defaults: BTreeMap<String, TypedKnobs>,
-  /// OpenAI-compat proxy router. Enabled by default on
-  /// `127.0.0.1:11434` so agent clients (OpenCode, Pi) can attach to
-  /// one stable URL and route by `body.model`. See
+  /// OpenAI-compat proxy router. Enabled by default so agent clients
+  /// (OpenCode, Pi) can attach to one stable URL and route by
+  /// `body.model`. In normal mode the listener prefers
+  /// `127.0.0.1:11435`; in Ollama-compat mode it prefers
+  /// `127.0.0.1:11434`. See
   /// docs/plans/2026-05-21-001-feat-proxy-router-plan.md for the
   /// rationale. Unknown keys inside `[proxy]` are rejected loudly so
   /// a typo never silently falls back to defaults — separate posture

@@ -23,7 +23,7 @@ use super::mru::MruTracker;
 /// scheduler boundaries.
 ///
 /// Catalog / supervisor registry / persisted state / launch env are
-/// reached through [`ProxyState::ctx`] (the IPC `MethodContext`) so
+/// reached through the embedded [`MethodContext`] so
 /// there is a single source for daemon-side handles — no duplication
 /// between flattened fields and `ctx`, which would let readers drift
 /// out of sync with each other.

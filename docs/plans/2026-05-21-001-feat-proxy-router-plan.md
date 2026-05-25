@@ -122,7 +122,7 @@ Sources consulted: [tokio-rs/axum#2566](https://github.com/tokio-rs/axum/discuss
 sequenceDiagram
     autonumber
     participant Agent as OpenCode / Pi
-    participant Proxy as Proxy listener<br/>(in-process, 127.0.0.1:11434)
+    participant Proxy as Proxy listener<br/>(in-process, 127.0.0.1:11435 default)
     participant Catalog as ModelCatalog<br/>(in-process)
     participant Sup as Supervisor<br/>(in-process)
     participant LS as llama-server<br/>(127.0.0.1:<port>)
@@ -165,7 +165,7 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 
 ## Implementation Units
 
-- [ ] **Unit 1: HTTP runtime scaffold + config**
+- [x] **Unit 1: HTTP runtime scaffold + config**
 
 **Goal:** Land the `hyper` + `hyper-util` + `http-body-util` dependencies, the `src/proxy/` module skeleton, the `[proxy]` config section, and the listener boot sequence inside `run_foreground`. The listener answers `/health` only; every other route returns `501 Not Implemented`. Also verify llama-server's `response.model` echo behavior so Unit 3's pass-through strategy holds.
 
@@ -180,7 +180,7 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 - Create: `src/proxy/router.rs` — the `service_fn` body: `match (req.method(), req.uri().path())` dispatching to handler functions
 - Create: `src/proxy/state.rs` — `ProxyState` struct (catalog, supervisors, persisted state, launch env handles cloned from `MethodContext`)
 - Modify: `src/lib.rs` — `pub mod proxy;`
-- Modify: `src/config/mod.rs` (and the loader sub-module) — add `ProxyConfig { enabled: bool (default true), port: u16 (default 11434) }`
+- Modify: `src/config/mod.rs` (and the loader sub-module) — add `ProxyConfig { enabled: bool (default true), port: Option<u16> }` with the effective default derived from mode (`11435` in normal mode, `11434` in Ollama-compat mode)
 - Modify: `src/daemon/mod.rs` — wire `proxy::serve` spawn into `run_foreground` alongside `host_metrics::spawn` and `server::serve`. Bind error → log warning, leave `ProxyStatus::PortInUse` in the shared cell; daemon keeps running.
 - Create: `src/proxy/tests/echo_verification.rs` (or inline `#[cfg(test)] mod tests`) — manual-run test against `fake_llama_server` that posts `{"model":"sentinel-name", ...}` and asserts `response.model == "sentinel-name"`. Documents the contract on which Unit 3 depends.
 - Test: `src/proxy/server.rs` inline tests for the `/health` and `/501` stub paths.
@@ -200,8 +200,8 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 - `src/config/loader.rs` — config parsing + unknown-key rejection.
 
 **Test scenarios:**
-- Happy path: daemon starts with `proxy.enabled: true, port: 11434`; `curl 127.0.0.1:11434/health` returns 200 + `{"status":"ok","models_loaded":0,"models_discovered":0}` (counts depend on catalog state — test asserts shape, not exact numbers).
-- Happy path: `curl -X POST 127.0.0.1:11434/v1/chat/completions -d '{}'` returns 501.
+- Happy path: daemon starts with `proxy.enabled: true`; in normal mode `curl 127.0.0.1:11435/health` returns 200 + `{"status":"ok","models_loaded":0,"models_discovered":0}` (counts depend on catalog state — test asserts shape, not exact numbers).
+- Happy path: `curl -X POST 127.0.0.1:11435/v1/chat/completions -d '{}'` returns 501.
 - Edge case: `proxy.enabled: false` → daemon starts, no listener bound, IPC `status` reports `proxy.status: "disabled"`.
 - Edge case: port already in use (test binds the port first, then starts the daemon) → daemon starts anyway, IPC `status` reports `proxy.status: "port_in_use"`.
 - Edge case: unknown `proxy.foo: bar` config key → daemon refuses to start, error message names the unknown key.
@@ -210,10 +210,10 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 
 **Verification:**
 - `cargo test --features test-fixtures proxy` passes.
-- A live daemon answers `/health` on the configured port; `lsof -i :11434` shows the daemon process.
+- A live daemon answers `/health` on the configured port; `lsof -i :11435` shows the daemon process in normal mode.
 - IPC `status` response includes the `proxy` block with the expected status value across the four config/port states.
 
-- [ ] **Unit 2: `/v1/models` endpoint**
+- [x] **Unit 2: `/v1/models` endpoint**
 
 **Goal:** Implement `/v1/models` returning all discovered models in OpenAI shape, sorted alphabetically.
 
@@ -243,9 +243,9 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 - Integration: response is valid JSON parseable by the OpenAI Python/Node client's `/v1/models` deserializer (test with a recorded fixture if practical; otherwise schema-match against an OpenAI sample).
 
 **Verification:**
-- `curl 127.0.0.1:11434/v1/models | jq '.data | length'` returns the same count as `llamastash list --json | jq '.models | length'`.
+- `curl 127.0.0.1:11435/v1/models | jq '.data | length'` returns the same count as `llamastash list --json | jq '.models | length'` in normal mode.
 
-- [ ] **Unit 3: Name resolution + HTTP forwarding for Ready models**
+- [x] **Unit 3: Name resolution + HTTP forwarding for Ready models**
 
 **Goal:** Wire `body.model` extraction → `resolve_model` → look up the running supervisor's port → forward the request via `reqwest` and stream the response. Includes the response-header emission contract. No auto-start yet; the route returns 503 for unmatched-and-not-running models. This unit lands the routing and pass-through plumbing in isolation so Unit 4 can layer launch + fallback on top.
 
@@ -293,10 +293,10 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 - Error path: upstream connection dies mid-stream → client connection closes; no panic, no log spam.
 
 **Verification:**
-- `curl http://127.0.0.1:11434/v1/chat/completions -d '{"model":"<running>", ...}'` returns the same body as `curl http://127.0.0.1:<port>/v1/chat/completions -d '{...}'` directly to the model's port.
+- `curl http://127.0.0.1:11435/v1/chat/completions -d '{"model":"<running>", ...}'` returns the same body as `curl http://127.0.0.1:<port>/v1/chat/completions -d '{...}'` directly to the model's port in normal mode.
 - `cargo test --features test-fixtures proxy_routing` green.
 
-- [ ] **Unit 4: Auto-start + single-flight coalescing + family-MRU fallback**
+- [x] **Unit 4: Auto-start + single-flight coalescing + family-MRU fallback**
 
 **Goal:** When the resolved model isn't running, launch it via the same path `start_model` uses; wait for `Ready` indefinitely (only `Error{cause}` triggers fallback); coalesce concurrent same-model requests; on `Error{cause}` pick family-MRU then any-MRU then 503.
 
@@ -345,10 +345,10 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 - Integration: while a fallback request is in-flight, the original-target model becomes Ready (e.g., a separate manual start) → the in-flight fallback request continues against its chosen fallback; the *next* request for the original model hits it directly.
 
 **Verification:**
-- `curl http://127.0.0.1:11434/v1/chat/completions -d '{"model":"<not-running>", ...}'` starts the model and returns a 200 with no fallback headers.
+- `curl http://127.0.0.1:11435/v1/chat/completions -d '{"model":"<not-running>", ...}'` starts the model and returns a 200 with no fallback headers in normal mode.
 - A test that injects launch failure produces a 200 with `x-llamastash-served-by` and `x-llamastash-fallback-reason` headers set.
 
-- [ ] **Unit 5: Status surface — IPC, CLI `status --json`, TUI indicator**
+- [x] **Unit 5: Status surface — IPC, CLI `status --json`, TUI indicator**
 
 **Goal:** Surface the proxy's state through every UI llamastash already has. IPC `status` gains a `proxy` block; `status --json` mirrors it; TUI shows a footer indicator (and a toast on `port_in_use`).
 
@@ -359,7 +359,7 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 **Files:**
 - Modify: `src/ipc/methods.rs` — `status` handler reads `ProxyState.status` (or a separate shared `Arc<RwLock<ProxyStatus>>`) and adds the `proxy` field to the response
 - Modify: `src/cli/output.rs` — `status_json` includes the `proxy` block; the human-readable status table gets a `proxy` row when enabled
-- Modify: `src/tui/` (specifically the footer / status-bar renderer; concrete file TBD during the unit — likely `src/tui/views/footer.rs` or equivalent) — render a one-glyph indicator (e.g., `⚡ 127.0.0.1:11434` when listening, dimmed when disabled, red when port_in_use)
+- Modify: `src/tui/` (specifically the footer / status-bar renderer; concrete file TBD during the unit — likely `src/tui/views/footer.rs` or equivalent) — render a one-glyph indicator (e.g., `⚡ 127.0.0.1:11435` in normal mode when listening, dimmed when disabled, red when port-in-use)
 - Modify: `src/tui/events.rs` — toast on `proxy.status` transition to `port_in_use` (reuse the `2f680c7` writer-task-launch-failure toast pattern)
 - Test: `src/ipc/methods.rs` inline tests for the new field; `src/cli/output.rs` round-trip tests adding proxy cases; a TUI snapshot test if those exist for footer rendering
 
@@ -369,7 +369,7 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
   ```json
   "proxy": {
     "enabled": true,
-    "listen": "127.0.0.1:11434",
+    "listen": "127.0.0.1:11435",
     "status": "listening",
     "bind_error": null
   }
@@ -383,10 +383,10 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 - Toast pattern from commit `2f680c7`.
 
 **Test scenarios:**
-- Happy path: daemon running with proxy enabled and bound → IPC `status` carries `proxy.status: "listening"`, `proxy.listen: "127.0.0.1:11434"`, `proxy.bind_error: null`.
+- Happy path: daemon running with proxy enabled and bound → IPC `status` carries `proxy.status: "listening"`, `proxy.listen: "127.0.0.1:11435"` in normal mode, `proxy.bind_error: null`.
 - Happy path: `llamastash status --json` includes the same `proxy` block byte-for-byte (same shape as IPC).
 - Edge case: config has `proxy.enabled: false` → `proxy.status: "disabled"`, `listen` field absent or `null`.
-- Edge case: port 11434 already taken by another process → `proxy.status: "port_in_use"`, `bind_error: null`, `listen: "127.0.0.1:11434"` (the *attempted* address).
+- Edge case: the preferred port is already taken by another process → `proxy.status: "port_in_use"`, `bind_error: null`, `listen` reflects the *attempted* address (`127.0.0.1:11435` in normal mode, `127.0.0.1:11434` in Ollama-compat mode).
 - Edge case: bind fails with EACCES (low-port simulation if feasible) → `proxy.status: "unbound"`, `bind_error: "permission denied"`.
 - TUI: launching the TUI against a healthy daemon shows the proxy footer indicator.
 - TUI: launching the TUI when proxy is in `port_in_use` state shows a toast on first focus.
@@ -395,7 +395,7 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 - `llamastash status --json | jq .proxy` returns the spec'd shape in each of the four states.
 - IPC `status` shape matches the docstring in `MethodContext` (which is updated to mention `proxy`).
 
-- [ ] **Unit 6: Documentation + config example + smoke tests against real clients**
+- [x] **Unit 6: Documentation + config example + smoke tests against real clients**
 
 **Goal:** Update every doc surface that drifts under R163, finalize the config example, and confirm OpenCode + Pi (pi.dev) work end-to-end.
 
@@ -481,7 +481,7 @@ The hot path (Ready model, no fallback) is exactly two HashMap lookups + one req
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | `llama-server` rewrites `body.model` in its response instead of echoing | Low | High (breaks the pass-through claim; we'd need per-chunk SSE rewriting on fallback) | Unit 1 includes the echo-verification test. If the assumption breaks, revisit R156: the falsifying outcome is "response.model reflects the served model name; agents read `x-llamastash-served-by` for canonical info" — a small spec revision, not a re-architecture. Update the brainstorm in the same PR if so. |
-| Port 11434 collision with Ollama on the same machine | High | Medium (proxy refuses to bind, user sees `port_in_use`, must edit config) | The behavior is documented; the status field carries the cause; the README mentions the collision. Long-term: revisit default port if real users hit it (e.g., 11435 or a llamastash-reserved port if/when one is registered). |
+| Default-mode port collision with another local listener | Medium | Medium (proxy refuses to bind, user sees `port_in_use`, may need to edit config) | Normal mode prefers `11435` specifically to avoid colliding with Ollama on `11434`; Ollama-compat mode still intentionally claims `11434`. The status field carries the attempted address and the README documents both modes. |
 | R160 latency targets unachievable in practice with fuzzy resolution over 200+ models | Medium | Low (target slips; functionality unaffected) | The targets are aspirational. Unit 7 reports actual numbers; R160 gets revised in the brainstorm if reality forces it. The "negligible overhead" promise is what matters; specific numbers serve as guardrails. |
 | Concurrent requests for the same dormant model trigger two launches (single-flight bug) | Medium | Medium (resource waste + potential port-allocation conflict) | Unit 4's coalesce test explicitly exercises this; passing the test is the gating signal. The `Notify` pattern is well-trodden in the codebase. |
 | Reqwest connection pool exhaustion under high concurrency | Low | Medium | Default pool size is 100 per host; well above realistic concurrent-agent counts on a single-user box. Revisit if anyone reports it. |

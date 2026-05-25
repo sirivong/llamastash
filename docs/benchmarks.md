@@ -1,6 +1,6 @@
 # LlamaStash benchmarks
 
-LlamaStash spawns the **unmodified upstream `llama-server`**. Two distinct questions follow from that, and there's a suite for each:
+LlamaStash spawns the **unmodified upstream `llama-server`**. Three distinct questions follow from that, and there's a suite for each:
 
 | Suite | Question | Lives in |
 |---|---|---|
@@ -19,14 +19,14 @@ Each cross-tool run pits LlamaStash against raw `llama-server`, Ollama, and LM S
 ### AMD APU - Linux
 
 **Hardware:** AMD Ryzen AI Max+ 395 ("Strix Halo") · Radeon 8060S iGPU (RDNA 3.5, `gfx1151`) · 121 GiB unified RAM · 70 W TDP · Linux  
-**Date:** 2026-05-24 · **llama.cpp commit:** `b9282` (HIP build, `GGML_HIP_ROCWMMA_FATTN=OFF`)  
-**Tools:** LlamaStash (b9282 HIP), raw `llama-server` (same binary), Ollama 0.24.0, LM Studio 2.16.0  
+**Date:** 2026-05-24 · **llama.cpp build recorded in the benchmark JSONs:** `9245 (b39a7bf1b)` (HIP build, `GGML_HIP_ROCWMMA_FATTN=OFF`)  
+**Tools:** LlamaStash (local HIP build), raw `llama-server` (same binary), Ollama 0.24.0, LM Studio 2.16.0  
 **Workloads:** `chat_turn`, `agent_decode`, `rag_prefill`, `parallel_4` (1 warmup + 3 measured reps per cell, variance-gated at 10%)
 
 | Tool | small (E2B Q4) | mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes |
 |---|---:|---:|---:|---:|---|
-| **LlamaStash** | **86.9 / 51** | 9.8 / 467 | **7.4 / 417** | **42.6 / 181** | b9282 HIP/ROCm |
-| raw `llama-server` | 84.9 / 52 | 9.9 / 468 | 7.4 / 414 | 42.7 / 186 | b9282 HIP/ROCm |
+| **LlamaStash** | **86.9 / 51** | 9.8 / 467 | **7.4 / 417** | **42.6 / 181** | local HIP/ROCm |
+| raw `llama-server` | 86.0 / 51 | 9.9 / 468 | 7.4 / 414 | 42.7 / 186 | local HIP/ROCm |
 | LM Studio | **91.1** / 187 | **11.6** / 1 477 | **7.9** / 1 274 | 37.0 / 683 | small=ROCm, mid/large=Vulkan¹ |
 | Ollama 0.24.0 | 50.4 / 223 | 4.8 / 1 092 | 2.6 / 1 745 | 12.1 / 476 | bundled |
 

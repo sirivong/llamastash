@@ -74,7 +74,7 @@ flowchart LR
 
 - **Daemon-on-demand.** The TUI and CLI both try to attach to the daemon socket first. If absent or stale, they fork/exec `llamastash daemon start` (which detaches by default) and retry with exponential backoff.
 - **Socket.** Unix domain socket, mode `0600`, with peer-credential auth (`SO_PEERCRED` on Linux, `getpeereid` on macOS). Wire protocol: length-prefixed JSON-RPC 2.0 envelopes.
-- **Proxy.** A loopback HTTP/1.1 listener bound on `127.0.0.1:11434` by default, enabled by default, no auth and no TLS. Routes `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` by resolving `body.model` through the same fuzzy resolver as `llamastash start <ref>` and forwarding byte-for-byte to the matching `llama-server` child (auto-starting it if not running; falling back to a Ready model on launch failure with `x-llamastash-served-by` + `x-llamastash-fallback-reason` headers). Same-machine threat model — LAN exposure, auth, and TLS are deferred follow-ups. Implementation: `src/proxy/`; user docs: [`usage.md §Proxy (OpenAI-compatible listener)`](usage.md#proxy-openai-compatible-listener); design: [`plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
+- **Proxy.** A loopback HTTP/1.1 listener enabled by default, no auth and no TLS. In normal mode it prefers `127.0.0.1:11435`; in Ollama-compat mode it prefers `127.0.0.1:11434`. It routes `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` by resolving `body.model` through the same fuzzy resolver as `llamastash start <ref>` and forwarding byte-for-byte to the matching `llama-server` child (auto-starting it if not running; falling back to a Ready model on launch failure with `x-llamastash-served-by` + `x-llamastash-fallback-reason` headers). Same-machine threat model — LAN exposure, auth, and TLS are deferred follow-ups. Implementation: `src/proxy/`; user docs: [`usage.md §Proxy (OpenAI-compatible listener)`](usage.md#proxy-openai-compatible-listener); design: [`plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
 - **State separation.** XDG-aware. `$XDG_STATE_HOME/llamastash/state.json` for favorites / presets / last-params / running snapshot. `$XDG_CONFIG_HOME/llamastash/config.yaml` for user-authored config. `$XDG_CACHE_HOME/llamastash/logs/<id>-<ts>.log` for per-launch logs.
 
 ## Proxy comparison — Ollama, LM Studio, llamastash
@@ -199,6 +199,5 @@ Inline `#[cfg(test)] mod tests` per source file plus an integration suite under 
 ## What's not here
 
 - Anthropic `/v1/messages`, MCP, LAN-exposed HTTP (the original v1 R34 deferral). The loopback OpenAI-compat proxy carves out only that surface; auth, TLS, network binding, and the rest of R34 stay deferred.
-- HuggingFace pull worker (v2, R46). The CLI `pull` subcommand is hidden and exits unimplemented.
 - Multi-user / remote / network daemon. v1 is loopback-only; v2 will require explicit opt-in.
 - Daily-driver chat history; markdown rendering. The right-pane Chat tab is a single-shot smoke test.

@@ -6,7 +6,7 @@ Read [methodology.md](methodology.md) before any individual page; it explains th
 
 ## Curated reports
 
-- [**R1 AMD-APU final report**](r1-amd-apu-final-report.md) — full 4-model × 4-tool × 2-mode × 4-workload sweep on AMD Strix Halo (gfx1151), with headline tables, per-workload tables, six findings, and methodology caveats. **Start here** for the AMD-APU story.
+- [**R1 AMD-APU final report**](r1-amd-apu-final-report.md) — full 4-model × 4-tool × 2-mode × 4-workload sweep on AMD Strix Halo (gfx1151), with headline tables, per-workload tables, seven findings, and methodology caveats. **Start here** for the AMD-APU story.
 - [**Proxy overhead**](proxy/results.md) — Suite C: per-request overhead of the LlamaStash OpenAI-compat proxy vs hitting the same `llama-server` directly. TTFT p50 +0.45 ms, decode unchanged.
 
 ## Results (auto-rendered)
