@@ -32,12 +32,21 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       let last = app.last_params.get(&m.path);
       let empty_knobs = crate::config::TypedKnobs::default();
       let persisted_knobs = last.map(|p| &p.knobs).unwrap_or(&empty_knobs);
+      // `last.ctx` is the *resolved* ctx (top-level `LaunchParams.ctx`)
+      // — covers user-supplied values, last-params recall, *and* the
+      // daemon-side VRAM-aware auto-fit, none of which land in the
+      // user-knobs slot. Falling back to `persisted_knobs.ctx` would
+      // miss all three and render `default` for a running launch that
+      // is actually pinned to a real number.
+      let resolved_ctx = last.and_then(|p| p.ctx).or(persisted_knobs.ctx);
       for spec in knob_specs() {
-        lines.push(kv(
-          knob_label(spec.field),
-          format_persisted_knob_value(persisted_knobs, spec.field),
-          palette,
-        ));
+        let value = match spec.field {
+          KnobField::Ctx => resolved_ctx
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "default".into()),
+          _ => format_persisted_knob_value(persisted_knobs, spec.field),
+        };
+        lines.push(kv(knob_label(spec.field), value, palette));
       }
       let extras: String = last
         .map(|p| p.extras.join(" "))
