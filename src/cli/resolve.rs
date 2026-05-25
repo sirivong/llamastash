@@ -384,10 +384,7 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     .and_then(Value::as_str)
     .unwrap_or_default()
     .to_string();
-  // Daemon status rows carry a flat `state: "ready"` string.
-  let state = v
-    .get("state")
-    .and_then(Value::as_str)
+  let state = parse_running_state_label(v)
     .map(str::to_string)
     .unwrap_or_default();
   let pid = v.get("pid").and_then(Value::as_u64);
@@ -410,6 +407,14 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     params,
     latest_rss_bytes,
     latest_cpu_pct,
+  })
+}
+
+fn parse_running_state_label(v: &Value) -> Option<&str> {
+  v.get("state").and_then(Value::as_str).or_else(|| {
+    v.get("state")
+      .and_then(|s| s.get("state"))
+      .and_then(Value::as_str)
   })
 }
 
@@ -638,5 +643,35 @@ mod tests {
     }];
     let err = resolve_running(&rows, "9999").unwrap_err();
     assert_eq!(err.code, MODEL_NOT_FOUND);
+  }
+
+  #[test]
+  fn parse_running_row_accepts_nested_state_object() {
+    let row = serde_json::json!({
+      "launch_id": "L1",
+      "id": {"path": "/m/a.gguf", "header_blake3": "deadbeef"},
+      "port": 41100,
+      "mode": "chat",
+      "state": {"state": "ready"},
+      "pid": 123,
+      "ready_at": 456,
+    });
+    let parsed = parse_running_row(&row).expect("row should parse");
+    assert_eq!(parsed.state, "ready");
+  }
+
+  #[test]
+  fn parse_running_row_accepts_flat_state_string() {
+    let row = serde_json::json!({
+      "launch_id": "L1",
+      "id": {"path": "/m/a.gguf", "header_blake3": "deadbeef"},
+      "port": 41100,
+      "mode": "chat",
+      "state": "loading",
+      "pid": 123,
+      "ready_at": 456,
+    });
+    let parsed = parse_running_row(&row).expect("row should parse");
+    assert_eq!(parsed.state, "loading");
   }
 }

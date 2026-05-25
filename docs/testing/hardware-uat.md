@@ -3,7 +3,7 @@
 This is the maintainer-facing guide for the `llamastash uat` subcommand
 (behind `--features uat`, hidden from `--help` on every release
 binary). It targets four backends — NVIDIA CUDA, AMD ROCm, Apple
-Silicon Metal, Vulkan fallback — and runs a 5-step lifecycle on real
+Silicon Metal, Vulkan fallback — and runs a 6-step lifecycle on real
 hardware, emitting a JSON report you attach to the release PR.
 
 The fixture suite (`cargo test --features test-fixtures`) gives the
@@ -90,20 +90,24 @@ Linux x86_64.
 
 ### HuggingFace cache pre-population (all backends)
 
-Warm mode assumes the reference GGUF is already in the cache. Pull
-it once, ideally pinned to the SHA captured in
-`src/cli/uat/model.rs`:
+Warm mode assumes the locked reference GGUF is already in the cache.
+The current pins in `src/cli/uat/model.rs` are:
+
+- Primary: `Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-q4_k_m.gguf` @ `9217f5db79a29953eb74d5343926648285ec7e67` (`491400032` B)
+- Fallback: `HuggingFaceTB/SmolLM2-360M-Instruct-GGUF:smollm2-360m-instruct-q8_0.gguf` @ `593b5a2e04c8f3e4ee880263f93e0bd2901ad47f` (`386404992` B)
+
+Seed the cache once:
 
 ```sh
-# Primary (Qwen2.5-0.5B-Instruct-GGUF / Q4_K_M ~400 MB)
+# Primary (Qwen2.5-0.5B-Instruct-GGUF / Q4_K_M ~469 MiB)
 llamastash pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-q4_k_m.gguf
-# Fallback (SmolLM2-360M-Instruct-GGUF / Q4_K_M ~270 MB)
-llamastash pull HuggingFaceTB/SmolLM2-360M-Instruct-GGUF:smollm2-360m-instruct-q4_k_m.gguf
+# Fallback (SmolLM2-360M-Instruct-GGUF / Q8_0 ~369 MiB)
+llamastash pull HuggingFaceTB/SmolLM2-360M-Instruct-GGUF:smollm2-360m-instruct-q8_0.gguf
 ```
 
-The constants in `model.rs` currently ship a `<TBD-locked-on-first-dry-run>`
-SHA — the first real warm-mode dry-run lands the lock-in commit.
-Until then the UAT resolves the repo's default branch.
+If the upstream repo changes the default-branch snapshot later, rerun a
+cold UAT or refresh the cache manually before warm-mode verification so
+the locally cached artifact matches the pinned SHA above.
 
 ---
 
@@ -126,8 +130,8 @@ Each command:
   `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CACHE_DIR` / `LLAMASTASH_SOCKET` /
   `HF_HOME` for the child processes so the run never touches your
   real daily-driver state.
-- Runs the 5-step lifecycle (`doctor_preflight` → `init` → `smoke_chat`
-  → `stop` → `doctor_postrun`).
+- Runs the 6-step lifecycle (`doctor_preflight` → `init` → `start_model`
+  → `smoke_chat` → `stop` → `doctor_postrun`).
 - Writes the JSON report to the `--report-out` path (`-` redirects to
   stdout — mutually exclusive with the global `--quiet`).
 - Prints the TTY-pretty summary to stdout unless `--quiet`.
@@ -151,8 +155,9 @@ four backends. Patch releases may rely on the most recent cold run
 | Step | Action | Failure means |
 |---|---|---|
 | `doctor_preflight` | `gpu::probe()` snapshot; assert `--backend` matches the detected discriminant | Wrong driver / runner image; UAT halts immediately so a non-Metal macOS-14 image doesn't masquerade as a green run. |
-| `init` | `llamastash init --recommended --model <repo>:<file> --revision <sha>` with the isolation env vars; runs install too in cold mode. | Install path broke, GGUF fetch failed (HF outage / wrong SHA), recommender mis-selected. Fallback model runs automatically on primary failure; substitution surfaces in `host.warnings`. |
-| `smoke_chat` | Parses `status --json` for the running model + port, then POSTs `/v1/chat/completions` and asserts non-empty content. | Model loaded but failed to respond — GPU OOM, slot exhaustion, sampler bug. |
+| `init` | `llamastash init --recommended --model <repo>:<file> --revision <sha>` with the isolation env vars; runs install too in cold mode. The init smoke probe is detection-only (`llama-server --version`); `start_model` is what brings a real model up. | Install path broke, GGUF fetch failed (HF outage / wrong SHA), recommender mis-selected. Fallback model runs automatically on primary failure; substitution surfaces in `host.warnings`. |
+| `start_model` | `llamastash start <gguf-path> --json` against the GGUF init just downloaded; returns once the supervisor reports `Ready`. | Daemon refused the start (bad path, port-range exhausted), `llama-server` failed to load (OOM at load, missing runtime), or the readiness probe timed out. |
+| `smoke_chat` | Parses `status --json` for the running model + port, then POSTs `/v1/chat/completions` and asserts non-empty content. | Model loaded but failed to respond — GPU OOM mid-decode, slot exhaustion, sampler bug. |
 | `stop` | `llamastash stop --all --yes`. | Daemon stop_model failed or the supervisor lost track of the child. |
 | `doctor_postrun` | `llamastash doctor --json`; records `finding_count`. | Doctor itself failed; finding count > 0 is informational, not a fail. |
 
@@ -194,6 +199,7 @@ additive within `schema_version: 1`; a rename bumps the schema.
 |-------|---------------------|
 | `backend_mismatch` | `doctor_preflight` — `expected` ≠ `detected` |
 | `init_install` / `init_download` / `init_other` | `init` failures, classified by the child's exit code (74 / 73 / other) |
+| `start_model_failed` | `start_model` step couldn't bring the GGUF up (`llamastash start` exited non-zero or the readiness probe failed) |
 | `smoke_http` / `smoke_parse` / `smoke_status` | `smoke_chat` failure mode |
 | `stop_failed` | `stop` step couldn't shut the daemon's children down |
 | `doctor_postrun_failed` | `doctor_postrun` itself spawn/exit failed |
@@ -301,18 +307,13 @@ Vulkan. The first that succeeds wins. If your discrete NVIDIA + AMD
 Radeon machine reports `amd`, that's because `nvidia-smi` failed; check
 the NVML driver / `nvidia-smi --query-gpu` output manually.
 
-### Reference model SHA still placeholder
+### Reference model SHA warning reappears
 
-The `model.rs` constants carry `<TBD-locked-on-first-dry-run>` until
-the first warm-mode dry run lands the real SHA. The orchestrator
-surfaces this with the warning `"reference model SHA unlocked
-(placeholder)"`. To lock it in:
-
-1. Run warm-mode UAT against the maintainer's box.
-2. Capture the resolved SHA from the HF response (visible in
-   `~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/refs/main`
-   or the report's `host.warnings` once we wire it through).
-3. Replace the constant in `src/cli/uat/model.rs` and PR the change.
+The shipped `PRIMARY` / `FALLBACK` pins are locked. If UAT ever emits
+`"reference model SHA unlocked (placeholder)"` again, someone rotated
+the reference model but left `commit_sha: PLACEHOLDER_SHA` in
+`src/cli/uat/model.rs`. Re-run the lock procedure in
+[`docs/runbooks/verify-uat-reintroduction.md` §8b](../runbooks/verify-uat-reintroduction.md#8b-rotate-reference-model-shas-when-the-reference-changes).
 
 ### Empty `models[]` from `status --json` during smoke_chat
 

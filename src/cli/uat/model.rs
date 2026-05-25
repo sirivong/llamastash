@@ -13,12 +13,10 @@
 //!   unified-memory and iGPU configurations.
 //! * Supports OpenAI-compatible chat completion meaningfully.
 //!
-//! The `commit_sha` fields below ship as a `<TBD-locked-on-first-dry-run>`
-//! sentinel — the maintainer locks in real SHAs during the first warm-mode
-//! dry run, captured here as a constant update. Until the SHA is locked,
-//! hf-hub resolves the repo's default branch (`main`) — the precise
-//! behavior `--revision` would short-circuit. Documented because a
-//! latent placeholder is more honest than a fabricated SHA.
+//! The current pins were resolved from the first successful warm-mode
+//! dry run on the maintainer's AMD box. The placeholder sentinel
+//! remains as the explicit "not locked yet" marker for any future
+//! reference-model rotation.
 
 /// Sentinel value stored in `commit_sha` until the maintainer's first
 /// warm-mode dry-run locks in real SHAs. `is_unlocked()` is the
@@ -49,25 +47,25 @@ pub struct ReferenceModel {
 }
 
 /// Primary reference model. Qwen2.5-0.5B-Instruct-GGUF Q4_K_M sits at
-/// ~400 MB on disk; loads comfortably in ≤ 3 GB on Metal / iGPU /
+/// ~469 MiB on disk; loads comfortably in ≤ 3 GB on Metal / iGPU /
 /// discrete GPU; Apache 2.0 license keeps redistribution clear of
 /// audit work the plan explicitly de-scoped.
 pub const PRIMARY: ReferenceModel = ReferenceModel {
   repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
   filename: "qwen2.5-0.5b-instruct-q4_k_m.gguf",
-  commit_sha: PLACEHOLDER_SHA,
-  expected_size_bytes: 400 * 1024 * 1024,
+  commit_sha: "9217f5db79a29953eb74d5343926648285ec7e67",
+  expected_size_bytes: 491_400_032,
 };
 
 /// Fallback when the primary fetch fails (mocked or real HF outage).
-/// SmolLM2-360M-Instruct-GGUF Q4_K_M at ~270 MB on disk, also Apache
-/// 2.0. Tighter VRAM envelope so a constrained iGPU box still passes
-/// when the primary stretches the limit.
+/// SmolLM2-360M-Instruct-GGUF Q8_0 sits at ~369 MiB on disk, also
+/// Apache 2.0. Still well inside the 1 GiB / low-VRAM envelope while
+/// tracking the only currently-published quant in the upstream repo.
 pub const FALLBACK: ReferenceModel = ReferenceModel {
   repo: "HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
-  filename: "smollm2-360m-instruct-q4_k_m.gguf",
-  commit_sha: PLACEHOLDER_SHA,
-  expected_size_bytes: 270 * 1024 * 1024,
+  filename: "smollm2-360m-instruct-q8_0.gguf",
+  commit_sha: "593b5a2e04c8f3e4ee880263f93e0bd2901ad47f",
+  expected_size_bytes: 386_404_992,
 };
 
 /// True iff the `commit_sha` field is still the documented sentinel.
@@ -89,8 +87,11 @@ mod tests {
 
   #[test]
   fn placeholder_sha_is_detected_by_is_unlocked() {
-    assert!(is_unlocked(&PRIMARY));
-    assert!(is_unlocked(&FALLBACK));
+    let unlocked = ReferenceModel {
+      commit_sha: PLACEHOLDER_SHA,
+      ..PRIMARY
+    };
+    assert!(is_unlocked(&unlocked));
   }
 
   #[test]
@@ -100,6 +101,12 @@ mod tests {
       ..PRIMARY
     };
     assert!(!is_unlocked(&locked));
+  }
+
+  #[test]
+  fn shipped_reference_models_are_locked() {
+    assert!(!is_unlocked(&PRIMARY));
+    assert!(!is_unlocked(&FALLBACK));
   }
 
   #[test]

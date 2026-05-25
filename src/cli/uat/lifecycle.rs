@@ -1,4 +1,4 @@
-//! 5-step UAT orchestrator (Unit 4).
+//! 6-step UAT orchestrator (Unit 4).
 //!
 //! Steps:
 //!
@@ -10,24 +10,31 @@
 //!    --revision <sha>` (warm) or without `--skip install` (cold) so
 //!    the full install + pull + smoke-probe path is exercised end-to-
 //!    end. Falls back to `FALLBACK` on primary failure and records the
-//!    substitution in `host.warnings`.
-//! 3. `smoke_chat` — HTTPs `/v1/chat/completions` against the model
+//!    substitution in `host.warnings`. The init smoke step is detection-
+//!    only (`llama-server --version`); registering a managed model is
+//!    the next step's job.
+//! 3. `start_model` — spawn `llamastash start <gguf-path> --json`
+//!    against the GGUF init just downloaded. Returns once the daemon
+//!    reports the supervisor `Ready`, leaving a running model for the
+//!    chat probe.
+//! 4. `smoke_chat` — HTTPs `/v1/chat/completions` against the model
 //!    the supervisor brought up. Asserts a 200 with at least one
 //!    completion token.
-//! 4. `stop` — spawn `llamastash stop <repo>` to shut the model down
-//!    gracefully.
-//! 5. `doctor_postrun` — spawn `llamastash doctor --json` and parse
+//! 5. `stop` — spawn `llamastash stop --all --yes` to shut every
+//!    daemon-owned child down gracefully.
+//! 6. `doctor_postrun` — spawn `llamastash doctor --json` and parse
 //!    the resulting findings.
 //!
 //! Each step is timed; the step's verdict + observed-JSON lands in the
 //! corresponding `StepResult`. The first `Fail` short-circuits the
-//! remaining steps to `Skipped` and populates `failure_summary`.
+//! remaining subject steps to `Skipped` and populates `failure_summary`.
 //!
 //! Child processes inherit the `TempdirGuard`'s isolation env vars,
 //! so they never write to the maintainer's real state / cache / HF
 //! cache paths.
 
 use std::{
+  path::PathBuf,
   process::Stdio,
   sync::atomic::Ordering,
   time::{Duration, Instant},
@@ -73,7 +80,7 @@ impl LifecyclePlan {
 }
 
 /// Top-level entry point invoked by `cli::uat::handle`. Drives the
-/// 5-step lifecycle and returns the populated report. Never panics on
+/// 6-step lifecycle and returns the populated report. Never panics on
 /// step failures — every failure mode flows through the report's
 /// `verdict`/`failure_summary` fields.
 pub async fn run(plan: &LifecyclePlan, guard: &TempdirGuard, report: &mut UatReport) {
@@ -90,9 +97,10 @@ pub async fn run(plan: &LifecyclePlan, guard: &TempdirGuard, report: &mut UatRep
   }
 
   // Step 2: init. Only runs if pre-flight passed.
+  let mut gguf_path: Option<PathBuf> = None;
   if failed_step.is_none() {
     match step_init(plan, guard, report).await {
-      Ok(()) => {}
+      Ok(path) => gguf_path = Some(path),
       Err(e) => {
         record_failure(report, StepName::Init, &e);
         failed_step = Some(StepName::Init);
@@ -100,7 +108,21 @@ pub async fn run(plan: &LifecyclePlan, guard: &TempdirGuard, report: &mut UatRep
     }
   }
 
-  // Step 3: smoke_chat.
+  // Step 3: start_model. Only runs if init succeeded; consumes the
+  // GGUF path init surfaced.
+  if failed_step.is_none() {
+    if let Some(path) = gguf_path.as_ref() {
+      match step_start_model(plan, guard, report, path).await {
+        Ok(()) => {}
+        Err(e) => {
+          record_failure(report, StepName::StartModel, &e);
+          failed_step = Some(StepName::StartModel);
+        }
+      }
+    }
+  }
+
+  // Step 4: smoke_chat.
   if failed_step.is_none() {
     match step_smoke_chat(plan, guard, report).await {
       Ok(()) => {}
@@ -111,15 +133,18 @@ pub async fn run(plan: &LifecyclePlan, guard: &TempdirGuard, report: &mut UatRep
     }
   }
 
-  // Steps 4 & 5 are cleanup. They only make sense when a daemon /
+  // Steps 5 & 6 are cleanup. They only make sense when a daemon /
   // llama-server were actually brought up — i.e. step 2 (init)
   // succeeded. A preflight or init failure leaves nothing to stop, so
   // running `llamastash stop --all --yes` against no daemon and
   // `llamastash doctor --json` against a half-initialized state wastes
   // 30s+ and produces noisy verdicts. Cleanup runs when no failure
-  // happened, or when the smoke-chat step failed (daemon is up and a
-  // model is loaded).
-  let cleanup_needed = matches!(failed_step, None | Some(StepName::SmokeChat));
+  // happened, OR when start_model / smoke_chat failed (daemon is up
+  // and a child may be loaded).
+  let cleanup_needed = matches!(
+    failed_step,
+    None | Some(StepName::StartModel) | Some(StepName::SmokeChat)
+  );
   if cleanup_needed {
     let _ = step_stop(plan, guard, report).await;
     let _ = step_doctor_postrun(plan, guard, report).await;
@@ -211,11 +236,15 @@ fn read_llama_server_version() -> Option<String> {
 /// on any failure during the model-pull phase, retries with the
 /// fallback. Records the substitution in `host.warnings` so the
 /// report flags silent fallback before the maintainer scans down.
+///
+/// Returns the absolute path of the downloaded GGUF (from
+/// `model.files[0]` in init's `--json` stdout) so the next step
+/// (`start_model`) can register it with the daemon.
 async fn step_init(
   plan: &LifecyclePlan,
   guard: &TempdirGuard,
   report: &mut UatReport,
-) -> Result<(), StepError> {
+) -> Result<PathBuf, StepError> {
   let started = Instant::now();
   let primary_outcome = run_init_for(plan, guard, &model::PRIMARY).await;
   let (used, init_stdout) = match primary_outcome {
@@ -258,14 +287,23 @@ async fn step_init(
       report.host.warnings.push(deviation_warning);
     }
   }
+  let gguf_path = parse_init_gguf_path(&init_stdout).ok_or_else(|| StepError {
+    message:
+      "init: `model.files[0]` missing or unparseable in init --json stdout (cannot start model)"
+        .to_string(),
+    exit_code: 1,
+    classification: FailureClass::InitOther,
+    duration: started.elapsed(),
+  })?;
   report.step_mut(StepName::Init).pass(
     started.elapsed(),
     Some(serde_json::json!({
       "model_repo": used.repo,
       "mode": match plan.mode { UatMode::Warm => "warm", UatMode::Cold => "cold" },
+      "gguf_path": gguf_path,
     })),
   );
-  Ok(())
+  Ok(gguf_path)
 }
 
 async fn run_init_for(
@@ -302,6 +340,17 @@ fn parse_init_total_bytes(stdout: &[u8]) -> Option<u64> {
   v.get("model")?.get("total_bytes")?.as_u64()
 }
 
+/// Extract the first GGUF path from `init --json` stdout's
+/// `model.files[]` array. Returns `None` if the field is missing or
+/// the array is empty — the lifecycle treats that as an init-shape
+/// regression rather than synthesizing a path.
+fn parse_init_gguf_path(stdout: &[u8]) -> Option<PathBuf> {
+  let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+  let first = v.get("model")?.get("files")?.as_array()?.first()?;
+  let s = first.as_str()?;
+  Some(PathBuf::from(s))
+}
+
 /// Return a warning string when `actual_bytes` deviates from
 /// `expected_bytes` by more than ±10%. The threshold matches the
 /// envelope documented on `ReferenceModel::expected_size_bytes`.
@@ -331,11 +380,184 @@ fn finalize_uat_command(cmd: &mut tokio::process::Command) -> &mut tokio::proces
     .kill_on_drop(true)
 }
 
-/// Step 3. Wraps `status --json` + an HTTP POST to the model's
+/// Step 3. Register the just-downloaded GGUF with the sandbox daemon
+/// so a real `llama-server` child is `Ready` before `smoke_chat`
+/// probes it. `llamastash start --json` returns as soon as the
+/// supervisor is *spawned* (see `src/ipc/methods.rs:1250-1322` —
+/// `start_model_inner` returns post-spawn, before the supervisor
+/// transitions Launching → Loading → Ready). We therefore poll
+/// `status --json` ourselves after start returns and only declare
+/// this step pass once `models[0].state == "ready"`.
+async fn step_start_model(
+  plan: &LifecyclePlan,
+  guard: &TempdirGuard,
+  report: &mut UatReport,
+  gguf_path: &std::path::Path,
+) -> Result<(), StepError> {
+  let started = Instant::now();
+  // Force a catalog rescan that includes the GGUF's parent. The
+  // daemon takes its catalog snapshot at startup, BEFORE `init` pulls
+  // the reference model into the sandbox HF cache; without
+  // `--model-path` the resolver can't see the just-downloaded file
+  // and `llamastash start` exits 66 ("no model matches") even though
+  // the absolute path is valid on disk.
+  let scan_dir = gguf_path
+    .parent()
+    .unwrap_or_else(|| std::path::Path::new("."));
+  let mut cmd = tokio::process::Command::new(&plan.llamastash_path);
+  cmd
+    .arg("--quiet")
+    .arg("start")
+    .arg("--json")
+    .arg("--model-path")
+    .arg(scan_dir)
+    .arg(gguf_path);
+  guard.configure_command(cmd.as_std_mut());
+  let stdout = run_child_with_timeout(&mut cmd, plan.per_step_timeout)
+    .await
+    .map_err(|mut e| {
+      // Preserve TIMEOUT classification; anything else collapses to
+      // start_model_failed so the workflow's rolling-issue triage
+      // groups start failures together.
+      if !matches!(e.classification, FailureClass::Timeout) {
+        e.classification = FailureClass::StartModelFailed;
+      }
+      e
+    })?;
+  // The JSON shape is `{ "name", "launch_id", "port", "pid", "preset",
+  // "path" }` per `start --help`. We surface the readable subset into
+  // `observed`; a non-JSON or shape-shifted output is not a step fail
+  // — the daemon already accepted the start, and the shape's stability
+  // is enforced by start's own --json contract tests.
+  let parsed: serde_json::Value =
+    serde_json::from_slice(&stdout).unwrap_or(serde_json::Value::Null);
+  // Best-effort PID into the guard so a mid-test SIGINT can reap the
+  // child before tempdir teardown — step_stop, when it runs, remains
+  // the authoritative shutdown.
+  if let Some(pid) = parsed.get("pid").and_then(|v| v.as_i64()) {
+    if let Ok(pid32) = i32::try_from(pid) {
+      if pid32 > 0 {
+        guard.child_pid_handle().store(pid32, Ordering::SeqCst);
+      }
+    }
+  }
+  // Wait for the supervisor to actually reach Ready before we hand
+  // off to smoke_chat. `llamastash start` returns post-spawn, so the
+  // `llama-server` child may still be in Launching/Loading when start
+  // exits 0; without this poll, smoke_chat hits the port before
+  // anything's bound and fails with `connection refused`.
+  wait_for_ready(plan, guard, READY_POLL_BUDGET).await?;
+  report.step_mut(StepName::StartModel).pass(
+    started.elapsed(),
+    Some(serde_json::json!({
+      "name": parsed.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+      "port": parsed.get("port").and_then(|v| v.as_u64()).unwrap_or(0),
+      "pid":  parsed.get("pid").and_then(|v| v.as_i64()).unwrap_or(0),
+    })),
+  );
+  Ok(())
+}
+
+/// Poll `status --json` until `models[0].state == "ready"`,
+/// or fail when the supervisor transitions to a terminal error
+/// state, or the budget expires. Used by `step_start_model` to bridge
+/// the gap between `start_model_inner` returning post-spawn and the
+/// `llama-server` child actually binding its port.
+async fn wait_for_ready(
+  plan: &LifecyclePlan,
+  guard: &TempdirGuard,
+  budget: Duration,
+) -> Result<(), StepError> {
+  let started = Instant::now();
+  let interval = Duration::from_millis(250);
+  let mut last_state = "unknown".to_string();
+  loop {
+    let elapsed = started.elapsed();
+    if elapsed >= budget {
+      return Err(StepError {
+        message: format!(
+          "start_model: supervisor did not reach `ready` within {budget:?} (last state: {last_state})"
+        ),
+        exit_code: TIMEOUT_CODE,
+        classification: FailureClass::Timeout,
+        duration: elapsed,
+      });
+    }
+    let status = match fetch_status_json(plan, guard).await {
+      Ok(v) => v,
+      Err(e) => {
+        // status probe failing mid-readiness-poll is informational;
+        // the next tick may succeed. Surface only if the budget runs
+        // out (handled by the loop guard).
+        last_state = format!("status_probe_error: {}", e.message);
+        tokio::time::sleep(interval).await;
+        continue;
+      }
+    };
+    let first = status
+      .get("models")
+      .and_then(|v| v.as_array())
+      .and_then(|a| a.first());
+    let state_label = first.and_then(parse_model_state).unwrap_or("unknown");
+    last_state = state_label.to_string();
+    match state_label {
+      "ready" => return Ok(()),
+      "error" => {
+        let cause = first
+          .and_then(parse_model_error_cause)
+          .unwrap_or("(no cause reported)");
+        return Err(StepError {
+          message: format!("start_model: supervisor entered `error` state: {cause}"),
+          exit_code: 1,
+          classification: FailureClass::StartModelFailed,
+          duration: started.elapsed(),
+        });
+      }
+      "stopped" | "stopping" => {
+        return Err(StepError {
+          message: format!("start_model: supervisor reached `{state_label}` before becoming ready"),
+          exit_code: 1,
+          classification: FailureClass::StartModelFailed,
+          duration: started.elapsed(),
+        });
+      }
+      _ => {
+        // "launching" / "loading" / "unknown" — keep waiting.
+        tokio::time::sleep(interval).await;
+      }
+    }
+  }
+}
+
+/// Wall-clock budget for the supervisor-Ready poll. Generous because
+/// a cold-VRAM load of a tiny reference model can still take a few
+/// seconds on a busy box; bounded so a wedged supervisor doesn't
+/// burn the per-step timeout silently.
+const READY_POLL_BUDGET: Duration = Duration::from_secs(60);
+
+fn parse_model_state(model: &serde_json::Value) -> Option<&str> {
+  model.get("state").and_then(|v| v.as_str()).or_else(|| {
+    model
+      .get("state")
+      .and_then(|v| v.get("state"))
+      .and_then(|v| v.as_str())
+  })
+}
+
+fn parse_model_error_cause(model: &serde_json::Value) -> Option<&str> {
+  model.get("cause").and_then(|v| v.as_str()).or_else(|| {
+    model
+      .get("state")
+      .and_then(|v| v.get("cause"))
+      .and_then(|v| v.as_str())
+  })
+}
+
+/// Step 4. Wraps `status --json` + an HTTP POST to the model's
 /// OpenAI-compatible endpoint. Refused (verdict=fail) on:
 ///
 /// * status lookup failure.
-/// * Empty `models[]` (init didn't actually start one).
+/// * Empty `models[]` (start_model didn't actually leave one running).
 /// * HTTP non-2xx or empty choices.
 async fn step_smoke_chat(
   plan: &LifecyclePlan,
@@ -509,10 +731,22 @@ fn parse_first_running_model(status_json: &serde_json::Value) -> Result<(String,
   let first = models
     .first()
     .ok_or_else(|| "status JSON has empty `models[]`".to_string())?;
-  let name = first
-    .get("name")
+  // The daemon's `status --json` emits `models[].id` as a
+  // `ModelId` object (`{"path": "...", "header_blake3": "..."}` — see
+  // `src/gguf/identity.rs:22-29` and `src/ipc/methods.rs:419-431`).
+  // We derive the model-name passed to llama-server from the file
+  // stem so it reads as a friendly identifier; llama-server's
+  // `/v1/chat/completions` accepts any string in the `model` body
+  // field, so this is purely cosmetic.
+  let path = first
+    .get("id")
+    .and_then(|v| v.get("path"))
     .and_then(|s| s.as_str())
-    .ok_or_else(|| "first model missing `name`".to_string())?
+    .ok_or_else(|| "first model missing `id.path`".to_string())?;
+  let name = std::path::Path::new(path)
+    .file_stem()
+    .and_then(|s| s.to_str())
+    .unwrap_or(path)
     .to_string();
   let port = first
     .get("port")
@@ -524,10 +758,10 @@ fn parse_first_running_model(status_json: &serde_json::Value) -> Result<(String,
   Ok((name, port))
 }
 
-/// Step 4. Run regardless of step 3 outcome so a smoke-chat failure
-/// doesn't leak the started model. `--all --yes` is used so we
-/// don't depend on knowing the model name at this point — every
-/// daemon-owned child is shut down.
+/// Step 5. Run regardless of step 3/4 outcomes so a start_model or
+/// smoke-chat failure doesn't leak the started model. `--all --yes`
+/// is used so we don't depend on knowing the model name at this
+/// point — every daemon-owned child is shut down.
 async fn step_stop(
   plan: &LifecyclePlan,
   guard: &TempdirGuard,
@@ -559,7 +793,7 @@ async fn step_stop(
   }
 }
 
-/// Step 5. `doctor --json` enumerates findings (orphan PIDs, stale
+/// Step 6. `doctor --json` enumerates findings (orphan PIDs, stale
 /// lockfiles, missing baseline). v1 doesn't gate the verdict on
 /// findings: a finding is informational. The report does record the
 /// finding count so the maintainer can scan-down to investigate.
@@ -732,13 +966,30 @@ mod tests {
   use super::*;
 
   #[test]
-  fn parse_first_running_model_extracts_name_and_port() {
+  fn parse_first_running_model_extracts_id_path_and_port() {
+    // Mirrors the shape emitted by `src/ipc/methods.rs` for
+    // status.models[] — `id` is a ModelId object (path + header
+    // BLAKE3), not a flat string. The friendly model name is
+    // derived from the file stem.
     let v = serde_json::json!({
-      "models": [{ "name": "qwen2.5-0.5b", "port": 8081 }]
+      "models": [{
+        "id": {
+          "path": "/tmp/hf/hub/.../qwen2.5-0.5b.gguf",
+          "header_blake3": "0".repeat(64)
+        },
+        "port": 8081
+      }]
     });
     let (name, port) = parse_first_running_model(&v).unwrap();
     assert_eq!(name, "qwen2.5-0.5b");
     assert_eq!(port, 8081);
+  }
+
+  #[test]
+  fn parse_first_running_model_errors_when_id_path_missing() {
+    let v = serde_json::json!({"models": [{"id": {}, "port": 8081}]});
+    let err = parse_first_running_model(&v).unwrap_err();
+    assert!(err.contains("missing `id.path`"), "{err}");
   }
 
   #[test]
@@ -757,7 +1008,12 @@ mod tests {
 
   #[test]
   fn parse_first_running_model_errors_on_oversize_port() {
-    let v = serde_json::json!({"models": [{"name": "m", "port": 70000u64}]});
+    let v = serde_json::json!({
+      "models": [{
+        "id": {"path": "/m.gguf", "header_blake3": "0".repeat(64)},
+        "port": 70000u64
+      }]
+    });
     let err = parse_first_running_model(&v).unwrap_err();
     assert!(err.contains("does not fit"), "{err}");
   }
@@ -880,5 +1136,47 @@ mod tests {
     assert_eq!(parse_init_total_bytes(b"not json"), None);
     assert_eq!(parse_init_total_bytes(b"{}"), None);
     assert_eq!(parse_init_total_bytes(b"{\"model\":{}}"), None);
+  }
+
+  #[test]
+  fn parse_init_gguf_path_reads_first_files_entry() {
+    let stdout = serde_json::json!({
+      "model": {
+        "files": ["/tmp/hf/hub/models--foo--bar/snapshots/abc/model.gguf"],
+      }
+    });
+    let path = parse_init_gguf_path(stdout.to_string().as_bytes()).expect("present");
+    assert_eq!(
+      path,
+      PathBuf::from("/tmp/hf/hub/models--foo--bar/snapshots/abc/model.gguf")
+    );
+  }
+
+  #[test]
+  fn parse_init_gguf_path_returns_none_for_missing_or_empty() {
+    assert_eq!(parse_init_gguf_path(b"not json"), None);
+    assert_eq!(parse_init_gguf_path(b"{}"), None);
+    assert_eq!(parse_init_gguf_path(b"{\"model\":{}}"), None);
+    assert_eq!(parse_init_gguf_path(b"{\"model\":{\"files\":[]}}"), None);
+    // Non-string entry (e.g. someone serialized as an object) is also
+    // unusable — return None rather than coercing to a Debug string.
+    assert_eq!(
+      parse_init_gguf_path(b"{\"model\":{\"files\":[{\"path\":\"/x\"}]}}"),
+      None
+    );
+  }
+
+  #[test]
+  fn parse_model_state_accepts_flat_status_json_shape() {
+    let row = serde_json::json!({"state": "ready"});
+    assert_eq!(parse_model_state(&row), Some("ready"));
+    assert_eq!(parse_model_error_cause(&row), None);
+  }
+
+  #[test]
+  fn parse_model_state_still_accepts_legacy_nested_shape() {
+    let row = serde_json::json!({"state": {"state": "error", "cause": "oom"}});
+    assert_eq!(parse_model_state(&row), Some("error"));
+    assert_eq!(parse_model_error_cause(&row), Some("oom"));
   }
 }

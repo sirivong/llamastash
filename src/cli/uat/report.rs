@@ -33,7 +33,7 @@ pub struct UatReport {
   pub schema_version: u32,
   /// RFC-3339 timestamp captured at orchestrator entry.
   pub started_at: String,
-  /// Wall-clock elapsed seconds across the entire 5-step lifecycle.
+  /// Wall-clock elapsed seconds across the entire 6-step lifecycle.
   pub duration_secs: f64,
   pub host: HostBlock,
   pub backend: BackendBlock,
@@ -130,7 +130,7 @@ pub const fn backend_label(b: UatBackend) -> ExpectedBackend {
   }
 }
 
-/// One row of the 5-step lifecycle. Steps that the orchestrator
+/// One row of the 6-step lifecycle. Steps that the orchestrator
 /// short-circuited carry `Verdict::Skipped` and `duration_ms = 0`.
 #[derive(Debug, Clone, Serialize)]
 pub struct StepResult {
@@ -149,6 +149,7 @@ pub struct StepResult {
 pub enum StepName {
   DoctorPreflight,
   Init,
+  StartModel,
   SmokeChat,
   Stop,
   DoctorPostrun,
@@ -159,6 +160,7 @@ impl StepName {
     &[
       Self::DoctorPreflight,
       Self::Init,
+      Self::StartModel,
       Self::SmokeChat,
       Self::Stop,
       Self::DoctorPostrun,
@@ -171,6 +173,7 @@ impl StepName {
     match self {
       Self::DoctorPreflight => "doctor_preflight",
       Self::Init => "init",
+      Self::StartModel => "start_model",
       Self::SmokeChat => "smoke_chat",
       Self::Stop => "stop",
       Self::DoctorPostrun => "doctor_postrun",
@@ -232,6 +235,7 @@ pub enum FailureClass {
   InitInstall,
   InitDownload,
   InitOther,
+  StartModelFailed,
   SmokeHttp,
   SmokeParse,
   SmokeStatus,
@@ -243,7 +247,7 @@ pub enum FailureClass {
 }
 
 impl UatReport {
-  /// Build a fresh report scaffold with all five steps preallocated as
+  /// Build a fresh report scaffold with all six steps preallocated as
   /// `Skipped` + `duration_ms = 0`. Each step's verdict is overwritten
   /// as the lifecycle progresses; a `verdict: fail` short-circuit
   /// leaves the remaining rows in their initial `Skipped` state.
@@ -288,16 +292,21 @@ impl UatReport {
   }
 
   /// Re-assert that the subject-pipeline steps after `failed_step`
-  /// stay `Skipped`. Only `Init` and `SmokeChat` are touched —
-  /// `Stop` and `DoctorPostrun` are cleanup steps that own their own
-  /// verdicts (Pass / Fail / Skipped depending on whether the
-  /// lifecycle scheduled them this run). Resetting them here would
-  /// misrepresent a real cleanup outcome as Skipped, so they stay
-  /// untouched.
+  /// stay `Skipped`. Only `Init`, `StartModel`, and `SmokeChat` are
+  /// touched — `Stop` and `DoctorPostrun` are cleanup steps that own
+  /// their own verdicts (Pass / Fail / Skipped depending on whether
+  /// the lifecycle scheduled them this run). Resetting them here
+  /// would misrepresent a real cleanup outcome as Skipped, so they
+  /// stay untouched.
   pub fn skip_after(&mut self, failed_step: StepName) {
     let mut past = false;
     for s in &mut self.steps {
-      if past && matches!(s.name, StepName::Init | StepName::SmokeChat) {
+      if past
+        && matches!(
+          s.name,
+          StepName::Init | StepName::StartModel | StepName::SmokeChat
+        )
+      {
         s.verdict = StepVerdict::Skipped;
         s.duration_ms = 0;
       }
@@ -343,6 +352,7 @@ pub const fn classification_label(c: FailureClass) -> &'static str {
     FailureClass::InitInstall => "init_install",
     FailureClass::InitDownload => "init_download",
     FailureClass::InitOther => "init_other",
+    FailureClass::StartModelFailed => "start_model_failed",
     FailureClass::SmokeHttp => "smoke_http",
     FailureClass::SmokeParse => "smoke_parse",
     FailureClass::SmokeStatus => "smoke_status",
@@ -438,14 +448,15 @@ mod tests {
   }
 
   #[test]
-  fn skeleton_preallocates_five_steps_in_order() {
+  fn skeleton_preallocates_six_steps_in_order() {
     let r = sample_skeleton();
-    assert_eq!(r.steps.len(), 5);
+    assert_eq!(r.steps.len(), 6);
     assert_eq!(r.steps[0].name, StepName::DoctorPreflight);
     assert_eq!(r.steps[1].name, StepName::Init);
-    assert_eq!(r.steps[2].name, StepName::SmokeChat);
-    assert_eq!(r.steps[3].name, StepName::Stop);
-    assert_eq!(r.steps[4].name, StepName::DoctorPostrun);
+    assert_eq!(r.steps[2].name, StepName::StartModel);
+    assert_eq!(r.steps[3].name, StepName::SmokeChat);
+    assert_eq!(r.steps[4].name, StepName::Stop);
+    assert_eq!(r.steps[5].name, StepName::DoctorPostrun);
     for s in &r.steps {
       assert_eq!(s.verdict, StepVerdict::Skipped);
       assert_eq!(s.duration_ms, 0);
@@ -472,9 +483,18 @@ mod tests {
       Duration::from_millis(800),
       Some(serde_json::json!({"phase": "download"})),
     );
+    r.step_mut(StepName::StartModel)
+      .pass(Duration::from_millis(450), None);
     r.step_mut(StepName::SmokeChat)
       .pass(Duration::from_millis(999), None);
     r.skip_after(StepName::Init);
+    // Both start_model and smoke_chat (the subject steps after init)
+    // get reset to Skipped/0.
+    assert_eq!(
+      r.step_mut(StepName::StartModel).verdict,
+      StepVerdict::Skipped
+    );
+    assert_eq!(r.step_mut(StepName::StartModel).duration_ms, 0);
     assert_eq!(
       r.step_mut(StepName::SmokeChat).verdict,
       StepVerdict::Skipped
@@ -561,7 +581,7 @@ mod tests {
   }
 
   #[test]
-  fn report_renders_all_five_step_rows_for_tty_summary() {
+  fn report_renders_all_six_step_rows_for_tty_summary() {
     let mut r = sample_skeleton();
     r.set_duration(Duration::from_secs_f64(142.3));
     r.verdict = Verdict::Pass;
@@ -576,6 +596,7 @@ mod tests {
     for label in [
       "doctor_preflight",
       "init",
+      "start_model",
       "smoke_chat",
       "stop",
       "doctor_postrun",

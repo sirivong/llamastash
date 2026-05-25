@@ -144,7 +144,7 @@ jq '{verdict, failure_summary, host_warnings: .host.warnings, step_count: (.step
 - `failure_summary.step: "doctor_preflight"`.
 - `failure_summary.classification: "backend_mismatch"` (the ce-review classification enum).
 - `failure_summary.exit_code: 10` (`PREFLIGHT_MISMATCH_CODE` synthetic).
-- `steps.length == 5`. `steps[0].verdict == "fail"`; remaining four are `"skipped"`.
+- `steps.length == 6`. `steps[0].verdict == "fail"`; remaining five are `"skipped"`.
 - `host.warnings[]` contains `"preserved tempdir at /tmp/llamastash-uat-..."`.
 
 ### 4a. stdout / TTY separation
@@ -319,21 +319,21 @@ Clean up the test branch either way:
 git push origin --delete test-uat-spike
 ```
 
-### 8b. Lock reference-model SHAs
+### 8b. Rotate reference-model SHAs (when the reference changes)
 
-The first warm-mode dry-run on the maintainer's real Apple Silicon box
-captures the resolved HuggingFace SHAs that replace the
-`<TBD-locked-on-first-dry-run>` sentinel.
+The first warm-mode dry run already locked the shipped HuggingFace SHAs.
+Use this procedure only when intentionally rotating the reference-model
+choice or re-pinning after an upstream asset change.
 
-On the Apple Silicon box:
+On a real hardware box for the target backend:
 
 ```sh
 cargo build --release --features uat
 ./target/release/llamastash uat --backend apple_metal --mode warm \
   --report-out /tmp/uat-warm.json
 
-# Unlock warning should be present:
-jq '.host.warnings[]' /tmp/uat-warm.json | grep -i "unlocked"
+# Unlock warning should NOT be present now that the references are pinned:
+! jq -r '.host.warnings[]?' /tmp/uat-warm.json | grep -qi "unlocked"
 
 # Resolved SHA lives in the HF cache layout under HF_HOME:
 HF_HOME_PATH=$(jq -r '.host.warnings[] | select(startswith("preserved tempdir"))' \
@@ -342,32 +342,32 @@ ls "$HF_HOME_PATH/hub/models--Qwen--Qwen2.5-0.5B-Instruct-GGUF/snapshots/"
 # The directory name under snapshots/ IS the resolved commit SHA.
 ```
 
-Replace both constants in `src/cli/uat/model.rs`:
+Current constants in `src/cli/uat/model.rs`:
 
 ```rust
 pub const PRIMARY: ReferenceModel = ReferenceModel {
   ...
-  commit_sha: "<resolved-SHA-here>",  // was PLACEHOLDER_SHA
+  commit_sha: "9217f5db79a29953eb74d5343926648285ec7e67",
   ...
 };
 pub const FALLBACK: ReferenceModel = ReferenceModel {
   ...
-  commit_sha: "<resolved-fallback-SHA-here>",  // was PLACEHOLDER_SHA
+  commit_sha: "593b5a2e04c8f3e4ee880263f93e0bd2901ad47f",
   ...
 };
 ```
 
-Run the suite again to confirm `is_unlocked()` returns `false`:
+If the reference-model choice ever changes, update those constants and
+then re-run the model unit tests:
 
 ```sh
-cargo test --features uat -- model::tests::placeholder_sha_is_detected_by_is_unlocked
-# This test should now FAIL — flip it to assert !is_unlocked, then commit.
+cargo test --features uat model::tests
 ```
 
 Commit:
 
 ```sh
-git commit -am "chore(uat): lock reference-model SHAs from first warm-mode dry-run
+git commit -am "chore(uat): rotate reference-model SHAs
 
 - PRIMARY:  Qwen/Qwen2.5-0.5B-Instruct-GGUF @ <SHA>
 - FALLBACK: HuggingFaceTB/SmolLM2-360M-Instruct-GGUF @ <SHA>
@@ -387,7 +387,7 @@ git log --oneline origin/main..HEAD               # should be exactly the squash
 git status --short                                # working tree clean (or just TODO.md edits)
 cargo test --features uat,test-fixtures           # green
 gh workflow list                                  # confirm uat-metal-spike.yml is gone (8a)
-grep -F "<TBD-locked-on-first-dry-run>" src/cli/uat/model.rs  # should be empty (8b)
+sed -n '1,80p' src/cli/uat/model.rs | grep -F "commit_sha: PLACEHOLDER_SHA"  # should be empty (8b)
 ```
 
 **Pass all four**, then push:

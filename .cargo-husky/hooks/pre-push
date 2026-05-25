@@ -10,6 +10,9 @@ cargo fmt --all -- --check
 echo "Executing: make lint"
 make lint
 
+echo "Executing: make doc"
+make doc
+
 # --test-threads=1 keeps env-var-mutating tests (e.g. util::paths)
 # from racing each other. CI's macOS leg also caps integration
 # tests for the same class of contention.

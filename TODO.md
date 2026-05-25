@@ -14,13 +14,6 @@ Two release tracks:
 - **R2 (post-v0.0.1)** — everything queued behind R1: feature work, platform
   expansion, recommendation-quality parity, and longer-horizon brainstorms.
 
-## In-code TODOs
-
-- [ ] Ollama-compat Tier 2 inference surface (`/api/chat`, `/api/generate`, `/api/embed`) remains deferred. See [`src/proxy/router.rs`](src/proxy/router.rs) and [`tests/proxy_ollama_compat.rs`](tests/proxy_ollama_compat.rs).
-- [ ] Ollama-compat digest should switch from path-derived `blake3:` to cached header BLAKE3 when the catalog exposes it. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).
-- [ ] Proxy idle-TTL eviction is still deferred for `/api/ps` expiry reporting. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).
-- [ ] Per-model VRAM attribution for Ollama-compat `/api/ps` still emits `0`. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).
-
 ## R1 (v0.0.1) — first release
 
 ### Blockers
@@ -69,7 +62,7 @@ Two release tracks:
     - 2.  Too much code duplication. cut the noise just look for anyting that is dumb and can be easily fixed.
     - 3. Something that can easily be from a library. We should cutdown LoC if its easily replaceable.
     - any other major issue based on your own intuition and experience.
-  - [docs/reviews/review-2026-05-24.md](docs/reviews/review-2026-05-24.md)
+  - [x] [docs/reviews/review-2026-05-24.md](docs/reviews/review-2026-05-24.md)
 
 ### Release checklist
 
@@ -85,11 +78,11 @@ Two release tracks:
     - [ ] gemma-4-E2B-it-Q4_K_M defaults
   - [ ] Apple Silicon : macOS
     - [ ] gemma-4-E2B-it-Q4_K_M defaults
-- [ ] **IP**: Test Proxy with OpenCode.
+- [x] **IP**: Test Proxy with OpenCode.
   - [x] ~~Proxy quick benchmark~~ — Suite C orchestrator at [`scripts/bench/proxy/orchestrator.py`](scripts/bench/proxy/orchestrator.py); brings up a model via the existing `LlamaStashDriver` and runs `chat_turn` alternating between the direct `llama-server` port and the proxy (`127.0.0.1:11434`). On `deepu-flowz13-arch` with `gemma-4-E2B-it-Q4_K_M` (15 reps, alternating order): TTFT p50 +0.45 ms (52.37 → 52.82 ms), decode p50 unchanged (92.80 → 92.70 tok/s). Result + method at [`docs/benchmarks/proxy/results.md`](docs/benchmarks/proxy/results.md); raw JSON under [`docs/benchmarks/proxy/deepu-flowz13-arch/`](docs/benchmarks/proxy/).
-- [ ] **Auto-start retry cap**: when the proxy/supervisor relaunches a failing model, cap the attempts (e.g. 3 retries within a short window) and surface a clear error instead of looping. Observed 2026-05-25 with `Qwen3.6-27B-Q4_K_M` via OpenCode — 10+ failed launches in ~30s spamming logs while the real cause was VRAM pressure from the previously-loaded `gemma-4-E2B-it-Q4_K_M`. See `~/.cache/llamastash/logs/Qwen3.6-27B-Q4_K_M-113ab00c-17797117{36..823}.log`.
+  - [x] **Auto-start retry cap**: when the proxy/supervisor relaunches a failing model, cap the attempts (e.g. 3 retries within a short window) and surface a clear error instead of looping. Observed 2026-05-25 with `Qwen3.6-27B-Q4_K_M` via OpenCode — 10+ failed launches in ~30s spamming logs while the real cause was VRAM pressure from the previously-loaded `gemma-4-E2B-it-Q4_K_M`. See `~/.cache/llamastash/logs/Qwen3.6-27B-Q4_K_M-113ab00c-17797117{36..823}.log`.
 - [ ] Manual UAT smoke run
-  - [ ] AMD APU : Linux
+  - [x] AMD APU : Linux
   - [ ] AMD GPU : Linux
   - [ ] Nvidia : Linux
   - [ ] Apple Silicon : macOS
@@ -135,7 +128,7 @@ Two release tracks:
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
 - [ ] **UAT follow-up** — items deferred from [`docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md`](docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md) that don't block R1 ship but are tracked against the UAT subsystem.
-  - [ ] Lock in reference-model commit SHAs in `src/cli/uat/model.rs` — both `PRIMARY` and `FALLBACK` ship a `<TBD-locked-on-first-dry-run>` sentinel that the orchestrator surfaces as a `host.warnings` entry. First warm-mode dry-run on the maintainer's box lands the lock-in commit. Procedure: [`docs/runbooks/verify-uat-reintroduction.md`](docs/runbooks/verify-uat-reintroduction.md) §8b.
+  - [x] ~~Lock in reference-model commit SHAs in `src/cli/uat/model.rs` — both `PRIMARY` and `FALLBACK` ship a `<TBD-locked-on-first-dry-run>` sentinel that the orchestrator surfaces as a `host.warnings` entry. First warm-mode dry-run on the maintainer's box lands the lock-in commit. Procedure: [`docs/runbooks/verify-uat-reintroduction.md`](docs/runbooks/verify-uat-reintroduction.md) §8b.~~
   - [ ] `Hardware UAT report` GitHub issue template — deferred until first contributor wants to file one (origin §Acceptance checklist). Recreate the `uat-caught` label if it's ever deleted: `gh label create uat-caught --color B60205 --description "Release PR where UAT caught a regression that would otherwise have shipped"`.
   - [ ] Cloud-runner re-evaluation — gated on user-base trigger (>500 installs + 3 RC cycles silence) per [`docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md`](docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md) §Companion trigger.
 - [ ] **Release pipeline ops** (continued from R1).
@@ -149,6 +142,10 @@ Two release tracks:
 - [ ] **GGUF scope-reduction audit**: the research did _not_ prove every line under `src/gguf/` is necessary. Keep the custom header/split/HF-path behavior unless replaced by a proven crate, but audit `metadata.rs` / `memory.rs` / helpers for code that is not serving a shipped feature. Separate question from "use a crate": can the current custom subsystem be materially smaller while keeping header-only parsing and current UX/identity behavior?
 - [ ] **IPC framing revisit**: re-evaluate swapping the hand-rolled length-prefixed codec for `tokio-util::codec::LengthDelimitedCodec` only if the surrounding IPC layer grows enough that the extra dependency meaningfully simplifies maintenance. Current framing is small, bounded, and fully tested; a swap is not justified today.
 - [ ] More colors in CLI outs, including the --help.
+- [ ] Ollama-compat Tier 2 inference surface (`/api/chat`, `/api/generate`, `/api/embed`) remains deferred. See [`src/proxy/router.rs`](src/proxy/router.rs) and [`tests/proxy_ollama_compat.rs`](tests/proxy_ollama_compat.rs).
+- [ ] Ollama-compat digest should switch from path-derived `blake3:` to cached header BLAKE3 when the catalog exposes it. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).
+- [ ] Proxy idle-TTL eviction is still deferred for `/api/ps` expiry reporting. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).
+- [ ] Per-model VRAM attribution for Ollama-compat `/api/ps` still emits `0`. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).
 
 ### Good to have
 

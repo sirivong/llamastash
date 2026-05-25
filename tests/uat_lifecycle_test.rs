@@ -113,7 +113,7 @@ fn uat_pre_flight_fails_on_backend_mismatch() {
   assert_eq!(json["schema_version"], 1, "schema_version must be 1");
   assert_eq!(json["verdict"], "fail", "verdict must be fail on mismatch");
   let steps = json["steps"].as_array().expect("steps[] is an array");
-  assert_eq!(steps.len(), 5, "5-step lifecycle is contract");
+  assert_eq!(steps.len(), 6, "6-step lifecycle is contract");
   let first = &steps[0];
   assert_eq!(first["name"], "doctor_preflight");
   assert_eq!(first["verdict"], "fail");
