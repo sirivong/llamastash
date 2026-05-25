@@ -7,6 +7,7 @@ Read [methodology.md](methodology.md) before any individual page; it explains th
 ## Curated reports
 
 - [**R1 AMD-APU final report**](r1-amd-apu-final-report.md) — full 4-model × 4-tool × 2-mode × 4-workload sweep on AMD Strix Halo (gfx1151), with headline tables, per-workload tables, six findings, and methodology caveats. **Start here** for the AMD-APU story.
+- [**Proxy overhead**](proxy/results.md) — Suite C: per-request overhead of the LlamaStash OpenAI-compat proxy vs hitting the same `llama-server` directly. TTFT p50 +0.45 ms, decode unchanged.
 
 ## Results (auto-rendered)
 
@@ -17,6 +18,7 @@ Read [methodology.md](methodology.md) before any individual page; it explains th
 
 - [runs/](runs/) — Suite B (cross-tool end-to-end) per-host JSON files
 - [overhead/](overhead/) — Suite A (`llamastash` vs raw `llama-server` overhead) per-host JSON files
+- [proxy/](proxy/) — Suite C (proxy vs direct `llama-server`) per-host JSON files
 
 Each subdirectory is one folder per host-id; files are named `<YYYY-MM-DD>-<commit-sha>.json`. The same renderer that builds the dated results pages reads these files; anyone with the harness can re-render or extend them.
 
@@ -25,6 +27,7 @@ Each subdirectory is one folder per host-id; files are named `<YYYY-MM-DD>-<comm
 ```sh
 make bench-end-to-end           # Suite B (cross-tool)
 make bench-overhead             # Suite A (overhead vs raw llama-server)
+scripts/bench/proxy/run.sh ...  # Suite C (proxy vs direct llama-server) — see results.md for invocation
 make bench-test                 # harness unit tests only — no real benchmark spawn
 ```
 

@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "suite": "proxy",
+  "host": {
+    "host_id": "deepu-flowz13-arch",
+    "os": "Linux 7.0.7-arch2-1",
+    "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "cpu_threads": 32,
+    "ram_gb": 121.49,
+    "gpu_backend": "rocm",
+    "gpu_name": "AMD Radeon 8060S Graphics",
+    "gpu_vram_gb": 4.0
+  },
+  "provenance": {
+    "llamastash_version": "llamastash 0.0.1-beta.0",
+    "llama_server_version": "version: 9245 (b39a7bf1b)",
+    "llama_cpp_commit": "b39a7bf1b",
+    "ollama_version": "ollama version is 0.0.1-beta.0",
+    "ollama_llama_cpp_commit": null,
+    "lmstudio_version": "\u001b[38;5;166m   __   __  ___  ______          ___        _______   ____\u001b[0m",
+    "python_version": "3.12.13"
+  },
+  "started_at_utc": "2026-05-25T12:01:55.690366+00:00",
+  "finished_at_utc": "2026-05-25T12:02:20.539962+00:00",
+  "git_sha": "98506aedc0234330be7999c6f81ef0a825448333",
+  "knobs": {
+    "ctx": 4096,
+    "n_gpu_layers": 99
+  },
+  "workload": "chat_turn",
+  "measured_reps_per_phase": 15,
+  "phase_order": "alternate",
+  "model_path": "/mnt/work/lmstudio-models/lmstudio-community/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_K_M.gguf",
+  "phases": {
+    "direct": {
+      "label": "direct",
+      "base_url": "http://127.0.0.1:18000",
+      "model_name": "default",
+      "ttft_ms_mean": 52.259500739940755,
+      "ttft_ms_stddev_pct": 6.389793117987256,
+      "decode_tps_mean": 93.8905869172655,
+      "decode_tps_stddev_pct": 3.0924812414787546,
+      "reps": [
+        {
+          "rep_index": 0,
+          "is_warmup": true,
+          "ttft_ms": 50.98821298452094,
+          "decode_tps": 99.23312046013538,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 685.8568909810856
+        },
+        {
+          "rep_index": 1,
+          "is_warmup": false,
+          "ttft_ms": 47.61815897654742,
+          "decode_tps": 99.23554011643333,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 682.4713569949381
+        },
+        {
+          "rep_index": 2,
+          "is_warmup": false,
+          "ttft_ms": 48.64982102299109,
+          "decode_tps": 98.94744762965425,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 685.3514389949851
+        },
+        {
+          "rep_index": 3,
+          "is_warmup": false,
+          "ttft_ms": 50.53595203207806,
+          "decode_tps": 99.73508920423177,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 682.2093229857273
+        },
+        {
+          "rep_index": 4,
+          "is_warmup": false,
+          "ttft_ms": 61.04645202867687,
+          "decode_tps": 91.97200728786758,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 746.0374819929712
+        },
+        {
+          "rep_index": 5,
+          "is_warmup": false,
+          "ttft_ms": 47.484136011917144,
+          "decode_tps": 94.43546147868359,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 714.6064120461233
+        },
+        {
+          "rep_index": 6,
+          "is_warmup": false,
+          "ttft_ms": 52.36923397751525,
+          "decode_tps": 92.28132391364053,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 735.0642509991303
+        },
+        {
+          "rep_index": 7,
+          "is_warmup": false,
+          "ttft_ms": 53.882522974163294,
+          "decode_tps": 92.9012118081913,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 732.0222239941359
+        },
+        {
+          "rep_index": 8,
+          "is_warmup": false,
+          "ttft_ms": 51.569108036346734,
+          "decode_tps": 91.88889343169335,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 737.1797150117345
+        },
+        {
+          "rep_index": 9,
+          "is_warmup": false,
+          "ttft_ms": 52.85455798730254,
+          "decode_tps": 91.84731427521073,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 738.7755399686284
+        },
+        {
+          "rep_index": 10,
+          "is_warmup": false,
+          "ttft_ms": 55.81142503069714,
+          "decode_tps": 91.11030809288818,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 747.2809340106323
+        },
+        {
+          "rep_index": 11,
+          "is_warmup": false,
+          "ttft_ms": 53.16883901832625,
+          "decode_tps": 92.46318761979762,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 734.5210789935663
+        },
+        {
+          "rep_index": 12,
+          "is_warmup": false,
+          "ttft_ms": 52.16763500357047,
+          "decode_tps": 93.0033068972438,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 729.5629029977135
+        },
+        {
+          "rep_index": 13,
+          "is_warmup": false,
+          "ttft_ms": 52.932413993403316,
+          "decode_tps": 92.58003359992061,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 733.4247140097432
+        },
+        {
+          "rep_index": 14,
+          "is_warmup": false,
+          "ttft_ms": 52.5776160066016,
+          "decode_tps": 93.16159138701502,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 728.8219680194743
+        },
+        {
+          "rep_index": 15,
+          "is_warmup": false,
+          "ttft_ms": 51.224638998974115,
+          "decode_tps": 92.79608701651071,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 730.1325760199688
+        }
+      ]
+    },
+    "proxy": {
+      "label": "proxy",
+      "base_url": "http://127.0.0.1:11434",
+      "model_name": "/mnt/work/lmstudio-models/lmstudio-community/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_K_M.gguf",
+      "ttft_ms_mean": 54.910451208706945,
+      "ttft_ms_stddev_pct": 16.619328140547527,
+      "decode_tps_mean": 94.16966137018112,
+      "decode_tps_stddev_pct": 3.6079798536405505,
+      "reps": [
+        {
+          "rep_index": 0,
+          "is_warmup": true,
+          "ttft_ms": 50.018496986012906,
+          "decode_tps": 99.08394268513337,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 685.8430139836855
+        },
+        {
+          "rep_index": 1,
+          "is_warmup": false,
+          "ttft_ms": 47.44714597472921,
+          "decode_tps": 100.19739778194565,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 676.2059899629094
+        },
+        {
+          "rep_index": 2,
+          "is_warmup": false,
+          "ttft_ms": 47.462045040447265,
+          "decode_tps": 99.28775081224771,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 681.9814040209167
+        },
+        {
+          "rep_index": 3,
+          "is_warmup": false,
+          "ttft_ms": 49.37534703640267,
+          "decode_tps": 97.2040609634349,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 697.4964170367457
+        },
+        {
+          "rep_index": 4,
+          "is_warmup": false,
+          "ttft_ms": 67.18377699144185,
+          "decode_tps": 100.69116042440176,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 692.8593550110236
+        },
+        {
+          "rep_index": 5,
+          "is_warmup": false,
+          "ttft_ms": 52.14347899891436,
+          "decode_tps": 90.26077084509649,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 750.1211210037582
+        },
+        {
+          "rep_index": 6,
+          "is_warmup": false,
+          "ttft_ms": 52.19866201514378,
+          "decode_tps": 93.34960548685709,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 727.0809999899939
+        },
+        {
+          "rep_index": 7,
+          "is_warmup": false,
+          "ttft_ms": 52.81702702632174,
+          "decode_tps": 92.57754888369483,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 733.3275909768417
+        },
+        {
+          "rep_index": 8,
+          "is_warmup": false,
+          "ttft_ms": 52.907848032191396,
+          "decode_tps": 92.70186525998533,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 732.5058240094222
+        },
+        {
+          "rep_index": 9,
+          "is_warmup": false,
+          "ttft_ms": 53.1919120112434,
+          "decode_tps": 91.78642222272856,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 739.5679409964941
+        },
+        {
+          "rep_index": 10,
+          "is_warmup": false,
+          "ttft_ms": 52.28633800288662,
+          "decode_tps": 91.04282480943013,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 744.2683819681406
+        },
+        {
+          "rep_index": 11,
+          "is_warmup": false,
+          "ttft_ms": 53.66094602504745,
+          "decode_tps": 92.66725974130247,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 733.5127100232057
+        },
+        {
+          "rep_index": 12,
+          "is_warmup": false,
+          "ttft_ms": 83.6901169968769,
+          "decode_tps": 92.94522217374417,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 761.5087130106986
+        },
+        {
+          "rep_index": 13,
+          "is_warmup": false,
+          "ttft_ms": 52.64306900789961,
+          "decode_tps": 92.32757770662376,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 734.9960730061866
+        },
+        {
+          "rep_index": 14,
+          "is_warmup": false,
+          "ttft_ms": 52.997095976024866,
+          "decode_tps": 92.54716151343717,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 733.7311019655317
+        },
+        {
+          "rep_index": 15,
+          "is_warmup": false,
+          "ttft_ms": 53.651958995033056,
+          "decode_tps": 92.95829192778683,
+          "prompt_tokens": 48,
+          "decode_tokens": 64,
+          "e2e_latency_ms": 731.3752550398931
+        }
+      ]
+    }
+  },
+  "deltas": {
+    "ttft_ms_delta": 2.6509504687661902,
+    "decode_tps_delta_pct": -0.2972336866543796
+  },
+  "tier": "ok",
+  "thresholds": {
+    "advisory_ttft_ms": 10.0,
+    "advisory_decode_pct": 2.0,
+    "catastrophic_ttft_ms": 25.0,
+    "catastrophic_decode_pct": 5.0
+  }
+}

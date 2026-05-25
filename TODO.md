@@ -83,7 +83,7 @@ _None — the four vendoring items shipped 2026-05-19 via [`docs/plans/2026-05-1
   - [ ] Apple Silicon : macOS
     - [ ] gemma-4-E2B-it-Q4_K_M defaults
 - [ ] **IP**: Test Proxy with OpenCode.
-  - [ ] Proxy quick benchmark
+  - [x] ~~Proxy quick benchmark~~ — Suite C orchestrator at [`scripts/bench/proxy/orchestrator.py`](scripts/bench/proxy/orchestrator.py); brings up a model via the existing `LlamaStashDriver` and runs `chat_turn` alternating between the direct `llama-server` port and the proxy (`127.0.0.1:11434`). On `deepu-flowz13-arch` with `gemma-4-E2B-it-Q4_K_M` (15 reps, alternating order): TTFT p50 +0.45 ms (52.37 → 52.82 ms), decode p50 unchanged (92.80 → 92.70 tok/s). Result + method at [`docs/benchmarks/proxy/results.md`](docs/benchmarks/proxy/results.md); raw JSON under [`docs/benchmarks/proxy/deepu-flowz13-arch/`](docs/benchmarks/proxy/).
 - [ ] Manual UAT smoke run
   - [ ] AMD APU : Linux
   - [ ] AMD GPU : Linux
