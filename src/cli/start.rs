@@ -19,8 +19,10 @@ use serde_json::{json, Value};
 
 use crate::cli::cli_args::{Cli, LaunchMode as CliLaunchMode, ReasoningFlag, StartArgs};
 use crate::cli::client::connect_or_spawn;
-use crate::cli::exit_codes::{CliExit, CliResult, BINARY_NOT_FOUND, LAUNCH_FAILED, USAGE};
-use crate::cli::resolve::{fetch_catalog, resolve_model, CatalogRow};
+use crate::cli::exit_codes::{
+  CliExit, CliResult, BINARY_NOT_FOUND, LAUNCH_FAILED, MODEL_NOT_FOUND, USAGE,
+};
+use crate::cli::resolve::{fetch_catalog, resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::cli::tail_args::parse_tail_args;
 use crate::config::{Config, TypedKnobs};
 use crate::ipc::Client;
@@ -28,7 +30,7 @@ use crate::ipc::Client;
 pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
   let mut client = connect_or_spawn(cli, config).await?;
   let rows = fetch_catalog(&mut client).await?;
-  let row = resolve_model(&rows, &args.model)?;
+  let row = select_start_row(&rows, &args)?;
 
   // Mode: explicit override > catalog hint (unless `unknown`).
   let mode = resolve_mode(&row, args.mode)?;
@@ -84,6 +86,86 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     .map_err(|e| map_start_error(e, &row))?;
   emit_response(args.preset.as_deref(), &row, &resp, args.json, cli.quiet);
   Ok(())
+}
+
+fn select_start_row(rows: &[CatalogRow], args: &StartArgs) -> Result<CatalogRow, CliExit> {
+  match resolve_model_with_candidates(rows, &args.model) {
+    Ok(row) => Ok(row),
+    Err(ResolveError::Empty) => Err(CliExit::new(
+      MODEL_NOT_FOUND,
+      "empty model reference; supply a name substring, absolute path, or short id",
+    )),
+    Err(ResolveError::None) => {
+      if let Some(path) = direct_path_candidate(args)? {
+        return Ok(direct_catalog_row(
+          path,
+          args
+            .mode
+            .expect("direct_path_candidate requires explicit mode"),
+        ));
+      }
+      Err(CliExit::new(
+        MODEL_NOT_FOUND,
+        format!("no model matches `{}` ({} known)", args.model, rows.len()),
+      ))
+    }
+    Err(ResolveError::Many(candidates)) => {
+      let names: Vec<String> = candidates.iter().map(|r| r.name()).collect();
+      Err(CliExit::new(
+        MODEL_NOT_FOUND,
+        format!(
+          "`{}` matches {} models: {}\nrefine the reference (full path or unique substring) and retry",
+          args.model,
+          candidates.len(),
+          names.join(", ")
+        ),
+      ))
+    }
+  }
+}
+
+fn direct_path_candidate(args: &StartArgs) -> Result<Option<PathBuf>, CliExit> {
+  let path = PathBuf::from(&args.model);
+  if !path.is_absolute() {
+    return Ok(None);
+  }
+  if !path.exists() {
+    return Ok(None);
+  }
+  if !path.is_file() {
+    return Ok(None);
+  }
+  if args.mode.is_none() {
+    return Err(CliExit::new(
+      USAGE,
+      format!(
+        "absolute path `{}` bypasses catalog discovery; pass --mode chat|embedding|rerank",
+        path.display()
+      ),
+    ));
+  }
+  Ok(Some(path))
+}
+
+fn direct_catalog_row(path: PathBuf, mode: CliLaunchMode) -> CatalogRow {
+  let parent = path
+    .parent()
+    .map(|p| p.display().to_string())
+    .unwrap_or_default();
+  CatalogRow {
+    path: path.display().to_string(),
+    model_id: None,
+    parent,
+    source: "direct_path".into(),
+    arch: None,
+    quant: None,
+    native_ctx: None,
+    mode_hint: Some(mode.as_label().to_string()),
+    parameter_label: None,
+    weights_bytes: None,
+    display_label: None,
+    parse_error: None,
+  }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -335,5 +417,106 @@ mod tests {
       v["extras"],
       serde_json::json!(["--rope-freq-base", "10000"])
     );
+  }
+
+  #[test]
+  fn direct_path_candidate_requires_explicit_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.gguf");
+    std::fs::write(&path, b"gguf").unwrap();
+    let args = StartArgs {
+      model: path.display().to_string(),
+      preset: None,
+      ctx: None,
+      port: None,
+      reasoning: None,
+      mode: None,
+      extra: vec![],
+      json: false,
+    };
+    let err = direct_path_candidate(&args).unwrap_err();
+    assert_eq!(err.code, USAGE);
+    assert!(err.to_string().contains("pass --mode"));
+  }
+
+  #[test]
+  fn direct_path_candidate_accepts_existing_absolute_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.gguf");
+    std::fs::write(&path, b"gguf").unwrap();
+    let args = StartArgs {
+      model: path.display().to_string(),
+      preset: None,
+      ctx: None,
+      port: None,
+      reasoning: None,
+      mode: Some(CliLaunchMode::Chat),
+      extra: vec![],
+      json: false,
+    };
+    let resolved = direct_path_candidate(&args).unwrap();
+    assert_eq!(resolved, Some(path));
+  }
+
+  #[test]
+  fn direct_catalog_row_uses_explicit_mode_hint() {
+    let row = direct_catalog_row(PathBuf::from("/tmp/m.gguf"), CliLaunchMode::Rerank);
+    assert_eq!(row.path, "/tmp/m.gguf");
+    assert_eq!(row.mode_hint.as_deref(), Some("rerank"));
+    assert_eq!(row.source, "direct_path");
+  }
+
+  #[test]
+  fn select_start_row_falls_back_to_direct_path_when_catalog_misses() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.gguf");
+    std::fs::write(&path, b"gguf").unwrap();
+    let args = StartArgs {
+      model: path.display().to_string(),
+      preset: None,
+      ctx: None,
+      port: None,
+      reasoning: None,
+      mode: Some(CliLaunchMode::Chat),
+      extra: vec![],
+      json: false,
+    };
+    let row = select_start_row(&[], &args).unwrap();
+    assert_eq!(row.path, path.display().to_string());
+    assert_eq!(row.mode_hint.as_deref(), Some("chat"));
+  }
+
+  #[test]
+  fn select_start_row_prefers_catalog_match_over_direct_path_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.gguf");
+    std::fs::write(&path, b"gguf").unwrap();
+    let row = CatalogRow {
+      path: path.display().to_string(),
+      model_id: Some("deadbeef".into()),
+      parent: dir.path().display().to_string(),
+      source: "user".into(),
+      arch: Some("qwen2".into()),
+      quant: Some("Q4_K".into()),
+      native_ctx: Some(8192),
+      mode_hint: Some("embedding".into()),
+      parameter_label: Some("7B".into()),
+      weights_bytes: Some(123),
+      display_label: Some("known-model".into()),
+      parse_error: None,
+    };
+    let args = StartArgs {
+      model: path.display().to_string(),
+      preset: None,
+      ctx: None,
+      port: None,
+      reasoning: None,
+      mode: Some(CliLaunchMode::Chat),
+      extra: vec![],
+      json: false,
+    };
+    let selected = select_start_row(std::slice::from_ref(&row), &args).unwrap();
+    assert_eq!(selected.display_label.as_deref(), Some("known-model"));
+    assert_eq!(selected.mode_hint.as_deref(), Some("embedding"));
   }
 }

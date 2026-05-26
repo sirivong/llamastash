@@ -177,7 +177,7 @@ done
 
 ---
 
-## Step 5 — Dry-run the release pipeline with a prerelease tag that matches `Cargo.toml`
+## Step 5 — Dry-run the release pipeline with a prerelease tag that matches `Cargo.toml` - In progress
 
 Pre-release tags (`vX.Y.Z-<suffix>`) exercise the upstream half of the pipeline only: `create-release` → `build` → `publish-shasums`. The `publish-homebrew`, `publish-site`, and `publish-cargo` jobs all gate on `is_prerelease == 'false'` and are skipped. **This is intentional** — it means the dry run never writes to the tap, site, or crates.io, so cleanup after the dry run is just deleting the tag and the test release.
 

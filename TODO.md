@@ -98,7 +98,7 @@ Two release tracks:
   - [x] Readme and docs
   - [x] repo and org
   - [x] website
-- [ ] Release setup validation (CI/CD etc).
+- [ ] **IP**: Release setup validation (CI/CD etc).
 - [x] Setup llamastash.dev domain
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] **Need brainstorm/plan**: Release blog.
@@ -106,6 +106,7 @@ Two release tracks:
 
 ### Follow-up
 
+- [ ] Setup GPU runners using https://cirun.io/
 - [ ] Publish to clawhub
 - [ ] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
 - [ ] The Model drill in page inside HF pull (the last page) doesnt scroll.

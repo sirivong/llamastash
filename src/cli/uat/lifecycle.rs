@@ -416,6 +416,8 @@ async fn step_start_model(
     .arg("--quiet")
     .arg("start")
     .arg("--json")
+    .arg("--mode")
+    .arg("chat")
     .arg("--model-path")
     .arg(scan_dir)
     .arg(gguf_path);
