@@ -13,6 +13,10 @@ use std::time::Duration;
 use serde::Serialize;
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
+fn thread_count(proc: &sysinfo::Process) -> u32 {
+  proc.tasks().map(|tasks| (tasks.len() as u32).max(1)).unwrap_or(1)
+}
+
 /// One reading. Returned by [`sample`] and via the supervisor's
 /// per-model sampler loop.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -45,7 +49,7 @@ pub fn sample(pid: u32) -> Option<ResourceReading> {
     pid,
     rss_bytes: proc.memory(),
     cpu_percent: proc.cpu_usage(),
-    threads: proc.tasks().map(|t| t.len() as u32).unwrap_or(1),
+    threads: thread_count(proc),
   })
 }
 
@@ -81,7 +85,7 @@ pub fn sample_loop(pid: u32, interval: Duration) -> tokio::sync::mpsc::Receiver<
         pid,
         rss_bytes: proc.memory(),
         cpu_percent: proc.cpu_usage(),
-        threads: proc.tasks().map(|t| t.len() as u32).unwrap_or(1),
+        threads: thread_count(proc),
       };
       // Use `try_send` rather than `send().await`: a slow consumer
       // would otherwise back-pressure this task, pinning the

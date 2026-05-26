@@ -94,10 +94,10 @@ Two release tracks:
 - [x] ~~**IP**: Audit (binary size, dependencies, test coverage, security, etc.).~~ — release binary `target/release/llamastash` is 12.7 MiB; `cargo audit --json` found 0 vulnerabilities across 375 lockfile deps; Tarpaulin line coverage is `11149 / 15072 = 73.97%`; `cargo geiger --all-targets --features test-fixtures` shows project `unsafe` is present but confined to deliberate libc/process/syscall boundaries (signals, `setsid`, `flock`, `umask`, peercred, `statvfs`), with no obvious crate swap or duplicate-dependency cleanup that materially improves the release.
 - [x] ~~Check and sync all docs, validate all repo docs~~
 - [x] ~~Add Agent Skills.~~ — an installable AgentSkills bundle now ships under [`skills/llamastash/`](skills/llamastash/) for Claude Code, OpenClaw, OpenCode, and similar harnesses that need to drive the LlamaStash CLI.
-- [ ] **IP**: Update 
+- [x] **IP**: Update 
   - [x] Readme and docs
-  - [ ] repo and org
-  - [ ] website
+  - [x] repo and org
+  - [x] website
 - [ ] Publish to clawhub
 - [ ] Release setup validation (CI/CD etc).
 - [ ] Setup llamastash.dev domain
