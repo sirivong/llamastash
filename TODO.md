@@ -82,20 +82,22 @@ Two release tracks:
   - [x] ~~Proxy quick benchmark~~ — Suite C orchestrator at [`scripts/bench/proxy/orchestrator.py`](scripts/bench/proxy/orchestrator.py); brings up a model via the existing `LlamaStashDriver` and runs `chat_turn` alternating between the direct `llama-server` port and the proxy (`127.0.0.1:11434`). On `deepu-flowz13-arch` with `gemma-4-E2B-it-Q4_K_M` (15 reps, alternating order): TTFT p50 +0.45 ms (52.37 → 52.82 ms), decode p50 unchanged (92.80 → 92.70 tok/s). Result + method at [`docs/benchmarks/proxy/results.md`](docs/benchmarks/proxy/results.md); raw JSON under [`docs/benchmarks/proxy/deepu-flowz13-arch/`](docs/benchmarks/proxy/).
   - [x] **Auto-start retry cap**: when the proxy/supervisor relaunches a failing model, cap the attempts (e.g. 3 retries within a short window) and surface a clear error instead of looping. Observed 2026-05-25 with `Qwen3.6-27B-Q4_K_M` via OpenCode — 10+ failed launches in ~30s spamming logs while the real cause was VRAM pressure from the previously-loaded `gemma-4-E2B-it-Q4_K_M`. See `~/.cache/llamastash/logs/Qwen3.6-27B-Q4_K_M-113ab00c-17797117{36..823}.log`.
 - [ ] **IP**: Manual UAT smoke run
-  - [x] AMD APU Rocm : Linux
+  - [x] AMD APU ROCm : Linux
   - [x] AMD APU Vulkan : Linux
   - [ ] AMD GPU : Linux
   - [ ] Nvidia : Linux
+  - [ ] Nvidia Vulkan: Linux
   - [ ] Apple Metal : macOS
   - [x] CPU : macOS -> CD
   - [x] CPU : linux -> CD
   - [x] Update CI for cpu only run. First optimize the nightly builds (fold into release)
-- [ ] **IP**: Update Readme, repo, org and website properly
 - [x] ~~**IP**: Audit (binary size, dependencies, test coverage, security, etc.).~~ — release binary `target/release/llamastash` is 12.7 MiB; `cargo audit --json` found 0 vulnerabilities across 375 lockfile deps; Tarpaulin line coverage is `11149 / 15072 = 73.97%`; `cargo geiger --all-targets --features test-fixtures` shows project `unsafe` is present but confined to deliberate libc/process/syscall boundaries (signals, `setsid`, `flock`, `umask`, peercred, `statvfs`), with no obvious crate swap or duplicate-dependency cleanup that materially improves the release.
 - [x] ~~Check and sync all docs, validate all repo docs~~
+- [ ] **IP**: Update Readme, repo, org and website properly
 - [ ] Release setup validation (website/CI/CD etc).
 - [ ] Add llamastash to cli.rs https://github.com/zackify/cli.rs/pull/1/changes — Unit 7 cutover step, post-org-bootstrap.
-- [ ] Add Agent Skills.
+- [x] ~~Add Agent Skills.~~ — an installable AgentSkills bundle now ships under [`skills/llamastash/`](skills/llamastash/) for Claude Code, OpenClaw, OpenCode, and similar harnesses that need to drive the LlamaStash CLI.    
+  - [ ] Publish to clawhub
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] **Need brainstorm/plan**: Release blog.
   - [ ] **Need brainstorm/research/plan**: Social promotion — research an approach for max reach.

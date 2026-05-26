@@ -70,6 +70,32 @@ Either source flips on click-to-focus for the Models list, the right pane, and t
 
 Full subcommand reference: [`docs/usage.md`](docs/usage.md). Proxy client setup (including an OpenCode example): [`docs/usage.md#opencode-setup`](docs/usage.md#opencode-setup). Prefer a Vulkan `llama-server` build on AMD/NVIDIA hosts: [`docs/usage.md#preferring-a-vulkan-llama-server-build`](docs/usage.md#preferring-a-vulkan-llama-server-build). Architecture and IPC contract: [`docs/architecture.md`](docs/architecture.md). When things go wrong: [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
+## Agent Skills
+
+The CLI ships with an [Agent Skills](https://agentskills.io) manifest so supported agents can load repo-specific instructions for using `llamastash` as a local model-management CLI.
+
+- Canonical skill bundle: [`skills/llamastash/`](skills/llamastash/)
+
+**Claude Code plugin marketplace:** install the repo as a plugin, then install the bundled skill:
+
+```text
+/plugin marketplace add llamastash/llamastash
+/plugin install llamastash@llamastash
+/reload-plugins
+```
+
+Manual install examples:
+
+```bash
+# OpenClaw
+mkdir -p ~/.openclaw/skills && cp -r skills/llamastash ~/.openclaw/skills/
+
+# OpenCode
+mkdir -p ~/.config/opencode/skills && cp -r skills/llamastash ~/.config/opencode/skills/
+```
+
+The skill teaches agents to prefer `--json`, branch on LlamaStash's documented exit codes, reuse exact discovered model names, and read `status --json` `proxy.listen` before configuring an OpenAI-compatible client.
+
 ## Features
 
 Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs, contracts, and links into [`docs/usage.md`](docs/usage.md).
@@ -135,12 +161,12 @@ LlamaStash spawns the unmodified upstream `llama-server`. Three suites track wha
 
 ### AMD APU - Linux (Ryzen AI Max+ 395 / Radeon 8060S, `gfx1151`, llama.cpp build `9245 (b39a7bf1b)`)
 
-| Tool | small (E2B Q4) | mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes |
-|---|---:|---:|---:|---:|---|
-| **LlamaStash** | **86.9 / 51** | 9.8 / 467 | **7.4 / 417** | **42.6 / 181** | local HIP/ROCm |
-| raw `llama-server` | 86.0 / 51 | 9.9 / 468 | 7.4 / 414 | 42.7 / 186 | local HIP/ROCm |
-| LM Studio 2.16.0 | **91.1** / 187 | **11.6** / 1 477 | **7.9** / 1 274 | 37.0 / 683 | small=ROCm, mid/large=Vulkan |
-| Ollama 0.24.0 | 50.4 / 223 | 4.8 / 1 092 | 2.6 / 1 745 | 12.1 / 476 | bundled |
+| Tool               | small (E2B Q4) |     mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes                 |
+| ------------------ | -------------: | ---------------: | -------------------: | ---------------------: | ---------------------------- |
+| **LlamaStash**     |  **86.9 / 51** |        9.8 / 467 |        **7.4 / 417** |         **42.6 / 181** | local HIP/ROCm               |
+| raw `llama-server` |      86.0 / 51 |        9.9 / 468 |            7.4 / 414 |             42.7 / 186 | local HIP/ROCm               |
+| LM Studio 2.16.0   | **91.1** / 187 | **11.6** / 1 477 |      **7.9** / 1 274 |             37.0 / 683 | small=ROCm, mid/large=Vulkan |
+| Ollama 0.24.0      |     50.4 / 223 |      4.8 / 1 092 |          2.6 / 1 745 |             12.1 / 476 | bundled                      |
 
 Each cell is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode), averaged across `defaults` + `normalized` modes. LlamaStash matches raw `llama-server` within ≤1% on every cell. Curated report with seven findings: [`r1-amd-apu-final-report.md`](docs/benchmarks/r1-amd-apu-final-report.md). Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
 

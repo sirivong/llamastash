@@ -1,0 +1,20 @@
+{
+  "name": "llamastash",
+  "owner": {
+    "name": "Deepu K Sasidharan",
+    "email": "d4udts@gmail.com"
+  },
+  "metadata": {
+    "description": "Control local llama.cpp-backed models through the LlamaStash CLI",
+    "version": "0.0.1-beta.0"
+  },
+  "plugins": [
+    {
+      "name": "llamastash",
+      "description": "Control local llama.cpp-backed models through the LlamaStash CLI. Use when an agent needs to install or initialize LlamaStash, list models, start or stop a model, inspect daemon or proxy health, pull GGUFs from HuggingFace, or obtain the local OpenAI-compatible proxy address for harnesses like Claude Code, OpenClaw, OpenCode, Pi, and other shell-capable AgentSkills clients.",
+      "source": "./",
+      "strict": false,
+      "skills": ["./skills/llamastash"]
+    }
+  ]
+}
