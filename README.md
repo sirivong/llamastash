@@ -2,13 +2,15 @@
 
 ![Logo](./assets/logo-h.jpg)
 
-A fast, keyboard-driven TUI **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp) with zero overhead. See [benchmarks](docs/benchmarks.md).
+A fast terminal native app (TUI) **and** CLI with init wizard for launching local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp) with zero overhead. See [benchmarks](docs/benchmarks.md).
 
 ## Why
 
 Heavy abstractions (Ollama, LM Studio) hide llama.cpp; raw `llama-server` use is tedious. LlamaStash is a fast, transparent launcher that is also a first-class shell-tool surface for agents — one binary, daemon on demand, same primitives in the TUI and the CLI.
 
 > **AI agents installing this for a user:** jump to [`INSTALL.md` § For AI agents](INSTALL.md#for-ai-agents). The non-interactive install + verify contract, and exit-code branching live there.
+
+![TUI Gif](./assets/tui.gif)
 
 ## Install
 
@@ -169,6 +171,13 @@ LlamaStash spawns the unmodified upstream `llama-server`. Three suites track wha
 | Ollama 0.24.0      |     50.4 / 223 |      4.8 / 1 092 |          2.6 / 1 745 |             12.1 / 476 | bundled                      |
 
 Each cell is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode), averaged across `defaults` + `normalized` modes. LlamaStash matches raw `llama-server` within ≤1% on every cell. Curated report with seven findings: [`r1-amd-apu-final-report.md`](docs/benchmarks/r1-amd-apu-final-report.md). Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
+
+## Screenshots
+
+![Init](./assets/init.gif)
+
+![TUI 1](./assets/tui_3.png)
+![TUI 2](./assets/tui_2.png)
 
 ## Configuration
 

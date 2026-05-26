@@ -93,17 +93,22 @@ Two release tracks:
   - [x] Update CI for cpu only run. First optimize the nightly builds (fold into release)
 - [x] ~~**IP**: Audit (binary size, dependencies, test coverage, security, etc.).~~ — release binary `target/release/llamastash` is 12.7 MiB; `cargo audit --json` found 0 vulnerabilities across 375 lockfile deps; Tarpaulin line coverage is `11149 / 15072 = 73.97%`; `cargo geiger --all-targets --features test-fixtures` shows project `unsafe` is present but confined to deliberate libc/process/syscall boundaries (signals, `setsid`, `flock`, `umask`, peercred, `statvfs`), with no obvious crate swap or duplicate-dependency cleanup that materially improves the release.
 - [x] ~~Check and sync all docs, validate all repo docs~~
-- [ ] **IP**: Update Readme, repo, org and website properly
-- [ ] Release setup validation (website/CI/CD etc).
+- [x] ~~Add Agent Skills.~~ — an installable AgentSkills bundle now ships under [`skills/llamastash/`](skills/llamastash/) for Claude Code, OpenClaw, OpenCode, and similar harnesses that need to drive the LlamaStash CLI.
+- [ ] **IP**: Update 
+  - [x] Readme and docs
+  - [ ] repo and org
+  - [ ] website
+- [ ] Publish to clawhub
+- [ ] Release setup validation (CI/CD etc).
 - [ ] Add llamastash to cli.rs https://github.com/zackify/cli.rs/pull/1/changes — Unit 7 cutover step, post-org-bootstrap.
-- [x] ~~Add Agent Skills.~~ — an installable AgentSkills bundle now ships under [`skills/llamastash/`](skills/llamastash/) for Claude Code, OpenClaw, OpenCode, and similar harnesses that need to drive the LlamaStash CLI.    
-  - [ ] Publish to clawhub
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] **Need brainstorm/plan**: Release blog.
   - [ ] **Need brainstorm/research/plan**: Social promotion — research an approach for max reach.
 
 ### Follow-up
 
+- [ ] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
+- [ ] The Model drill in page inside HF pull (the last page) doesnt scroll.
 - [ ] Offer to update OpenCode and other supported tools during `init`
 - [ ] Add a line in help page about the `*` in the `RAM*` in Host panel.
 - [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
@@ -129,7 +134,6 @@ Two release tracks:
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
 - [ ] **Need brainstorm/plan**: MLX and vLLM if cheap to add.
 - [ ] **Need brainstorm/plan**: Docker-ready packaging.
-- [ ] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
 - [ ] **Daemon idle RSS** (1.5 GB RSS on a long-running supervisor with no children, observed 2026-05-22). Audit ruled out the original suspects (metadata cache is bounded LRU 2048, per-launch log buffers exist only while a child is alive, external-process discovery is one-shot at startup). The CPU fix above may incidentally cure this if subprocess-allocation churn was the driver; if it doesn't, run `heaptrack` / `samply` on a freshly-started daemon attached to a populated HF + Ollama cache and watch RSS over the first hour.
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
