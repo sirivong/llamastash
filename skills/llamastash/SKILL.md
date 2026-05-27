@@ -45,7 +45,7 @@ If `llamastash` is missing or not configured yet, bring it up in this order:
    curl -fsSL https://llamastash.dev/install.sh | sh
 
    # Portable fallback
-   cargo install llamastash --locked
+   cargo install llamastash
    ```
 
 2. Verify the binary:

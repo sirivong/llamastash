@@ -24,7 +24,7 @@ curl -fsSL https://llamastash.dev/install.sh | sh
 brew install llamastash/llamastash/llamastash
 
 # From crates.io (any platform with a Rust toolchain)
-cargo install llamastash --locked
+cargo install llamastash
 ```
 
 Then run `llamastash init` — the interactive wizard installs `llama-server` for your hardware, downloads a starter GGUF, writes a tuned config, and smoke-launches it.

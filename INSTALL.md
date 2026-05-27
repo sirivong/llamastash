@@ -34,7 +34,7 @@ The brew tap is the recommended path on Apple Silicon — it installs a code-sig
 ### Option 3 — Cargo (any platform with Rust toolchain)
 
 ```bash
-cargo install llamastash --locked
+cargo install llamastash
 ```
 
 Builds from the published crate. Requires Rust 1.95+ (newer is fine). The `--locked` flag pins to the `Cargo.lock` shipped with the release for reproducibility.
@@ -93,7 +93,7 @@ Prefer the channel the user's environment already provides:
 
 - **macOS:** prefer Homebrew if `brew --version` succeeds.
 - **Linux:** prefer the install script.
-- **Anywhere with Rust:** `cargo install llamastash --locked` works as a portable fallback.
+- **Anywhere with Rust:** `cargo install llamastash` works as a portable fallback.
 
 ```bash
 # macOS (Homebrew detected)
@@ -103,7 +103,7 @@ brew install llamastash/llamastash/llamastash
 curl -fsSL https://llamastash.dev/install.sh | sh
 
 # Portable fallback
-cargo install llamastash --locked
+cargo install llamastash
 ```
 
 ### 2. Verify the binary is on PATH

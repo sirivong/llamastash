@@ -14,7 +14,7 @@ brew install llamastash/llamastash/llamastash
 curl -fsSL https://llamastash.dev/install.sh | sh
 
 # Portable fallback
-cargo install llamastash --locked
+cargo install llamastash
 ```
 
 ### Verify the binary

@@ -102,8 +102,8 @@ Two release tracks:
 - [x] **IP**: Release setup validation (CI/CD etc).
 - [x] Setup llamastash.dev domain
 - [ ] **IP**: **R1 launch promotion** — telling the world about v0.0.1.
-  - [ ] **Need brainstorm/plan**: Release blog.
-  - [ ] **Need brainstorm/research/plan**: Social promotion — research an approach for max reach.
+  - [ ] Release blog.
+  - [ ] Social promotion — research an approach for max reach.
 
 ### Follow-up
 
