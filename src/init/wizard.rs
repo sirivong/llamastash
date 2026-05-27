@@ -886,6 +886,14 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
       sp.success(format!("Downloaded {}/{} `{filename}`", index + 1, total));
     }
   }
+  fn on_retry(&self, _filename: &str, attempt: u32) {
+    if let Some(sp) = self.spinner.lock().unwrap().as_ref() {
+      sp.update(format!(
+        "Connection error — retrying ({attempt}/{})…",
+        crate::init::download::MAX_DOWNLOAD_ATTEMPTS - 1
+      ));
+    }
+  }
 }
 
 async fn run_config_step(

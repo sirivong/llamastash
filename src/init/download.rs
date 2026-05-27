@@ -23,6 +23,7 @@
 //! (R62).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use hf_hub::{
   api::tokio::{Api, ApiBuilder},
@@ -44,6 +45,12 @@ pub const DISK_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 /// each download; the cap is a safety net against runaway metadata,
 /// not a model-size policy.
 pub const PER_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+/// Maximum download attempts per file. On each transient failure
+/// (`is_connect` / `is_timeout`) the hf-hub temp file keeps its
+/// already-committed bytes, so subsequent attempts resume rather than
+/// restart from zero.
+pub const MAX_DOWNLOAD_ATTEMPTS: u32 = 5;
 
 /// Default HF endpoint root. Overridable via `HF_ENDPOINT` env to
 /// match `huggingface_hub`'s convention, but only to hosts on
@@ -254,6 +261,11 @@ pub trait DownloadProgress: Send + Sync {
   /// Default no-op so existing implementations (the wizard's
   /// cliclack spinner) don't have to opt in.
   fn on_bytes_progress(&self, _filename: &str, _bytes_in_file: u64) {}
+  /// Fired when a transient network error (connection timeout / reset)
+  /// triggers a retry. `attempt` is 1-based (1 = first retry after the
+  /// initial failure). hf-hub resumes from the committed byte offset so
+  /// the progress bar should not reset. Default no-op.
+  fn on_retry(&self, _filename: &str, _attempt: u32) {}
 }
 
 /// Bridge between hf-hub's chunk-level `Progress` trait and our
@@ -617,6 +629,27 @@ pub fn synthetic_publisher_fallbacks(source_repo_id: &str) -> Vec<String> {
   ]
 }
 
+/// True for reqwest errors that are worth retrying: connection
+/// establishment failures and explicit timeouts. Auth errors, 404s,
+/// and schema mismatches are not transient and must surface immediately.
+fn is_transient_hf_error(e: &hf_hub::api::tokio::ApiError) -> bool {
+  use hf_hub::api::tokio::ApiError;
+  match e {
+    ApiError::RequestError(re) => re.is_connect() || re.is_timeout(),
+    ApiError::TooManyRetries(inner) => is_transient_hf_error(inner),
+    _ => false,
+  }
+}
+
+/// Exponential backoff delay for retry `attempt` (1-based). 3 s base,
+/// doubles each attempt, capped at 30 s.
+fn retry_delay(attempt: u32) -> Duration {
+  let ms = 3_000u64
+    .saturating_mul(1u64 << attempt.saturating_sub(1))
+    .min(30_000);
+  Duration::from_millis(ms)
+}
+
 /// Orchestrator. Lists, filters, prechecks disk, downloads via hf-hub.
 pub async fn download_repo(
   spec: &RepoSpec,
@@ -700,8 +733,33 @@ pub async fn download_repo(
       }
       p
     } else {
-      let adapter = HfHubProgressAdapter::new(filename.clone(), options.progress.clone());
-      repo.download_with_progress(filename, adapter).await?
+      let mut last_err: Option<hf_hub::api::tokio::ApiError> = None;
+      let mut download_path: Option<PathBuf> = None;
+      for attempt in 0..MAX_DOWNLOAD_ATTEMPTS {
+        if attempt > 0 {
+          tokio::time::sleep(retry_delay(attempt)).await;
+          if let Some(cb) = &options.progress {
+            cb.on_retry(filename, attempt);
+          }
+        }
+        let adapter = HfHubProgressAdapter::new(filename.clone(), options.progress.clone());
+        match repo.download_with_progress(filename, adapter).await {
+          Ok(p) => {
+            download_path = Some(p);
+            break;
+          }
+          Err(e) if is_transient_hf_error(&e) => {
+            log::warn!(
+              "init download: transient error on attempt {}/{} for `{filename}`: {e}",
+              attempt + 1,
+              MAX_DOWNLOAD_ATTEMPTS
+            );
+            last_err = Some(e);
+          }
+          Err(e) => return Err(DownloadError::Hub(e)),
+        }
+      }
+      download_path.ok_or_else(|| DownloadError::Hub(last_err.expect("loop ran at least once")))?
     };
     if let Some(p) = &options.progress {
       p.on_file_finished(filename, idx, total_files);
@@ -808,6 +866,29 @@ mod tests {
     assert_eq!(events[0], ("model.gguf".to_string(), 100));
     assert_eq!(events[1], ("model.gguf".to_string(), 150));
     assert_eq!(events[2], ("model.gguf".to_string(), 175));
+  }
+
+  #[test]
+  fn retry_delay_increases_exponentially_and_caps() {
+    assert_eq!(retry_delay(1), Duration::from_millis(3_000));
+    assert_eq!(retry_delay(2), Duration::from_millis(6_000));
+    assert_eq!(retry_delay(3), Duration::from_millis(12_000));
+    assert_eq!(retry_delay(4), Duration::from_millis(24_000));
+    // Cap at 30 s regardless of attempt number.
+    assert_eq!(retry_delay(10), Duration::from_millis(30_000));
+  }
+
+  #[test]
+  fn download_progress_trait_has_default_retry_callback() {
+    struct MinimalProgress;
+    impl DownloadProgress for MinimalProgress {
+      fn on_files_resolved(&self, _: &[(String, u64)]) {}
+      fn on_file_started(&self, _: &str, _: u64, _: usize, _: usize) {}
+      fn on_file_finished(&self, _: &str, _: usize, _: usize) {}
+    }
+    let p: Box<dyn DownloadProgress> = Box::new(MinimalProgress);
+    // Default impl is a no-op — must not panic.
+    p.on_retry("model.gguf", 1);
   }
 
   #[test]

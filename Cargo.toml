@@ -120,12 +120,12 @@ strum = { version = "0.28", features = ["derive"] }
 # `cliclack` replaces the unused `dialoguer` dep with a Clack-style
 # stepped wizard built on `console`. Pinned by minor version so
 # patches land without a deliberate PR but minor bumps don't.
-cliclack = "0.3"
+cliclack = "0.5"
 # Terminal styling primitives for the CLI color policy. Powers
 # `cli::colors` and the prompts wrapper. Declared explicitly so the
 # color/prompt modules own their dep rather than relying on the
 # `cliclack`/`indicatif` transitive chain.
-console = "0.15"
+console = "0.16"
 # Display-width measurement for terminal text (CJK paths, emoji, etc.).
 # ratatui already pulls this in transitively; declaring it explicitly so
 # the daemon-info pane's truncation logic can reason in cells, not chars.
