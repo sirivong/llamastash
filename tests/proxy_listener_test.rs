@@ -61,14 +61,28 @@ async fn wait_for_socket(path: &std::path::Path) {
   }
 }
 
-async fn wait_for_proxy(addr: SocketAddr) {
+/// Resolve the proxy's actual bound address via the daemon's IPC
+/// `status` surface. The address may differ from the one the test
+/// configured: there's a TOCTOU window between `pick_free_port`
+/// (which drops its listener) and the daemon's bind, and the
+/// listener will scan `port..=port+5` looking for a free slot if the
+/// originally-chosen port has since been claimed by another process.
+async fn wait_for_proxy(socket_path: &std::path::Path) -> SocketAddr {
   let deadline = std::time::Instant::now() + Duration::from_secs(10);
   loop {
     if std::time::Instant::now() > deadline {
-      panic!("proxy did not become connectable within 10s: {addr}");
+      panic!("proxy did not reach 'listening' status within 10s");
     }
-    if TcpStream::connect(addr).await.is_ok() {
-      return;
+    if let Ok(mut client) = Client::connect(socket_path).await {
+      if let Ok(resp) = client.call("status", None).await {
+        if let Some(proxy) = resp.get("proxy") {
+          if proxy.get("status").and_then(|v| v.as_str()) == Some("listening") {
+            if let Some(listen) = proxy.get("listen").and_then(|v| v.as_str()) {
+              return listen.parse().expect("parse listen addr");
+            }
+          }
+        }
+      }
     }
     sleep(Duration::from_millis(20)).await;
   }
@@ -128,11 +142,10 @@ async fn daemon_starts_with_proxy_enabled_and_health_returns_ok() {
     ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
-  let proxy_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 
   wait_for_socket(&socket_path).await;
-  wait_for_proxy(proxy_addr).await;
+  let proxy_addr = wait_for_proxy(&socket_path).await;
 
   let (status, body) = http_get(proxy_addr, "/health").await;
   assert_eq!(status, 200);
@@ -236,11 +249,10 @@ async fn http11_keep_alive_serves_two_health_requests_on_one_connection() {
     ..ProxyConfig::default()
   };
   let socket_path = opts.socket_path.clone();
-  let proxy_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
   let handle = tokio::spawn(async move { run_foreground(opts).await });
 
   wait_for_socket(&socket_path).await;
-  wait_for_proxy(proxy_addr).await;
+  let proxy_addr = wait_for_proxy(&socket_path).await;
 
   let mut sock = TcpStream::connect(proxy_addr).await.expect("connect");
   for which in 0..2u8 {
