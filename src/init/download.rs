@@ -138,7 +138,12 @@ impl RepoSpec {
       return Err(DownloadError::BadRepoSpec(raw.to_string()));
     }
     if let Some(f) = filename_part.as_deref() {
-      if f.is_empty() || f.contains('/') || f.contains('\\') || f.contains("..") {
+      // Reject empty, absolute, backslash-containing, or traversal paths.
+      // Sub-directory paths (e.g. `quant/model-00001-of-00002.gguf`)
+      // are valid HF repo paths and must be allowed — bartowski and
+      // similar converter repos group each quant in its own subdir.
+      let has_traversal = f.split('/').any(|c| c == "..");
+      if f.is_empty() || f.starts_with('/') || f.contains('\\') || has_traversal {
         return Err(DownloadError::BadRepoSpec(raw.to_string()));
       }
     }
@@ -424,7 +429,9 @@ pub(crate) fn select_files(
   match (pinned, ext) {
     (Some(name), _) => {
       if all_files.iter().any(|f| f == name) {
-        return vec![name.to_string()];
+        // When the pinned file is a shard, expand to all siblings so the
+        // full model is downloaded (not just the one selected shard).
+        return expand_shard_siblings(name, all_files);
       }
       let mut shards = expand_shards(name, all_files);
       shards.sort();
@@ -465,6 +472,45 @@ fn is_shard_index(s: &str) -> bool {
     && !b.is_empty()
     && a.chars().all(|c| c.is_ascii_digit())
     && b.chars().all(|c| c.is_ascii_digit())
+}
+
+/// When `target` is a shard file (`base-NNNNN-of-MMMMM.gguf`), return all
+/// sibling shards found in `all_files` that share the same base prefix,
+/// total count, and directory prefix — sorted by filename. Returns
+/// `vec![target.to_string()]` when `target` is not a shard or no siblings
+/// were found, so callers need no special-case for single files.
+///
+/// `all_files` should be the full repo listing so siblings outside the
+/// already-narrowed candidate list are still reachable.
+fn expand_shard_siblings(target: &str, all_files: &[String]) -> Vec<String> {
+  use crate::discovery::split_gguf::parse_shard_name;
+  let file_name = Path::new(target)
+    .file_name()
+    .and_then(|n| n.to_str())
+    .unwrap_or(target);
+  let Some(info) = parse_shard_name(file_name) else {
+    return vec![target.to_string()];
+  };
+  let dir_prefix = &target[..target.len() - file_name.len()];
+  let mut siblings: Vec<String> = all_files
+    .iter()
+    .filter(|f| {
+      if !f.starts_with(dir_prefix) {
+        return false;
+      }
+      let f_file = &f[dir_prefix.len()..];
+      parse_shard_name(f_file)
+        .map(|fi| fi.base == info.base && fi.total == info.total)
+        .unwrap_or(false)
+    })
+    .cloned()
+    .collect();
+  siblings.sort();
+  if siblings.is_empty() {
+    vec![target.to_string()]
+  } else {
+    siblings
+  }
 }
 
 /// Build an `hf-hub` repo handle for `repo_id` at the given revision
@@ -580,9 +626,13 @@ async fn probe_repo(
   let all_files: Vec<String> = info.siblings.iter().map(|s| s.rfilename.clone()).collect();
   let mut filtered = select_files(&all_files, pinned, extension);
   if let Some(quant) = quant_hint {
-    filtered = pick_quant_match(&filtered, quant)
-      .map(|f| vec![f])
-      .unwrap_or_default();
+    // pick_quant_match returns one file. When that file is a shard,
+    // expand_shard_siblings pulls all siblings from the full listing so
+    // the download includes every part of the model.
+    match pick_quant_match(&filtered, quant) {
+      Some(matched) => filtered = expand_shard_siblings(&matched, &all_files),
+      None => filtered = Vec::new(),
+    }
   }
   if filtered.is_empty() {
     return Err(DownloadError::NoMatchingFiles {
@@ -961,7 +1011,20 @@ mod tests {
   #[test]
   fn parse_refuses_path_traversal_in_filename() {
     assert!(RepoSpec::parse("owner/repo:../escape").is_err());
-    assert!(RepoSpec::parse("owner/repo:nested/path.gguf").is_err());
+    assert!(RepoSpec::parse("owner/repo:/absolute.gguf").is_err());
+    assert!(RepoSpec::parse("owner/repo:sub/../escape.gguf").is_err());
+  }
+
+  #[test]
+  fn parse_allows_subdir_filename_for_bartowski_layout() {
+    // bartowski repos use `Quant/Model-Quant-00001-of-00002.gguf` paths.
+    let s = RepoSpec::parse("bartowski/Qwen-80B-GGUF:Q5_K_M/Qwen-80B-Q5_K_M-00001-of-00002.gguf")
+      .unwrap();
+    assert_eq!(s.repo_id, "bartowski/Qwen-80B-GGUF");
+    assert_eq!(
+      s.pinned_filename.as_deref(),
+      Some("Q5_K_M/Qwen-80B-Q5_K_M-00001-of-00002.gguf")
+    );
   }
 
   #[test]
@@ -1112,6 +1175,67 @@ mod tests {
     let files = vec!["completely-different.gguf".to_string()];
     let picked = select_files(&files, Some("missing.gguf"), Some(".gguf"));
     assert!(picked.is_empty());
+  }
+
+  #[test]
+  fn select_files_expands_shard_when_exact_pinned_is_shard_file() {
+    // bartowski layout: files in a quant subdirectory. Pinning shard 1
+    // must produce both shards so llama-server can load the full model.
+    let files = vec![
+      "Q5_K_M/Qwen-80B-Q5_K_M-00001-of-00002.gguf".to_string(),
+      "Q5_K_M/Qwen-80B-Q5_K_M-00002-of-00002.gguf".to_string(),
+      "Q4_K_M/Qwen-80B-Q4_K_M.gguf".to_string(),
+    ];
+    let picked = select_files(
+      &files,
+      Some("Q5_K_M/Qwen-80B-Q5_K_M-00001-of-00002.gguf"),
+      Some(".gguf"),
+    );
+    assert_eq!(
+      picked.len(),
+      2,
+      "pinning shard 1 must expand to both shards"
+    );
+    assert_eq!(picked[0], "Q5_K_M/Qwen-80B-Q5_K_M-00001-of-00002.gguf");
+    assert_eq!(picked[1], "Q5_K_M/Qwen-80B-Q5_K_M-00002-of-00002.gguf");
+  }
+
+  #[test]
+  fn expand_shard_siblings_finds_all_shards_in_subdir() {
+    let all = vec![
+      "Q5_K_M/model-00001-of-00003.gguf".to_string(),
+      "Q5_K_M/model-00002-of-00003.gguf".to_string(),
+      "Q5_K_M/model-00003-of-00003.gguf".to_string(),
+      // Different directory — must not cross-pollinate.
+      "Q4_K_M/model-00001-of-00003.gguf".to_string(),
+      "README.md".to_string(),
+    ];
+    let siblings = expand_shard_siblings("Q5_K_M/model-00001-of-00003.gguf", &all);
+    assert_eq!(siblings.len(), 3, "all three shards within the same subdir");
+    assert!(
+      siblings.iter().all(|s| s.starts_with("Q5_K_M/")),
+      "must not cross into Q4_K_M dir"
+    );
+  }
+
+  #[test]
+  fn expand_shard_siblings_works_at_repo_root() {
+    let all = vec![
+      "model-00001-of-00002.gguf".to_string(),
+      "model-00002-of-00002.gguf".to_string(),
+      "unrelated.gguf".to_string(),
+    ];
+    let siblings = expand_shard_siblings("model-00001-of-00002.gguf", &all);
+    assert_eq!(siblings.len(), 2);
+    assert_eq!(siblings[0], "model-00001-of-00002.gguf");
+    assert_eq!(siblings[1], "model-00002-of-00002.gguf");
+  }
+
+  #[test]
+  fn expand_shard_siblings_passthrough_for_non_shard() {
+    let all = vec!["model.gguf".to_string(), "other.gguf".to_string()];
+    let result = expand_shard_siblings("model.gguf", &all);
+    assert_eq!(result, vec!["model.gguf".to_string()]);
   }
 
   #[test]
