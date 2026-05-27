@@ -299,14 +299,20 @@ jobs:
         # it never reaches crates.io / Homebrew users. Audit per the
         # plan §R10: `grep -F "features uat" .github/workflows/release.yml`
         # should return only this comment line.
+        #
+        # `setup-cross-toolchain-action` exports CARGO_TARGET_<TARGET>_LINKER
+        # and the matching CC_/AR_ env vars for every cross target (including
+        # musl) so plain `cargo build` picks up the right linker. Invoking
+        # `cross build` instead triggered cross-rs's "fall back to cargo on
+        # the host" path because those same env vars made cross think the
+        # host could build natively — and the host has no musl linker, so
+        # the four musl matrix entries failed with `linker
+        # `<target>-musl-gcc` not found`. Match the kdash pattern: always
+        # `cargo build`.
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target "${{ matrix.target }}" --bin llamastash --locked
-          else
-            cargo build --release --target "${{ matrix.target }}" --bin llamastash --locked
-          fi
+          cargo build --release --target "${{ matrix.target }}" --bin llamastash --locked
 
       - name: verify binary is an executable for the target arch
         shell: bash
