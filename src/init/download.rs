@@ -47,9 +47,9 @@ pub const DISK_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 pub const PER_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Maximum download attempts per file. On each transient failure
-/// (`is_connect` / `is_timeout`) the hf-hub temp file keeps its
-/// already-committed bytes, so subsequent attempts resume rather than
-/// restart from zero.
+/// (connection error, timeout, or mid-transfer body-read stall) the
+/// hf-hub temp file keeps its already-committed bytes, so subsequent
+/// attempts resume rather than restart from zero.
 pub const MAX_DOWNLOAD_ATTEMPTS: u32 = 5;
 
 /// Default HF endpoint root. Overridable via `HF_ENDPOINT` env to
@@ -629,13 +629,38 @@ pub fn synthetic_publisher_fallbacks(source_repo_id: &str) -> Vec<String> {
   ]
 }
 
-/// True for reqwest errors that are worth retrying: connection
-/// establishment failures and explicit timeouts. Auth errors, 404s,
-/// and schema mismatches are not transient and must surface immediately.
+/// True for reqwest errors worth retrying: connection failures, request
+/// timeouts, and body-read timeouts. `is_timeout()` only covers the
+/// request-level timeout kind; mid-transfer stalls ("error reading a body
+/// from connection: timed out") arrive as decode errors, so we walk the
+/// source chain to catch them. Auth errors, 404s, and schema mismatches
+/// are not transient.
+fn is_transient_reqwest_error(re: &reqwest::Error) -> bool {
+  use std::error::Error as StdError;
+  if re.is_connect() || re.is_timeout() {
+    return true;
+  }
+  // Body-read timeouts and mid-transfer resets surface as decode errors.
+  if re.is_decode() {
+    let mut src: Option<&dyn StdError> = re.source();
+    while let Some(e) = src {
+      let msg = e.to_string();
+      if msg.contains("timed out")
+        || msg.contains("connection reset")
+        || msg.contains("broken pipe")
+      {
+        return true;
+      }
+      src = e.source();
+    }
+  }
+  false
+}
+
 fn is_transient_hf_error(e: &hf_hub::api::tokio::ApiError) -> bool {
   use hf_hub::api::tokio::ApiError;
   match e {
-    ApiError::RequestError(re) => re.is_connect() || re.is_timeout(),
+    ApiError::RequestError(re) => is_transient_reqwest_error(re),
     ApiError::TooManyRetries(inner) => is_transient_hf_error(inner),
     _ => false,
   }
