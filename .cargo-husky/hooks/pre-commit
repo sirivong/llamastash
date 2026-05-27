@@ -5,7 +5,13 @@ set -e
 echo "Running pre-commit hook:"
 
 echo "Executing: cargo fmt --all"
+# Capture staged .rs files *before* formatting so we only re-add what
+# was already in the index — unstaged .rs changes stay unstaged.
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR | grep '\.rs$' || true)
 cargo fmt --all
+if [ -n "$STAGED_RS" ]; then
+  echo "$STAGED_RS" | xargs git add
+fi
 
 echo "Executing: make lint"
 make lint

@@ -843,15 +843,28 @@ async fn run_models_step(
   })
 }
 
+/// Per-file transfer state for throughput + percentage display.
+struct WizardFileProgress {
+  /// "Downloading N/M `filename`" prefix, built once in `on_file_started`
+  /// and reused by every `on_bytes_progress` update.
+  label: String,
+  file_size: u64,
+  bytes_in_file: u64,
+  /// EMA-smoothed throughput in bytes/s (α = 0.3, same as the TUI strip).
+  throughput_bps: f64,
+  last_at: std::time::Instant,
+}
+
 /// Bridges hf-hub's per-file lifecycle (resolved → started → finished)
 /// into a single rolling cliclack spinner so the user sees one
-/// "Downloading file X of N" line that updates rather than N
-/// flickering spinners. The spinner is replaced on each file
-/// transition; `Mutex<Option<...>>` accommodates the trait's `&self`
-/// receivers without making `StepProgress` itself `Sync`.
+/// "Downloading file X of N · X.X/Y.YG · Z% · W MB/s" line that
+/// updates in-place as chunks land. The spinner is replaced on each
+/// file transition; `Mutex<Option<...>>` accommodates the trait's
+/// `&self` receivers without making `StepProgress` itself `Sync`.
 struct WizardDownloadProgress {
   repo: String,
   spinner: std::sync::Mutex<Option<prompts::StepProgress>>,
+  file_progress: std::sync::Mutex<Option<WizardFileProgress>>,
 }
 
 impl WizardDownloadProgress {
@@ -859,6 +872,7 @@ impl WizardDownloadProgress {
     Self {
       repo,
       spinner: std::sync::Mutex::new(None),
+      file_progress: std::sync::Mutex::new(None),
     }
   }
 }
@@ -872,21 +886,60 @@ impl crate::init::download::DownloadProgress for WizardDownloadProgress {
       self.repo
     ));
   }
+
   fn on_file_started(&self, filename: &str, size: u64, index: usize, total: usize) {
-    let mib = size as f64 / (1024.0 * 1024.0);
-    let sp = prompts::StepProgress::start(format!(
-      "Downloading {}/{} `{filename}` (~{mib:.1} MiB)",
-      index + 1,
-      total
-    ));
+    let label = format!("Downloading {}/{} `{filename}`", index + 1, total);
+    let sp = prompts::StepProgress::start(label.clone());
     *self.spinner.lock().unwrap() = Some(sp);
+    *self.file_progress.lock().unwrap() = Some(WizardFileProgress {
+      label,
+      file_size: size,
+      bytes_in_file: 0,
+      throughput_bps: 0.0,
+      last_at: std::time::Instant::now(),
+    });
   }
+
   fn on_file_finished(&self, filename: &str, index: usize, total: usize) {
+    *self.file_progress.lock().unwrap() = None;
     if let Some(sp) = self.spinner.lock().unwrap().take() {
       sp.success(format!("Downloaded {}/{} `{filename}`", index + 1, total));
     }
   }
+
+  fn on_bytes_progress(&self, _filename: &str, bytes_in_file: u64) {
+    let msg = {
+      let mut pg = self.file_progress.lock().unwrap();
+      let Some(state) = pg.as_mut() else { return };
+      let now = std::time::Instant::now();
+      let elapsed = now
+        .saturating_duration_since(state.last_at)
+        .as_secs_f64()
+        .max(1e-6);
+      let delta = bytes_in_file.saturating_sub(state.bytes_in_file) as f64;
+      state.throughput_bps = 0.3 * (delta / elapsed) + 0.7 * state.throughput_bps;
+      state.bytes_in_file = bytes_in_file;
+      state.last_at = now;
+      let pct = (bytes_in_file * 100)
+        .checked_div(state.file_size)
+        .unwrap_or(0);
+      let pair = crate::tui::fmt::format_bytes_pair(bytes_in_file, state.file_size);
+      let speed = crate::tui::fmt::format_bytes(state.throughput_bps as u64);
+      format!("{} · {pair} · {pct}% · {speed}/s", state.label)
+    };
+    if let Some(sp) = self.spinner.lock().unwrap().as_ref() {
+      sp.update(msg);
+    }
+  }
+
   fn on_retry(&self, _filename: &str, attempt: u32) {
+    // Reset EMA timing so the throughput measurement restarts cleanly
+    // from the resumed byte offset — the old instant_bps spike would
+    // otherwise skew the first post-retry reading.
+    if let Some(state) = self.file_progress.lock().unwrap().as_mut() {
+      state.throughput_bps = 0.0;
+      state.last_at = std::time::Instant::now();
+    }
     if let Some(sp) = self.spinner.lock().unwrap().as_ref() {
       sp.update(format!(
         "Connection error — retrying ({attempt}/{})…",

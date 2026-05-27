@@ -92,13 +92,14 @@ Two release tracks:
   - [x] CPU : linux -> CD
   - [x] Update CI for cpu only run. First optimize the nightly builds (fold into release)
 - [x] ~~**IP**: Audit (binary size, dependencies, test coverage, security, etc.).~~ — release binary `target/release/llamastash` is 12.7 MiB; `cargo audit --json` found 0 vulnerabilities across 375 lockfile deps; Tarpaulin line coverage is `11149 / 15072 = 73.97%`; `cargo geiger --all-targets --features test-fixtures` shows project `unsafe` is present but confined to deliberate libc/process/syscall boundaries (signals, `setsid`, `flock`, `umask`, peercred, `statvfs`), with no obvious crate swap or duplicate-dependency cleanup that materially improves the release.
+- [x] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
 - [x] ~~Check and sync all docs, validate all repo docs~~
 - [x] ~~Add Agent Skills.~~ — an installable AgentSkills bundle now ships under [`skills/llamastash/`](skills/llamastash/) for Claude Code, OpenClaw, OpenCode, and similar harnesses that need to drive the LlamaStash CLI.
 - [x] **IP**: Update
   - [x] Readme and docs
   - [x] repo and org
   - [x] website
-- [ ] **IP**: Release setup validation (CI/CD etc).
+- [x] **IP**: Release setup validation (CI/CD etc).
 - [x] Setup llamastash.dev domain
 - [ ] **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] **Need brainstorm/plan**: Release blog.
@@ -106,35 +107,34 @@ Two release tracks:
 
 ### Follow-up
 
-- [ ] Setup GPU runners using https://cirun.io/
-- [ ] Publish to clawhub
-- [ ] random HF download failure ◓ Downloading 1/1 `Qwen_Qwen3.6-27B-Q8_0.gguf` (~27767.6 MiB) ✗ init download: hf-hub: request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): request error: error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): error sending request for url (https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF/resolve/main/Qwen_Qwen3.6-27B-Q8_0.gguf): client error (SendRequest): connection error: Connection timed out (os error 110)
 - [ ] The Model drill in page inside HF pull (the last page) doesnt scroll.
-- [ ] Offer to update OpenCode and other supported tools during `init`
-- [ ] Add a line in help page about the `*` in the `RAM*` in Host panel.
-- [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
-- [ ] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
-- [ ] `start` should support advanced params like TUI.
 - [ ] flag to disable proxy fallback (or flip to off by default?)
+- [ ] Offer to update OpenCode and other supported tools during `init`
+- [ ] `start` should support advanced params like TUI.
+- [ ] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
+- [ ] Add a line in help page about the `*` in the `RAM*` in Host panel.
+- [ ] Publish to clawhub/Hermes/etc
+- [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
+- [ ] Setup GPU runners using https://cirun.io/ ?
 
 ## R2 (post-v0.0.1 roadmap)
 
 ### Blockers
 
 - [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.
-- [ ] No glyphs fallback.
-- [ ] Consider Loopback + LAN binding options for the proxy.
-- [ ] **Deferred (post-c80d638)**: Port whichllm's family-selection / lineage-demotion / generation-bonus logic so `init --only models --json` output matches `whichllm --json --top 10` byte-for-byte. Today 7/10 picks and 3/10 quants match — see [Post-plan refinements §Remaining gap](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md#remaining-gap-deliberately-not-closed) in plan 2026-05-20-001.
 - [ ] Look into gpu/cpu offload split
+- [ ] Consider Loopback + LAN binding options for the proxy.
 - [ ] **Need brainstorm/plan**: Windows support.
 - [ ] **Need brainstorm/plan**: Anthropic API compatibility.
-- [ ]
+- [ ] No glyphs fallback.
+- [ ] **Need brainstorm/plan**: Idle-TTL eviction for the proxy's auto-started supervisors. Both Ollama (5 min, refcount-gated) and LM Studio (60 min, request-resets) evict idle models so a long-running daemon doesn't pin memory forever. llamastash today keeps models resident until explicit `stop_model`; first-request memory growth is the visible gap. Comparison + rationale in [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash); origin: R34 (the broader HTTP/MCP slice of R34 stays at R2).
 
 ### Follow-up
 
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
 - [ ] **Need brainstorm/plan**: MLX and vLLM if cheap to add.
 - [ ] **Need brainstorm/plan**: Docker-ready packaging.
+- [ ] **Deferred (post-c80d638)**: Port whichllm's family-selection / lineage-demotion / generation-bonus logic so `init --only models --json` output matches `whichllm --json --top 10` byte-for-byte. Today 7/10 picks and 3/10 quants match — see [Post-plan refinements §Remaining gap](docs/plans/2026-05-20-001-feat-live-hf-snapshot-discovery-plan.md#remaining-gap-deliberately-not-closed) in plan 2026-05-20-001.
 - [ ] **Daemon idle RSS** (1.5 GB RSS on a long-running supervisor with no children, observed 2026-05-22). Audit ruled out the original suspects (metadata cache is bounded LRU 2048, per-launch log buffers exist only while a child is alive, external-process discovery is one-shot at startup). The CPU fix above may incidentally cure this if subprocess-allocation churn was the driver; if it doesn't, run `heaptrack` / `samply` on a freshly-started daemon attached to a populated HF + Ollama cache and watch RSS over the first hour.
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
@@ -148,8 +148,7 @@ Two release tracks:
 - [ ] **Proxy stability (R-12)**: Move the GGUF header read inside `ipc::methods::resolve_model_id_and_arch` onto `spawn_blocking`. Today the call is invoked from async IPC handlers but does up to ~16 MiB of synchronous file I/O on the tokio worker, which can stall a worker thread under concurrent IPC load. The proxy-side call site was already fixed in this PR (`proxy::launch::canonical_id_for_row` via `spawn_blocking`); the IPC site is the remaining gap. Origin: PR #7 ce-review (R-12 partial).
 - [ ] **Ollama-compat digest from cached header BLAKE3**: Today `/api/tags` and `/api/ps` both emit `blake3:<hex>` derived from the canonical path string (`ollama_compat::digest_for_path`) — stable across the two endpoints but not the truthful GGUF header BLAKE3 that `ModelId.header_blake3` carries. Lifting the digest to the header hash requires caching `header_blake3` alongside `ModelMetadata` at discovery time (the parser already reads the header bytes; caching the BLAKE3 is incremental cost). Once cached, both endpoints look up the same field and clients that validate the digest against an external source (e.g. an Ollama manifest mirror) get a meaningful answer. Origin: PR #7 follow-up review.
 - [ ] **Need brainstorm/plan**: Ollama-compat Tier 2 — inference endpoints `POST /api/chat`, `POST /api/generate`, `POST /api/embed`. Tier 1 (discovery: `/api/tags`, `/api/version`, `/api/ps`, `/api/show`) ships in this PR and gets llamastash recognised by Ollama-shape discovery libraries; Tier 2 lets tools that _only_ speak Ollama's native inference shape (no OpenAI-compat fallback) drive llamastash directly. Tradeoffs: needs request/response body translation (Ollama uses NDJSON streaming with different field names, vs the proxy's current byte-pure SSE forward), and roughly doubles the code surface of the proxy module. Comparison + design notes in [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash) and [`docs/usage.md §Ollama-compat surface`](docs/usage.md#ollama-compat-surface). Worth doing once we see a real userbase-blocking integration.
-- [ ] **Need brainstorm/plan**: Idle-TTL eviction for the proxy's auto-started supervisors. Both Ollama (5 min, refcount-gated) and LM Studio (60 min, request-resets) evict idle models so a long-running daemon doesn't pin memory forever. llamastash today keeps models resident until explicit `stop_model`; first-request memory growth is the visible gap. Comparison + rationale in [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash); origin: R34 (the broader HTTP/MCP slice of R34 stays at R2).
-- [ ] **GGUF parser revisit**: web scan found lighter crates (`gguf`) and fuller readers (`gguf-rs-lib`, `gguf-rs`), but none are yet proven to satisfy llamastash's real constraints together: cheap header-only parsing, exact raw parsed header bytes for `ModelId.header_blake3`, split-GGUF behavior, and HF snapshot-symlink path semantics. Do not do a wholesale crate swap unless a spike proves those constraints hold against the current fixtures and integration paths.
+- [ ] **GGUF parser revisit**: web scan found lighter crates (`gguf`) and fuller readers (`gguf-rs-lib`, `gguf-rs`), but none are yet proven to satisfy llamastash's real constraints together: cheap header-only parsing, exact raw parsed header bytes for `ModelId.header_blake3`, split-GGUF behavior, and HF snapshot-symlink path semantics. Do not do a wholesale crate swap unless a spike proves those constraints hold against the current fixtures and integration paths. Or maybe move our impl to a crate `gguf-lite`
 - [ ] **GGUF scope-reduction audit**: the research did _not_ prove every line under `src/gguf/` is necessary. Keep the custom header/split/HF-path behavior unless replaced by a proven crate, but audit `metadata.rs` / `memory.rs` / helpers for code that is not serving a shipped feature. Separate question from "use a crate": can the current custom subsystem be materially smaller while keeping header-only parsing and current UX/identity behavior?
 - [ ] **IPC framing revisit**: re-evaluate swapping the hand-rolled length-prefixed codec for `tokio-util::codec::LengthDelimitedCodec` only if the surrounding IPC layer grows enough that the extra dependency meaningfully simplifies maintenance. Current framing is small, bounded, and fully tested; a swap is not justified today.
 - [ ] More colors in CLI outs, including the --help.
@@ -160,6 +159,6 @@ Two release tracks:
 
 ### Good to have
 
-- [ ] **Need brainstorm/plan**: Per-PID VRAM attribution via NVML's `nvmlDeviceGetComputeRunningProcesses` (Linux + Windows; AMD / Apple parity depends on upstream surface). Check ROCm and Metal for equivalents. Today the right-pane block title surfaces per-model RAM + CPU%; per-model VRAM is reported only at the host level.
 - [ ] Make custom UI components reusable and consistent.
+- [ ] **Need brainstorm/plan**: Per-PID VRAM attribution via NVML's `nvmlDeviceGetComputeRunningProcesses` (Linux + Windows; AMD / Apple parity depends on upstream surface). Check ROCm and Metal for equivalents. Today the right-pane block title surfaces per-model RAM + CPU%; per-model VRAM is reported only at the host level.
 - [ ] **Deferred (verified 2026-05-21 against a real cache; not biting today)**: TUI list pane shows ambiguous file_stem labels for HF downloads. When a publisher uses a generic GGUF filename (`model.gguf`, `ggml-model-q4_k_m.gguf`), the list pane's `display_name(m) = file_stem(m.path)` renders two rows from different repos identically. The derived `<repo> (<quant>)` friendly-name slice (R118 / R119 / R120) was attempted and reverted in `2e11d65` because real catalogs use descriptive filenames. Revisit if a real catalog starts hitting the ambiguity — wire in a `list_models` lookup keyed by `header_blake3`. Origin: [`docs/plans/2026-05-20-002-feat-hf-pull-tui-dialog-plan.md`](docs/plans/2026-05-20-002-feat-hf-pull-tui-dialog-plan.md).
