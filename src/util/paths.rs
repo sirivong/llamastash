@@ -17,10 +17,14 @@
 //! * `LLAMASTASH_CACHE_DIR` — verbatim override for `cache_dir()`; `log_dir()`
 //!   inherits because it is `cache_dir().join("logs")`.
 //! * `LLAMASTASH_SOCKET` — verbatim override for `runtime_socket_path()`.
-//! * `HF_HOME` — honored independently by `init::download::hf_cache_dir()`
-//!   per HuggingFace convention; not a `paths::*` concern, but worth
-//!   naming here because callers isolating a child process need to set
-//!   all five to fully sandbox state, config, cache/logs, socket, and HF cache.
+//! * HuggingFace, Ollama, and LM Studio model-cache paths are resolved
+//!   by [`crate::util::model_caches`] (single source of truth for both
+//!   writes via `init::download` and scans via `discovery::known_caches`).
+//!   That module honors `HF_HUB_CACHE`, `HUGGINGFACE_HUB_CACHE`,
+//!   `HF_HOME`, `XDG_CACHE_HOME`, and `OLLAMA_MODELS`. Not a `paths::*`
+//!   concern, but worth naming here because callers isolating a child
+//!   process need to clear or override them to fully sandbox the HF
+//!   cache alongside state, config, cache/logs, and socket.
 
 use std::{
   ffi::OsString,

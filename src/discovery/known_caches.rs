@@ -8,6 +8,11 @@
 //! `--no-scan` or `LLAMASTASH_NO_SCAN=1`) skips everything except
 //! explicitly-passed `--model-path` roots, so agent invocations can
 //! pin their scan surface (origin: R4).
+//!
+//! Path resolution (env vars + platform defaults) lives in
+//! [`crate::util::model_caches`] so writes (`init::download`) and
+//! scans (this module) stay in lockstep — see that module's docs for
+//! the full precedence chain.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +20,7 @@ use crate::config::CachePathsConfig;
 use crate::discovery::lm_studio;
 use crate::discovery::scanner::ScanRoot;
 use crate::discovery::ModelSource;
+use crate::util::model_caches;
 
 /// Inputs to [`default_set`]. `user_paths` are unconditional — they
 /// participate even when `no_scan` is set, since the user asked for
@@ -56,13 +62,8 @@ pub fn default_set(res: RootResolution<'_>) -> Vec<ScanRoot> {
     return out;
   }
 
-  let home = match res.home {
-    Some(h) => h,
-    None => return out,
-  };
-
   if !res.disable.huggingface {
-    for p in default_huggingface_paths(home) {
+    for p in model_caches::huggingface_hub_dirs(res.home) {
       push_unique(
         &mut out,
         &mut seen,
@@ -74,7 +75,7 @@ pub fn default_set(res: RootResolution<'_>) -> Vec<ScanRoot> {
     }
   }
   if !res.disable.ollama {
-    for p in default_ollama_paths(home) {
+    for p in model_caches::ollama_models_dirs(res.home) {
       push_unique(
         &mut out,
         &mut seen,
@@ -86,82 +87,36 @@ pub fn default_set(res: RootResolution<'_>) -> Vec<ScanRoot> {
     }
   }
   if !res.disable.lm_studio {
-    for p in default_lm_studio_paths(home) {
-      push_unique(
-        &mut out,
-        &mut seen,
-        ScanRoot {
-          path: p,
-          source: ModelSource::LmStudio,
-        },
-      );
-    }
-    // Honour the GUI-configured `paths.models` override the user set
-    // in `~/.lmstudio/settings.json`. The resolver only returns
-    // *existing* directories, so this won't generate phantom roots
-    // when LM Studio isn't installed.
-    for p in lm_studio::resolve_models_dirs(home) {
-      push_unique(
-        &mut out,
-        &mut seen,
-        ScanRoot {
-          path: p,
-          source: ModelSource::LmStudio,
-        },
-      );
+    // LM Studio's defaults and settings.json override both anchor on
+    // the home directory, so skip them entirely when home is missing.
+    if let Some(home) = res.home {
+      for p in model_caches::lm_studio_models_dirs(home) {
+        push_unique(
+          &mut out,
+          &mut seen,
+          ScanRoot {
+            path: p,
+            source: ModelSource::LmStudio,
+          },
+        );
+      }
+      // Honour the GUI-configured `paths.models` override the user set
+      // in `~/.lmstudio/settings.json`. The resolver only returns
+      // *existing* directories, so this won't generate phantom roots
+      // when LM Studio isn't installed.
+      for p in lm_studio::resolve_models_dirs(home) {
+        push_unique(
+          &mut out,
+          &mut seen,
+          ScanRoot {
+            path: p,
+            source: ModelSource::LmStudio,
+          },
+        );
+      }
     }
   }
   out
-}
-
-/// `$HOME/.cache/huggingface/hub` on Linux; `$HOME/Library/Caches/
-/// huggingface/hub` on macOS. The `hub` directory is the one that
-/// holds `models--<owner>--<repo>/snapshots/<rev>/*.gguf` trees.
-pub fn default_huggingface_paths(home: &Path) -> Vec<PathBuf> {
-  let mut paths = Vec::new();
-  if cfg!(target_os = "macos") {
-    paths.push(home.join("Library/Caches/huggingface/hub"));
-  }
-  // Linux default and the macOS-XDG override that some users set.
-  paths.push(home.join(".cache/huggingface/hub"));
-  paths
-}
-
-/// Ollama stores models under `$HOME/.ollama/models` by default; the
-/// `OLLAMA_MODELS` env var (documented at
-/// <https://github.com/ollama/ollama/blob/main/docs/faq.md#how-do-i-set-them-to-a-different-location>)
-/// lets users relocate the cache to a roomier disk. We honour the env
-/// var ahead of the default so a user with `OLLAMA_MODELS=/mnt/work/
-/// ollama-models` (and no `~/.ollama/models`) sees their Ollama models
-/// in the catalog.
-///
-/// Both paths are returned when set so a user who switched mid-flight
-/// (leaving stale models in the home location) still sees the
-/// historic set. `default_set`'s dedup keeps order stable.
-///
-/// The blob files are content-addressed (hash-named); the scanner
-/// won't pick them up under a `.gguf` extension filter on its own —
-/// the dedicated `ollama` enumerator handles that wiring.
-pub fn default_ollama_paths(home: &Path) -> Vec<PathBuf> {
-  let mut paths = Vec::with_capacity(2);
-  if let Some(env) = std::env::var_os("OLLAMA_MODELS") {
-    if !env.is_empty() {
-      paths.push(PathBuf::from(env));
-    }
-  }
-  paths.push(home.join(".ollama/models"));
-  paths
-}
-
-/// LM Studio's defaults across platforms. Plan: probe `~/.lmstudio/
-/// models` (the documented location), then `~/.cache/lm-studio/
-/// models` (older installs). A future enhancement reads `~/
-/// .lmstudio/settings.json` for the user's configured override.
-pub fn default_lm_studio_paths(home: &Path) -> Vec<PathBuf> {
-  vec![
-    home.join(".lmstudio/models"),
-    home.join(".cache/lm-studio/models"),
-  ]
 }
 
 fn canonical_or_raw(p: &Path) -> PathBuf {
@@ -239,45 +194,45 @@ mod tests {
   }
 
   #[test]
-  fn ollama_paths_honor_env_var_with_home_default_as_fallback() {
-    // Single test for both scenarios so two parallel test threads
-    // don't race on the shared OLLAMA_MODELS env var. Serialised
-    // through `cli::test_lock` so other env-mutating tests in the
-    // suite don't trample this one mid-flight either.
+  fn default_set_surfaces_hf_hub_cache_override_as_huggingface_root() {
+    // End-to-end: a user with `HF_HUB_CACHE` set must see that path in
+    // the rescanner's root list, otherwise `llamastash list` misses
+    // models downloaded by `llamastash pull` under the same override.
+    // This is the regression test for the discovery / download
+    // asymmetry: before the fix, downloads landed at the override but
+    // discovery scanned only `~/.cache/huggingface/hub`.
     let _lock = crate::cli::test_lock::serialize();
-    let saved = std::env::var_os("OLLAMA_MODELS");
+    let saved_hub = std::env::var_os("HF_HUB_CACHE");
+    let saved_home = std::env::var_os("HF_HOME");
 
-    // Env set → env path comes first, home default still appears
-    // (so a user mid-migration with stale models in `~/.ollama/models`
-    // doesn't lose visibility).
-    std::env::set_var("OLLAMA_MODELS", "/mnt/ollama-models");
-    let paths = default_ollama_paths(Path::new("/home/user"));
-    assert_eq!(
-      paths.first().map(PathBuf::as_path),
-      Some(Path::new("/mnt/ollama-models"))
-    );
+    std::env::set_var("HF_HUB_CACHE", "/mnt/relocated-hf-hub");
+    std::env::remove_var("HF_HOME");
+
+    let user: Vec<PathBuf> = Vec::new();
+    let home = PathBuf::from("/home/user");
+    let roots = default_set(RootResolution {
+      user_paths: &user,
+      disable: &disable_default(),
+      no_scan: false,
+      home: Some(&home),
+    });
+    let hf_roots: Vec<&Path> = roots
+      .iter()
+      .filter(|r| r.source == ModelSource::HuggingFace)
+      .map(|r| r.path.as_path())
+      .collect();
     assert!(
-      paths.contains(&PathBuf::from("/home/user/.ollama/models")),
-      "home default must still appear: {paths:?}"
+      hf_roots.contains(&Path::new("/mnt/relocated-hf-hub")),
+      "HF_HUB_CACHE override must appear among HF roots, got {hf_roots:?}",
     );
 
-    // Env unset → home default only.
-    std::env::remove_var("OLLAMA_MODELS");
-    assert_eq!(
-      default_ollama_paths(Path::new("/home/user")),
-      vec![PathBuf::from("/home/user/.ollama/models")]
-    );
-
-    // Env present but empty → treated as unset.
-    std::env::set_var("OLLAMA_MODELS", "");
-    assert_eq!(
-      default_ollama_paths(Path::new("/home/user")),
-      vec![PathBuf::from("/home/user/.ollama/models")]
-    );
-
-    match saved {
-      Some(s) => std::env::set_var("OLLAMA_MODELS", s),
-      None => std::env::remove_var("OLLAMA_MODELS"),
+    match saved_hub {
+      Some(v) => std::env::set_var("HF_HUB_CACHE", v),
+      None => std::env::remove_var("HF_HUB_CACHE"),
+    }
+    match saved_home {
+      Some(v) => std::env::set_var("HF_HOME", v),
+      None => std::env::remove_var("HF_HOME"),
     }
   }
 
@@ -303,8 +258,39 @@ mod tests {
     assert_eq!(roots[0].source, ModelSource::UserPath);
   }
 
+  /// On Linux, `ollama_models_dirs` always appends the systemd
+  /// installer's path, regardless of env / home. Tests that build
+  /// `expected` paths use this to stay platform-agnostic.
+  fn expected_ollama_system_path() -> Option<&'static Path> {
+    if cfg!(target_os = "linux") {
+      Some(Path::new("/usr/share/ollama/.ollama/models"))
+    } else {
+      None
+    }
+  }
+
   #[test]
-  fn missing_home_dir_yields_only_user_paths() {
+  fn missing_home_dir_yields_user_paths_and_only_unanchored_defaults() {
+    // With home=None and no env overrides, HF / LM Studio contribute
+    // nothing (their defaults all need a home). Ollama is special: on
+    // Linux the official systemd installer drops models under
+    // `/usr/share/ollama/.ollama/models`, which is reachable without
+    // any home, so that path surfaces unconditionally on Linux.
+    let _lock = crate::cli::test_lock::serialize();
+    let saved: Vec<(&str, _)> = [
+      "HF_HUB_CACHE",
+      "HUGGINGFACE_HUB_CACHE",
+      "HF_HOME",
+      "XDG_CACHE_HOME",
+      "OLLAMA_MODELS",
+    ]
+    .iter()
+    .map(|k| (*k, std::env::var_os(k)))
+    .collect();
+    for (k, _) in &saved {
+      std::env::remove_var(k);
+    }
+
     let user = vec![PathBuf::from("/explicit/path")];
     let roots = default_set(RootResolution {
       user_paths: &user,
@@ -312,8 +298,81 @@ mod tests {
       no_scan: false,
       home: None,
     });
-    assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].source, ModelSource::UserPath);
+    assert_eq!(roots[0].path, Path::new("/explicit/path"));
+    match expected_ollama_system_path() {
+      Some(p) => {
+        assert_eq!(roots.len(), 2, "Linux: UserPath + Ollama system path");
+        assert_eq!(roots[1].source, ModelSource::Ollama);
+        assert_eq!(roots[1].path, p);
+      }
+      None => {
+        assert_eq!(roots.len(), 1, "non-Linux: UserPath only when home=None");
+      }
+    }
+
+    for (k, v) in saved {
+      match v {
+        Some(val) => std::env::set_var(k, val),
+        None => std::env::remove_var(k),
+      }
+    }
+  }
+
+  #[test]
+  fn missing_home_dir_still_surfaces_env_overrides() {
+    // With home=None, HF_HUB_CACHE / OLLAMA_MODELS overrides must still
+    // appear so a user with a relocated cache and no resolvable $HOME
+    // (rare but possible in sandboxes) doesn't lose visibility. LM Studio
+    // is skipped — it has no env override and its defaults need home.
+    // On Linux the Ollama systemd path is appended unconditionally.
+    let _lock = crate::cli::test_lock::serialize();
+    let saved_hf = std::env::var_os("HF_HUB_CACHE");
+    let saved_ollama = std::env::var_os("OLLAMA_MODELS");
+    std::env::set_var("HF_HUB_CACHE", "/relocated/hub");
+    std::env::set_var("OLLAMA_MODELS", "/relocated/ollama");
+
+    let user: Vec<PathBuf> = Vec::new();
+    let roots = default_set(RootResolution {
+      user_paths: &user,
+      disable: &disable_default(),
+      no_scan: false,
+      home: None,
+    });
+    let by_source: std::collections::BTreeMap<ModelSource, Vec<&Path>> =
+      roots
+        .iter()
+        .fold(std::collections::BTreeMap::new(), |mut m, r| {
+          m.entry(r.source).or_default().push(r.path.as_path());
+          m
+        });
+    assert_eq!(
+      by_source
+        .get(&ModelSource::HuggingFace)
+        .map(|v| v.as_slice()),
+      Some(&[Path::new("/relocated/hub")][..]),
+    );
+    let mut expected_ollama = vec![Path::new("/relocated/ollama")];
+    if let Some(sys) = expected_ollama_system_path() {
+      expected_ollama.push(sys);
+    }
+    assert_eq!(
+      by_source.get(&ModelSource::Ollama).map(|v| v.as_slice()),
+      Some(expected_ollama.as_slice()),
+    );
+    assert!(
+      !by_source.contains_key(&ModelSource::LmStudio),
+      "LM Studio has no env override; must not appear without home",
+    );
+
+    match saved_hf {
+      Some(v) => std::env::set_var("HF_HUB_CACHE", v),
+      None => std::env::remove_var("HF_HUB_CACHE"),
+    }
+    match saved_ollama {
+      Some(v) => std::env::set_var("OLLAMA_MODELS", v),
+      None => std::env::remove_var("OLLAMA_MODELS"),
+    }
   }
 
   #[test]

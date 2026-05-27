@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod datetime;
 pub mod hex;
 pub mod logging;
+pub mod model_caches;
 pub mod paths;
 pub mod process;
 

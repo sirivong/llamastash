@@ -346,16 +346,19 @@ fn available_bytes(_path: &Path) -> Option<u64> {
   None
 }
 
-/// Resolve the HF cache root (`$HF_HOME/hub` → `~/.cache/huggingface/hub`).
-/// Matches the path hf-hub's `Cache::default` produces — we pass this
-/// explicitly to `ApiBuilder::with_cache_dir` so the dependency on
-/// hf-hub's defaults is explicit, not implicit.
+/// Resolve the HF cache root for *writes*. Delegates to
+/// [`crate::util::model_caches::huggingface_primary_hub_dir`] so this
+/// stays symmetric with the scan paths that
+/// `discovery::known_caches::default_set` walks. We pass the resolved
+/// path explicitly to `ApiBuilder::with_cache_dir` so the dependency
+/// on hf-hub's defaults is explicit, not implicit. See the
+/// [`crate::util::model_caches`] module docs for the full precedence
+/// chain (`HF_HUB_CACHE` → `HUGGINGFACE_HUB_CACHE` → `$HF_HOME/hub` →
+/// `$XDG_CACHE_HOME/huggingface/hub` → `~/.cache/huggingface/hub`).
 pub fn hf_cache_dir() -> Result<PathBuf, DownloadError> {
-  if let Some(home) = std::env::var_os("HF_HOME") {
-    return Ok(PathBuf::from(home).join("hub"));
-  }
-  let home = crate::util::paths::home_dir().ok_or(DownloadError::NoCacheDir)?;
-  Ok(home.join(".cache/huggingface/hub"))
+  let home = crate::util::paths::home_dir();
+  crate::util::model_caches::huggingface_primary_hub_dir(home.as_deref())
+    .ok_or(DownloadError::NoCacheDir)
 }
 
 /// Compute the cache folder name for a repo (matches `huggingface_hub`
@@ -1334,6 +1337,22 @@ mod tests {
         "lmstudio-community/Qwen3-Next-80B-A3B-Instruct-GGUF".to_string(),
       ]
     );
+  }
+
+  #[test]
+  fn hf_cache_dir_uses_env_override_via_shared_util() {
+    // Integration check: download's `hf_cache_dir` must surface the
+    // env-driven path computed by `util::model_caches`. Full precedence
+    // matrix is tested in the util module — this only verifies the
+    // wiring so a refactor that orphans this caller is caught.
+    let _lock = crate::cli::test_lock::serialize();
+    let saved = std::env::var_os("HF_HUB_CACHE");
+    std::env::set_var("HF_HUB_CACHE", "/explicit/hub/path");
+    assert_eq!(hf_cache_dir().unwrap(), PathBuf::from("/explicit/hub/path"));
+    match saved {
+      Some(v) => std::env::set_var("HF_HUB_CACHE", v),
+      None => std::env::remove_var("HF_HUB_CACHE"),
+    }
   }
 
   #[test]

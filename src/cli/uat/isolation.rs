@@ -12,6 +12,13 @@
 //! | `LLAMASTASH_CACHE_DIR`  | `paths::cache_dir()` (Unit 1); `log_dir()` inherits |
 //! | `LLAMASTASH_SOCKET`     | `paths::runtime_socket_path()` (pre-existing) |
 //! | `HF_HOME`              | `init::download::hf_cache_dir()` (HF convention) |
+//! | `HF_HUB_CACHE`         | `init::download::hf_cache_dir()` (takes precedence over `HF_HOME`) |
+//!
+//! `HF_HUB_CACHE` is set redundantly with `HF_HOME` so that a
+//! maintainer who exports `HF_HUB_CACHE` in their shell to redirect
+//! their daily-driver HF cache doesn't inherit it into the UAT child
+//! and silently escape the sandbox (since `HF_HUB_CACHE` outranks
+//! `HF_HOME`).
 //!
 //! Plus on Linux, `XDG_STATE_HOME` / `XDG_CONFIG_HOME` / `XDG_CACHE_HOME`
 //! / `XDG_RUNTIME_DIR` are set redundantly. `directories` on Linux
@@ -64,6 +71,7 @@ pub const LLAMASTASH_ENV_KEYS: &[&str] = &[
   "LLAMASTASH_CACHE_DIR",
   "LLAMASTASH_SOCKET",
   "HF_HOME",
+  "HF_HUB_CACHE",
 ];
 
 /// Names of the Linux XDG vars set redundantly so a child that calls
@@ -139,6 +147,13 @@ impl TempdirGuard {
     self.root_path.join("hf")
   }
 
+  /// Path to the sandbox's HF hub blob cache. Set as `HF_HUB_CACHE` on
+  /// children so it overrides any inherited shell value and pins the
+  /// blob cache inside the sandbox.
+  pub fn hf_hub_cache(&self) -> PathBuf {
+    self.hf_home().join("hub")
+  }
+
   /// Build the env-var map for a child process. Returned as
   /// `Vec<(name, value)>` so a caller can either fold it onto a
   /// `Command` via `.env(k, v)` or render it for a dry-run check.
@@ -149,12 +164,14 @@ impl TempdirGuard {
     let runtime = self.root_path.join("runtime");
     let socket = self.socket_path();
     let hf = self.hf_home();
+    let hf_hub = self.hf_hub_cache();
     vec![
       ("LLAMASTASH_STATE_DIR", state.clone()),
       ("LLAMASTASH_CONFIG_DIR", config.clone()),
       ("LLAMASTASH_CACHE_DIR", cache.clone()),
       ("LLAMASTASH_SOCKET", socket),
       ("HF_HOME", hf),
+      ("HF_HUB_CACHE", hf_hub),
       // XDG mirror (no-op on macOS, redundant safety on Linux).
       ("XDG_STATE_HOME", state),
       ("XDG_CONFIG_HOME", config),
