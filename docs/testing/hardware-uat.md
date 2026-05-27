@@ -166,8 +166,9 @@ The repo ships one-command wrappers for the common lanes:
 
 ```sh
 make uat-amd
-make uat-vulkan UAT_VULKAN_SERVER=/path/to/build-vulkan/bin/llama-server
+make uat-amd-vulkan    UAT_VULKAN_SERVER=/path/to/build-vulkan/bin/llama-server
 make uat-nvidia
+make uat-nvidia-vulkan UAT_VULKAN_SERVER=/path/to/build-vulkan/bin/llama-server
 make uat-apple-metal
 make uat-cpu-only
 ```
@@ -178,9 +179,11 @@ Optional knobs:
 - `UAT_REPORT_DIR=/tmp/uat-reports` (default `/tmp`)
 - `UAT_EXTRA='--report-out -'` or any extra UAT flags appended verbatim
 
-`uat-vulkan` assumes an AMD host and records `runtime=vulkan`; point it
-at a Vulkan `llama-server` build via `UAT_VULKAN_SERVER=...` or the
-standard `LLAMASTASH_LLAMA_SERVER=...` environment variable.
+`uat-amd-vulkan` and `uat-nvidia-vulkan` exercise the Vulkan runtime on
+the named host (the `--host-backend` preflight still asserts AMD vs
+NVIDIA hardware); both record `runtime=vulkan`. Point either at a
+Vulkan-built `llama-server` via `UAT_VULKAN_SERVER=...` or the standard
+`LLAMASTASH_LLAMA_SERVER=...` environment variable.
 
 ### CPU-only coverage on this repo
 

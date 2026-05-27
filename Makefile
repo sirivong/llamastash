@@ -125,7 +125,7 @@ uat-amd:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@$(UAT_CMD) --host-backend amd --mode "$(UAT_MODE)" --report-out "$(UAT_REPORT_DIR)/uat-amd-$(UAT_MODE).json" $(UAT_EXTRA)
 
-uat-vulkan:
+uat-amd-vulkan:
 	@mkdir -p "$(UAT_REPORT_DIR)"
 	@if [ -z "$(UAT_VULKAN_SERVER)" ] && [ -z "$$LLAMASTASH_LLAMA_SERVER" ]; then \
 		printf '%s\n' "set UAT_VULKAN_SERVER=/path/to/build-vulkan/bin/llama-server or export LLAMASTASH_LLAMA_SERVER"; \
@@ -133,7 +133,17 @@ uat-vulkan:
 	fi
 	@LLAMASTASH_LLAMA_SERVER="$${LLAMASTASH_LLAMA_SERVER:-$(UAT_VULKAN_SERVER)}" \
 		$(UAT_CMD) --host-backend amd --runtime-backend vulkan --mode "$(UAT_MODE)" \
-		--report-out "$(UAT_REPORT_DIR)/uat-vulkan-$(UAT_MODE).json" $(UAT_EXTRA)
+		--report-out "$(UAT_REPORT_DIR)/uat-amd-vulkan-$(UAT_MODE).json" $(UAT_EXTRA)
+
+uat-nvidia-vulkan:
+	@mkdir -p "$(UAT_REPORT_DIR)"
+	@if [ -z "$(UAT_VULKAN_SERVER)" ] && [ -z "$$LLAMASTASH_LLAMA_SERVER" ]; then \
+		printf '%s\n' "set UAT_VULKAN_SERVER=/path/to/build-vulkan/bin/llama-server or export LLAMASTASH_LLAMA_SERVER"; \
+		exit 1; \
+	fi
+	@LLAMASTASH_LLAMA_SERVER="$${LLAMASTASH_LLAMA_SERVER:-$(UAT_VULKAN_SERVER)}" \
+		$(UAT_CMD) --host-backend nvidia --runtime-backend vulkan --mode "$(UAT_MODE)" \
+		--report-out "$(UAT_REPORT_DIR)/uat-nvidia-vulkan-$(UAT_MODE).json" $(UAT_EXTRA)
 
 uat-nvidia:
 	@mkdir -p "$(UAT_REPORT_DIR)"
