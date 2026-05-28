@@ -169,7 +169,23 @@ fn build_sections(app: &App) -> Vec<Section> {
       rows,
     });
   }
+  sections.push(legend_section());
   sections
+}
+
+/// Static legend explaining glyphs used in panel labels. Currently
+/// the only entry is the `*` suffix on the Host panel's RAM row,
+/// which flags unified memory (Apple Metal / AMD UMA APUs share
+/// the same physical pool with VRAM, so the RAM total subtracts
+/// the GPU-allocated bytes to avoid double-counting).
+fn legend_section() -> Section {
+  Section {
+    title: "Legend",
+    rows: vec![(
+      "RAM*".to_string(),
+      "unified memory (shared with VRAM)".to_string(),
+    )],
+  }
 }
 
 /// Snapshot the full keymap as a flat slice, deduplicating bindings
@@ -337,6 +353,20 @@ mod tests {
     assert!(
       frame.contains("c,y"),
       "aliased yank chord missing:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_shows_ram_star_legend() {
+    // The Host panel marks unified-memory machines with `RAM*` — the
+    // help overlay's Legend section is the only place that explains
+    // what the star means.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 40, &app);
+    assert!(frame.contains("Legend"), "Legend section missing:\n{frame}");
+    assert!(
+      frame.contains("RAM*") && frame.contains("unified memory"),
+      "RAM* legend row missing:\n{frame}"
     );
   }
 
