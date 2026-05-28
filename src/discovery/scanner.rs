@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use crate::discovery::metadata_cache::{self, CachedParse, MetadataCache};
 use crate::discovery::split_gguf::{group, DiscoveredEntry};
 use crate::discovery::{DiscoveredModel, ModelSource};
-use crate::gguf::{read_path, summarise_metadata, GgufError, HeaderReadOptions};
+use crate::gguf::{read_path, summarise_metadata, GgufError, HeaderReadOptions, ModelMetadata};
 
 /// One root to scan plus how to label files found beneath it.
 #[derive(Debug, Clone)]
@@ -265,11 +265,13 @@ async fn parse_into_model(
   // Cache lookup first. A hit short-circuits the header read entirely.
   if let Some(c) = cache {
     if let Some(hit) = c.get(&path, mtime, size).await {
+      let mut hit_metadata = hit.metadata;
+      apply_split_total_weights(&mut hit_metadata, &path, &siblings).await;
       return DiscoveredModel {
         path,
         parent,
         source,
-        metadata: hit.metadata,
+        metadata: hit_metadata,
         parse_error: hit.parse_error,
         split_siblings: siblings,
         display_label: None,
@@ -299,15 +301,63 @@ async fn parse_into_model(
   if let Some(c) = cache {
     c.put(path.clone(), mtime, size, cached.clone()).await;
   }
+  let mut metadata = cached.metadata;
+  apply_split_total_weights(&mut metadata, &path, &siblings).await;
   DiscoveredModel {
     path,
     parent,
     source,
-    metadata: cached.metadata,
+    metadata,
     parse_error: cached.parse_error,
     split_siblings: siblings,
     display_label: None,
   }
+}
+
+/// For split-GGUF entries, replace the shard-1-only `weights_bytes`
+/// with an approximation of the total tensor footprint across every
+/// shard. The per-shard `summarise_metadata` only sees shard 1's
+/// header, so a 2-shard 80B model was reporting ~half its real size
+/// — visible as a wrong SIZE column in `llamastash list`, an
+/// undersized estimate from the recommender's VRAM-fit predicate, and
+/// the same wrong number in `llamastash show`.
+///
+/// File size is a tight upper bound on tensor bytes (GGUF header +
+/// per-tensor alignment padding is <1% on quant models), and reading
+/// the file metadata is cheap, so we sum on-disk sizes instead of
+/// reading each sibling's header. No-op when `siblings` is empty.
+async fn apply_split_total_weights(
+  metadata: &mut Option<ModelMetadata>,
+  path: &Path,
+  siblings: &[PathBuf],
+) {
+  if siblings.is_empty() {
+    return;
+  }
+  let Some(meta) = metadata.as_mut() else {
+    return;
+  };
+  let primary = path.to_path_buf();
+  let sibling_paths: Vec<PathBuf> = siblings.to_vec();
+  let total = tokio::task::spawn_blocking(move || sum_on_disk_bytes(&primary, &sibling_paths))
+    .await
+    .unwrap_or(0);
+  if total > 0 {
+    meta.weights_bytes = Some(total);
+  }
+}
+
+/// Sum `primary` + every sibling's on-disk size. `0` for any missing
+/// path so a temporarily-unavailable sibling shrinks the total
+/// rather than panicking discovery. Pushed onto the blocking pool by
+/// the caller — multi-shard sets stat N files synchronously.
+fn sum_on_disk_bytes(primary: &Path, siblings: &[PathBuf]) -> u64 {
+  let primary_bytes = std::fs::metadata(primary).map(|m| m.len()).unwrap_or(0);
+  let sibling_bytes: u64 = siblings
+    .iter()
+    .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+    .sum();
+  primary_bytes.saturating_add(sibling_bytes)
 }
 
 #[cfg(test)]
@@ -520,6 +570,40 @@ mod tests {
       .path
       .to_string_lossy()
       .ends_with("model-00001-of-00003.gguf"));
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn split_shards_report_summed_weights_bytes() {
+    // Regression: a multi-shard set used to report only shard 1's
+    // header-derived weights_bytes, so `llamastash list`,
+    // `show`, and the recommender's VRAM-fit predicate all saw
+    // ~half the real size for a 2-shard 80B Q5_K_M model. The
+    // scanner now sums every shard's on-disk size into
+    // `metadata.weights_bytes` so the displayed/used value covers
+    // the whole model.
+    let dir = temp_dir("split-size");
+    let shard_bytes = build_minimal_gguf("qwen3");
+    let per_shard = shard_bytes.len() as u64;
+    fs::write(dir.join("m-00001-of-00002.gguf"), &shard_bytes).unwrap();
+    fs::write(dir.join("m-00002-of-00002.gguf"), &shard_bytes).unwrap();
+    let roots = vec![ScanRoot {
+      path: dir.clone(),
+      source: ModelSource::UserPath,
+    }];
+    let mut rx = scan(roots, ScanOptions::default());
+    let m = rx.recv().await.expect("one grouped entry");
+    let weights = m
+      .metadata
+      .as_ref()
+      .expect("metadata present")
+      .weights_bytes
+      .expect("split should set summed weights_bytes");
+    assert_eq!(
+      weights,
+      per_shard * 2,
+      "split weights_bytes must equal sum of every shard's on-disk size"
+    );
     fs::remove_dir_all(&dir).ok();
   }
 

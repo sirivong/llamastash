@@ -4,6 +4,50 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- `llamastash show <model>` subcommand projects everything LlamaStash
+  knows about a single model in one block: full path, source, parsed
+  GGUF metadata, on-disk size summed across split shards, the yaml +
+  built-in `arch_defaults` that would feed a launch, and the last
+  `start_model` params recorded for the file. Reuses the same matcher
+  `start` and `/v1/...` use, so a reference that works on one surface
+  works here. `--json` emits the stable composite envelope.
+- `?` help overlay now has a `Legend` section explaining the `RAM*`
+  glyph (unified-memory pool shared with VRAM).
+- `daemon start --no-proxy-fallback` flag (and matching
+  `proxy.fallback_enabled: false` config / `LLAMASTASH_NO_PROXY_FALLBACK`
+  env) disables the family-MRU fallback so a failed auto-start surfaces
+  as a 503 instead of being served by a different Ready supervisor.
+  Lets embedding clients refuse silent cross-model serves.
+- `init` model picker now has a final "Skip — don't download a model"
+  entry so the wizard can finish without a download from the UI
+  (previously only reachable via `--model none`).
+
+### Changed
+
+- Apple Metal GPU row in the Host panel now reads `GPU  unified`
+  instead of `GPU  unified memory`. The `RAM*` glyph already flags the
+  unified-memory machine, so the long form was redundant.
+
+### Fixed
+
+- Split-GGUF entries now report the **summed** on-disk size across
+  every shard instead of just shard 1. Visible as a correct SIZE in
+  `llamastash list`, `show`, and the recommender's VRAM-fit
+  predicate; previously a 2-shard 80B Q5_K_M model showed ~half its
+  real footprint.
+- HF pull dialog's file-picker page now scrolls to keep the cursor in
+  view. Repos with many shards or quant variants no longer push rows
+  off the bottom of the modal.
+
+### Infrastructure
+
+- Benchmark snapshot releases (`snapshot-latest` + per-day audit tags)
+  publish with `--prerelease`, so they collapse into the older-releases
+  list on the Releases page instead of headlining alongside product
+  tags. Direct asset URL unchanged — init's `load_remote` keeps working.
+
 ## [0.0.1] — 2026-05-28
 
 First publicly-installable release. A single `llamastash` binary acts as TUI, CLI, and on-demand daemon for running local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp). Distributed via Cargo, a Homebrew tap, and a GitHub-hosted install script, with a marketing site at [llamastash.dev](https://llamastash.dev).

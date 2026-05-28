@@ -37,6 +37,13 @@ pub struct ModelMetadata {
   /// metadata-only GGUFs. Surfaced in `list_models` so the TUI can
   /// render a weights-only est-mem badge without re-reading the
   /// header on every refresh (origin: R8, est-mem render half).
+  ///
+  /// For split-GGUF entries the scanner replaces the shard-1-only
+  /// value with the on-disk total across every shard (see
+  /// `discovery::scanner::apply_split_total_weights`). The header-
+  /// computed per-shard value would otherwise mis-report a 2-shard
+  /// 80B model as ~half its real footprint in `list`, `show`, and
+  /// the recommender's VRAM-fit predicate.
   pub weights_bytes: Option<u64>,
 }
 

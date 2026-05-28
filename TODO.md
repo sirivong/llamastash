@@ -97,38 +97,48 @@ Two release tracks:
   - [x] website
 - [x] **IP**: Release setup validation (CI/CD etc).
 - [x] Setup llamastash.dev domain
-- [ ] **IP**: **R1 launch promotion** — telling the world about v0.0.1.
+- [x] Release tag 0.0.1
+- [x] **IP**: **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] Release blog.
   - [ ] Social promotion — research an approach for max reach.
 
-## R2 (post-v0.0.1 roadmap)
+## R2 (v0.0.2 roadmap)
+
+- [x] Wrong size on multipart gguf.
+- [ ] Model fails to launch: /home/deepu/.cache/huggingface/hub/models--bartowski--Qwen_Qwen3-Next-80B-A3B-Instruct-GGUF/snapshots/c07b9268d97d8ba09d0529980627f3bd70f5f90a/Qwen_Qwen3-Next-80B-A3B-Instruct-Q5_K_M/Qwen_Qwen3-Next-80B-A3B-Instruct-Q5_K_M-00001-of-00002.gguf
+- [ ] Running `make snapshot` gives different results than CI, especially source and scores
+- [x] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
+- [x] Why does macos show unified memory for GPU in Host panel
+- [ ] **Need brainstorm/plan**: Idle-TTL eviction for the proxy's auto-started supervisors. Both Ollama (5 min, refcount-gated) and LM Studio (60 min, request-resets) evict idle models so a long-running daemon doesn't pin memory forever. llamastash today keeps models resident until explicit `stop_model`; first-request memory growth is the visible gap. Comparison + rationale in [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash); origin: R34 (the broader HTTP/MCP slice of R34 stays at R2).
+- [ ] Offer to update OpenCode and other supported tools during `init`
+- [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.
+- [ ] AUR package
+- [ ] **Need brainstorm/plan**: Windows support including scoop.
+- [ ] Publish to clawhub/Hermes/etc
+- [x] flag to disable proxy fallback (or flip to off by default?)
+- [x] Add ability to skip downloading models during init
+- [x] The Model drill in page inside HF pull (the last page) doesnt scroll.
+- [x] Add a line in help page about the `*` in the `RAM*` in Host panel.
+- [x] Hide snapshots from GH release
+
+## General Roadmap
 
 ### High priority
 
+- [ ] `start` should support advanced params like TUI.
 - [ ] Manual UAT smoke run
   - [ ] Nvidia CUDA: Linux
   - [ ] Apple Metal : macOS
   - [ ] AMD GPU ROCm: Linux
   - [ ] AMD GPU Vulkan: Linux
-- [ ] **IP**: Benchmark against Ollama, LMStudio and other popular options.
+- [ ] Benchmark against Ollama, LMStudio and other popular options.
   - [ ] AMD GPU : Linux
     - [ ] gemma-3-4b-it.Q3_K_M
-- [ ] AUR package
-- [ ] The Model drill in page inside HF pull (the last page) doesnt scroll.
-- [ ] flag to disable proxy fallback (or flip to off by default?)
-- [ ] Offer to update OpenCode and other supported tools during `init`
-- [ ] `start` should support advanced params like TUI.
-- [ ] `show` command shows model info. gguf parses values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
-- [ ] Add a line in help page about the `*` in the `RAM*` in Host panel.
-- [ ] Publish to clawhub/Hermes/etc
 - [ ] **Build CUDA llama.cpp prebuilts in CD** — ggml-org ships CUDA only for Windows (`cudart-llama-bin-win-cuda-{12.4,13.3}-x64.zip`); Linux+NVIDIA users get routed to the Vulkan prebuilt today, which is ~10–30% slower than native CUDA for LLM inference. Building CUDA doesn't need a GPU runner (only `nvcc`), so a standard `ubuntu-latest` runner + `Jimver/cuda-toolkit` action + `cmake -DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES="70;75;80;86;89;90"` produces a fat binary covering Volta→Hopper. Publish to `llamastash/llamastash` releases tagged with the same `bNNNN` as the upstream llama.cpp tag so `pick_release_with_asset` keeps working. Then extend `pick_asset_suffix` in `src/init/install/gh_releases.rs:70` with a CUDA branch for Linux+NVIDIA (parameterise `RELEASES_URL` per-asset), and add a wizard prompt to choose CUDA vs Vulkan. Static-link libcudart (Ollama precedent) so users don't need the CUDA toolkit installed — adds ~100MB but zero user-side prereqs. Scope: ~1–2 days for workflow + routing + tests. Folds into the broader [version-drift brainstorm](#) above since both questions share the "do we own a llama.cpp build pipeline?" decision.
 - [ ] **Need brainstorm/plan**: check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
-- [ ] **Need brainstorm/plan**: Plan to prevent llama.cpp version drift/incompatibility issues. Should we bundle/fix version.
 - [ ] **Need brainstorm/plan**: Look into gpu/cpu offload split
 - [ ] **Need brainstorm/plan**: Consider Loopback + LAN binding options for the proxy.
-- [ ] **Need brainstorm/plan**: Windows support including scoop.
 - [ ] **Need brainstorm/plan**: Anthropic API compatibility.
-- [ ] **Need brainstorm/plan**: Idle-TTL eviction for the proxy's auto-started supervisors. Both Ollama (5 min, refcount-gated) and LM Studio (60 min, request-resets) evict idle models so a long-running daemon doesn't pin memory forever. llamastash today keeps models resident until explicit `stop_model`; first-request memory growth is the visible gap. Comparison + rationale in [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash); origin: R34 (the broader HTTP/MCP slice of R34 stays at R2).
 - [ ] No glyphs fallback.
 - [ ] Setup GPU runners using https://cirun.io/ ?
 
