@@ -66,16 +66,14 @@ Two release tracks:
 
 ### Release checklist
 
-- [ ] **IP**: Benchmark against Ollama, LMStudio and other popular options.
+- [x] **IP**: Benchmark against Ollama, LMStudio and other popular options.
   - [x] AMD APU : Linux
     - [x] Qwen3.6-27B-Q8_0
     - [x] gemma-4-31B-it-Q4_K_M
     - [x] gemma-4-E2B-it-Q4_K_M
     - [x] Qwen3.6-35B-A3B-Q8_0
-  - [ ] AMD GPU : Linux
-    - [ ] gemma-4-E2B-it-Q4_K_M defaults
   - [x] Nvidia : Linux
-    - [ ] gemma-4-E2B-it-Q4_K_M defaults
+    - [x] gemma-3-4b-it.Q3_K_M
   - [x] Apple Silicon : macOS
     - [x] Qwen2.5-0.5B-Instruct Q4_K_M
 - [x] **IP**: Test Proxy with OpenCode.
@@ -112,6 +110,9 @@ Two release tracks:
   - [ ] Apple Metal : macOS
   - [ ] AMD GPU ROCm: Linux
   - [ ] AMD GPU Vulkan: Linux
+- [ ] **IP**: Benchmark against Ollama, LMStudio and other popular options.
+  - [ ] AMD GPU : Linux
+    - [ ] gemma-3-4b-it.Q3_K_M
 - [ ] AUR package
 - [ ] The Model drill in page inside HF pull (the last page) doesnt scroll.
 - [ ] flag to disable proxy fallback (or flip to off by default?)

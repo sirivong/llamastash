@@ -6,7 +6,8 @@ Read [methodology.md](methodology.md) before any individual page; it explains th
 
 ## Curated reports
 
-- [**Apple M1 final report**](macos-m1-final-report.md) — 4-tool × 4-workload × 2-mode sweep on Apple M1 16 GB (Metal, llama.cpp 9330), Qwen2.5-0.5B-Instruct Q4_K_M. Covers Suite A (zero overhead confirmed), Suite B (cross-tool), and Suite C (proxy hop zero cost). **Start here** for the Apple Silicon story.
+- [**Apple M1 final report**](macos-m1-final-report.md) — 4-tool × 4-workload × 2-mode sweep on Apple M1 16 GB (Metal, llama.cpp 9330), Qwen2.5-0.5B-Instruct Q4\_K\_M. Covers Suite A (zero overhead confirmed), Suite B (cross-tool), and Suite C (proxy hop zero cost). **Start here** for the Apple Silicon story.
+- [**NVIDIA RTX 3050 Ti report**](linux-nvidia-final.md) — 4-tool × 4-workload × 2-mode × **2-engine (CUDA vs Vulkan)** sweep on NVIDIA Ampere (sm\_86, 4 GiB VRAM), gemma-3-4B Q3\_K\_M. Key findings: Vulkan decode ≥ CUDA on this hardware; LM Studio leads on defaults throughput; Ollama Vulkan rag\_prefill is broken. **Start here** for the NVIDIA story.
 - [**AMD-APU final report**](linux-amd-apu-final-report.md) — full 4-model × 4-tool × 2-mode × 4-workload sweep on AMD Strix Halo (gfx1151), with headline tables, per-workload tables, seven findings, and methodology caveats. **Start here** for the AMD-APU story.
 - [**Proxy overhead**](proxy/results.md) — Suite C: per-request overhead of the LlamaStash OpenAI-compat proxy vs hitting the same `llama-server` directly. TTFT p50 +0.45 ms, decode unchanged.
 

@@ -70,6 +70,32 @@ Full per-workload tables, engine A/B, and seven findings → [`docs/benchmarks/l
 Raw per-cell data → [`docs/benchmarks/runs/`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/runs/).  
 Regenerate this table any time: `make bench-table`.
 
+### NVIDIA RTX 3050 Ti - Linux
+
+**Hardware:** NVIDIA GeForce RTX 3050 Ti Laptop GPU (Ampere sm\_86, **4 GiB VRAM**) · Intel i9-11900H · 63 GiB RAM · Manjaro Linux · NVIDIA driver 595.71.05 / CUDA 13.2  
+**Date:** 2026-05-28 · **llama.cpp build:** `b9360 (6b4e4bd5)` (CUDA, self-built) + `b9360` prebuilt Vulkan asset for the Vulkan lane  
+**Tools:** LlamaStash 0.0.1, raw `llama-server` (same binaries), Ollama 0.24.0, LM Studio 2.16.0  
+**Workloads:** `chat_turn`, `agent_decode`, `rag_prefill`, `parallel_4` (1 warmup + 4 measured reps per cell)
+
+`defaults` mode headline (out-of-box experience); `normalized` mode shows a different picture for some tools — see full report.
+
+| Tool | CUDA | Vulkan |
+|---|---:|---:|
+| **LlamaStash** | **41.1 / 74** | **42.0 / 113** |
+| raw `llama-server` | 36.6 / 110 | 37.5 / 148 |
+| LM Studio 2.16.0 | **48.7 / 318** | **48.3 / 308** |
+| Ollama 0.24.0 | 40.7 / 120 | 42.0 / 115 |
+
+Each cell is **decode tok/s / TTFT ms** on `chat_turn`, `defaults` mode. (CUDA/Vulkan here refer to the engine used by each tool, explicitly pinned per the methodology.)
+
+**Highlights:**
+
+- **Vulkan decode ≥ CUDA decode** in 26 of 28 comparable cells (median +5%) — the "CUDA wins on NVIDIA" intuition does not hold for bandwidth-bound Q3 decode on a 4 GiB Ampere card.
+- **LlamaStash leads raw `llama-server` in defaults mode** (12–16% decode, 33–49% TTFT) because its defaults overlay injects hardware-aware knobs. Normalized mode: within ≤0.5 tok/s.
+- **Ollama Vulkan rag\_prefill timed out** — wall-clock exceeded 1.5 h for two cells. CUDA rag\_prefill is slow but workable (3.4–3.7 s TTFT).
+
+Full per-workload tables, CUDA vs Vulkan engine A/B, and six findings → [`docs/benchmarks/linux-nvidia-final.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-nvidia-final.md).
+
 ## Overhead regression (Suite A)
 
 Suite A runs `llamastash start <model>` and raw `llama-server` back-to-back with the same effective argv, then compares deltas against a two-tier threshold:
@@ -92,8 +118,9 @@ Results so far:
 
 - **AMD APU** (`deepu-flowz13-arch`, gemma-4-E2B-it-Q4\_K\_M, 15 requests each side): TTFT +0.45 ms at the median (52.37 → 52.82 ms), tokens/sec unchanged (92.80 → 92.70).
 - **Apple M1** (`macos-m1`, Qwen2.5-0.5B-Instruct Q4\_K\_M, 5 measured reps per phase): TTFT −0.6 ms (within noise), decode +1.4% (within noise).
+- **NVIDIA RTX 3050 Ti** (`deepu-xps`, gemma-3-4b-it.Q3\_K\_M, Vulkan lane, 4 measured reps per phase): TTFT +0.57 ms, decode −0.20% (within noise).
 
-On both platforms: **zero measurable proxy cost.** Full numbers and method → [`docs/benchmarks/proxy/results.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/proxy/results.md).
+On all three platforms: **zero measurable proxy cost.** Full numbers and method → [`docs/benchmarks/proxy/results.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/proxy/results.md).
 
 ## Re-running
 
@@ -123,9 +150,10 @@ docs/benchmarks/
 │   └── <host-id>/<YYYY-MM-DD>-<sha>.json
 ├── methodology.md                # The fairness contract — read first
 ├── index.md                      # Chronological index of all published runs
-├── macos-m1-final-report.md      # Curated Apple M1 run
-├── linux-amd-apu-final-report.md # Curated AMD APU run
-└── results-<YYYY-MM-DD>.md       # Auto-rendered raw-data pages per run day
+├── macos-m1-final-report.md         # Curated Apple M1 run
+├── linux-nvidia-final.md      # Curated NVIDIA RTX 3050 Ti run (CUDA + Vulkan)
+├── linux-amd-apu-final-report.md   # Curated AMD APU run
+└── results-<YYYY-MM-DD>.md         # Auto-rendered raw-data pages per run day
 ```
 
 Each JSON validates against the v1 schema in [`scripts/bench/end_to_end/schema.py`](https://github.com/llamastash/llamastash/blob/main/scripts/bench/end_to_end/schema.py). The auto-rendered dated pages are reproducible from the JSONs via `scripts/bench/end_to_end/render.py`; the `bench-table` headline is reproducible via `scripts/bench/end_to_end/table.py`. Community contributors can drop a new host directory under `runs/` and re-render — no central database, no schema migration dance.

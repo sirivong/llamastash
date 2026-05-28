@@ -161,20 +161,9 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 LlamaStash spawns the unmodified upstream `llama-server`. Three suites track what that means in practice — **Suite A** asserts the wrapper adds no measurable overhead vs raw `llama-server`, **Suite B** compares LlamaStash-as-shipped against Ollama + LM Studio on the same hardware through their OpenAI-compatible endpoints, **Suite C** measures the proxy hop vs hitting `llama-server` directly (TTFT p50 +0.45 ms, decode unchanged). Full write-up + per-workload tables: [`docs/benchmarks.md`](docs/benchmarks.md).
 
-Each cell below is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode), averaged across `defaults` + `normalized` modes. LlamaStash matches raw `llama-server` within ≤1% on every cell. Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
+Each cell below is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-token prompt → 64 tokens decode). LlamaStash matches raw `llama-server` within ≤1% in normalized mode on every platform. Re-run on your hardware: `make bench-end-to-end` (Suite B) or `make bench-overhead` (Suite A).
 
-### Apple M1 - macOS (16 GB unified memory, Metal, llama.cpp build `9330 (328874d05)`)
-
-| Tool               | small (Qwen2.5-0.5B Q4) |
-| ------------------ | ----------------------: |
-| **LlamaStash**     |        **95.6 / 18** ✦  |
-| raw `llama-server` |               91.9 / 20 |
-| LM Studio          |               88.4 / 68 |
-| Ollama 0.24.0      |              79.6 / 102 |
-
-✦ LlamaStash leads raw `llama-server` on M1 in `defaults` mode (99.0 vs 92.3 tok/s, 15 vs 19 ms TTFT) because its Metal defaults overlay injects hardware-optimal knobs at startup. Normalized mode: 92.2 vs 91.5 — within 1%. Curated report: [`macos-m1-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/macos-m1-final-report.md).
-
-### AMD APU - Linux (Ryzen AI Max+ 395 / Radeon 8060S, `gfx1151`, llama.cpp build `9245 (b39a7bf1b)`)
+### AMD APU - Linux (Ryzen AI Max+ 395 / Radeon 8060S 128GB unified, llama.cpp build `9245 (b39a7bf1b)`)
 
 | Tool               | small (E2B Q4) |     mid (31B Q4) | large_dense (27B Q8) | large_moe (35B-A3B Q8) | Engine notes                 |
 | ------------------ | -------------: | ---------------: | -------------------: | ---------------------: | ---------------------------- |
@@ -184,6 +173,28 @@ Each cell below is **decode tok/s / TTFT ms** on the `chat_turn` workload (50-to
 | Ollama 0.24.0      |     50.4 / 223 |      4.8 / 1 092 |          2.6 / 1 745 |             12.1 / 476 | bundled                      |
 
 Curated report with seven findings: [`linux-amd-apu-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-amd-apu-final-report.md).
+
+### NVIDIA - Linux (RTX 3050 Ti, 4 GiB VRAM, llama.cpp build `b9360`)
+
+| Tool               | CUDA (gemma-3-4b Q3 `defaults`) | Vulkan (gemma-3-4b Q3 `defaults`) |
+| ------------------ | ------------------------------: | --------------------------------: |
+| **LlamaStash**     |                 **41.1 / 74** ✦ |                    **42.0 / 113** |
+| raw `llama-server` |                      36.6 / 110 |                        37.5 / 148 |
+| LM Studio 2.16.0   |                  **48.7 / 318** |                    **48.3 / 308** |
+| Ollama 0.24.0      |                      40.7 / 120 |                        42.0 / 115 |
+
+✦ LlamaStash leads raw `llama-server` in defaults mode (12–16% decode, 33–49% TTFT) via the hardware-aware defaults overlay; normalized mode: within ≤0.5 tok/s. Vulkan decode ≥ CUDA on this hardware in 26 of 28 cells (median +5%). Curated report with six findings: [`linux-nvidia-final.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/linux-nvidia-final.md).
+
+### Apple M1 - macOS (16 GB unified memory, Metal, llama.cpp build `9330 (328874d05)`)
+
+| Tool               | small (Qwen2.5-0.5B Q4) |
+| ------------------ | ----------------------: |
+| **LlamaStash**     |         **95.6 / 18** ✦ |
+| raw `llama-server` |               91.9 / 20 |
+| LM Studio          |               88.4 / 68 |
+| Ollama 0.24.0      |              79.6 / 102 |
+
+✦ LlamaStash leads raw `llama-server` on M1 in `defaults` mode (99.0 vs 92.3 tok/s, 15 vs 19 ms TTFT) because its Metal defaults overlay injects hardware-optimal knobs at startup. Normalized mode: 92.2 vs 91.5 — within 1%. Curated report: [`macos-m1-final-report.md`](https://github.com/llamastash/llamastash/blob/main/docs/benchmarks/macos-m1-final-report.md).
 
 ## Screenshots
 
