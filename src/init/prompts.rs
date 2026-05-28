@@ -485,17 +485,32 @@ pub async fn pick_model(args: &InitArgs, recs: &[Recommendation]) -> Result<Mode
     .iter()
     .position(|r| matches!(r.kind, RecommendationKind::Curated { .. }))
     .unwrap_or(0);
+  // Append a synthetic "Skip" entry as the last option in the picker
+  // so users can decline the model-download step from the UI without
+  // having to abort the wizard or pass `--model none`. The index is
+  // `owned_recs.len()` (one past the last real recommendation); the
+  // match arm below maps that index to `ModelChoice::Skip`.
+  let skip_idx = owned_recs.len();
   // Return the chosen Recommendation directly from the blocking task
   // so the index never crosses the spawn_blocking boundary back to
   // an unrelated slice. Removes the "two parallel slices must stay
-  // in sync" hazard the prior code had.
+  // in sync" hazard the prior code had. Skip is signalled by an
+  // `Ok(None)` from the blocking task (sentinel index `skip_idx`).
   let chosen: Option<Recommendation> = tokio::task::spawn_blocking(move || {
     let mut select = cliclack::select("Pick a model").initial_value(initial_idx);
     for (i, r) in owned_recs.iter().enumerate() {
       let (label, hint) = render_recommendation(r);
       select = select.item(i, label, hint);
     }
+    select = select.item(
+      skip_idx,
+      "Skip — don't download a model".to_string(),
+      "use `llamastash pull` later".to_string(),
+    );
     let idx = select.interact()?;
+    if idx == skip_idx {
+      return Ok::<_, std::io::Error>(None);
+    }
     Ok::<_, std::io::Error>(owned_recs.into_iter().nth(idx))
   })
   .await
