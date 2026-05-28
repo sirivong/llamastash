@@ -161,6 +161,7 @@ fn build_harness() -> Harness {
         interval: Duration::from_millis(20),
         timeout: Duration::from_secs(5),
       },
+      origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     })
     .await
     .expect("spawn fake_llama_server");

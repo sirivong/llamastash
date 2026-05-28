@@ -6,6 +6,23 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Added
 
+- **Idle-TTL eviction for proxy-auto-started supervisors.** After
+  `proxy.idle_ttl_secs` of no inbound request and no in-flight
+  forward, the daemon's eviction sweeper calls `model.stop(5s grace)`
+  so a long-running daemon doesn't pin VRAM on models nobody is
+  using. Default 1800 (30 min); `0` disables the sweeper entirely.
+  - **Refcount-gated**: in-flight requests bump an atomic counter on
+    the supervisor (decremented when the streamed response body is
+    dropped — covers happy-path completion, abandoned client
+    connections, and upstream errors uniformly). Long generations
+    can never get SIGTERM'd mid-stream.
+  - **Scope: auto-start only.** Manually launched models (TUI, CLI
+    `start`, IPC `start_model`) carry `LaunchOrigin::Manual` and stay
+    resident regardless of idle time — mirrors LM Studio's "manually
+    loaded models are exempt" rule.
+  - **MRU seeded on Ready.** `proxy::launch::drive_launch_as_leader`
+    touches the MRU when an auto-start supervisor reaches Ready, so a
+    loaded-but-never-queried model has a starting deadline.
 - `llamastash show <model>` subcommand projects everything LlamaStash
   knows about a single model in one block: parsed GGUF metadata, a
   per-shard listing with each shard's path + individual size for

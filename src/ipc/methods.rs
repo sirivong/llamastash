@@ -1010,7 +1010,12 @@ async fn start_model_handler(
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: StartParams = parse_params(params)?;
-  let started = start_model_inner(ctx, parsed).await?;
+  // IPC clients are user-initiated (TUI Launch, `llamastash start`,
+  // bare JSON-RPC). The proxy's auto-start path bypasses this
+  // handler and calls `start_model_inner` directly with
+  // `LaunchOrigin::AutoStart`.
+  let started =
+    start_model_inner(ctx, parsed, crate::daemon::supervisor::LaunchOrigin::Manual).await?;
   let pid = started.model.pid().await;
   Ok(json!({
     "launch_id": started.launch_id,
@@ -1033,6 +1038,7 @@ async fn start_model_handler(
 pub(crate) async fn start_model_inner(
   ctx: &MethodContext,
   parsed: StartParams,
+  origin: crate::daemon::supervisor::LaunchOrigin,
 ) -> Result<StartedLaunch, ErrorObject> {
   // Pure input-validation lives before the daemon's launch-env
   // lookup so a malformed request gives an actionable
@@ -1264,6 +1270,7 @@ pub(crate) async fn start_model_inner(
     mode,
     log_path: log_path.clone(),
     probe: scaled_probe,
+    origin,
   })
   .await;
   let model = match spawn_result {

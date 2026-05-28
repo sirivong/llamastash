@@ -86,6 +86,48 @@ impl ManagedState {
   }
 }
 
+/// Where a launch came from. Drives the proxy's idle-TTL sweeper:
+/// auto-started supervisors are evictable when idle; manually-started
+/// ones (TUI / CLI `start`) are treated as durable user intent and
+/// stay resident regardless. Mirrors LM Studio's "manually loaded
+/// models are exempt" rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchOrigin {
+  /// User explicitly launched via `llamastash start`, the TUI Launch
+  /// action, or an IPC `start_model` call from any other client. Not
+  /// evictable by the idle sweeper.
+  Manual,
+  /// Proxy `auto_start` (an inbound `/v1/...` request landed on an
+  /// unloaded model). Evictable when idle for `proxy.idle_ttl_secs`.
+  AutoStart,
+}
+
+impl LaunchOrigin {
+  pub fn label(self) -> &'static str {
+    match self {
+      LaunchOrigin::Manual => "manual",
+      LaunchOrigin::AutoStart => "auto_start",
+    }
+  }
+}
+
+/// RAII guard returned by [`ManagedModel::inflight_guard`]. Holds a
+/// strong reference to the supervisor's `Arc<ManagedInner>` so the
+/// `Drop` can decrement the counter even after the originating
+/// `ManagedModel` handle has been dropped.
+pub struct InflightGuard {
+  inner: Arc<ManagedInner>,
+}
+
+impl Drop for InflightGuard {
+  fn drop(&mut self) {
+    self
+      .inner
+      .inflight
+      .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+  }
+}
+
 /// Inputs to a launch. Owned by the caller (the IPC handler);
 /// supervisor takes them and never hands them back.
 #[derive(Debug, Clone)]
@@ -97,6 +139,9 @@ pub struct ManagedSpawn {
   pub mode: LaunchMode,
   pub log_path: PathBuf,
   pub probe: ProbeOptions,
+  /// How this launch entered the supervisor. Defaults to `Manual`
+  /// (safe — never evicted) for callers that don't care.
+  pub origin: LaunchOrigin,
 }
 
 /// One actively-managed launch. Cheap to clone via the `Arc` inside.
@@ -129,6 +174,16 @@ struct ManagedInner {
   /// per-launch sampler has emitted at least one reading. Updated by
   /// the `resource_sampler` task spawned from [`spawn`].
   latest_resource: RwLock<Option<super::resources::ResourceReading>>,
+  /// Where the launch came from. Read by the idle-TTL sweeper so it
+  /// only ever evicts `AutoStart` supervisors.
+  origin: LaunchOrigin,
+  /// Concurrent-request counter incremented when the proxy starts
+  /// forwarding a request to this supervisor and decremented when
+  /// the response body is dropped (success completion, abandoned
+  /// connection, or upstream error). The idle-TTL sweeper skips
+  /// supervisors with `inflight > 0` so a mid-stream generation
+  /// can't get SIGTERM'd out from under the caller.
+  inflight: std::sync::atomic::AtomicU64,
 }
 
 impl ManagedModel {
@@ -150,6 +205,34 @@ impl ManagedModel {
 
   pub fn log_path(&self) -> &std::path::Path {
     &self.inner.log_path
+  }
+
+  pub fn origin(&self) -> LaunchOrigin {
+    self.inner.origin
+  }
+
+  /// Snapshot the concurrent-request counter. The idle-TTL sweeper
+  /// gates eviction on this — supervisors with `inflight > 0` are
+  /// in the middle of serving a request and stay resident.
+  pub fn inflight(&self) -> u64 {
+    self
+      .inner
+      .inflight
+      .load(std::sync::atomic::Ordering::SeqCst)
+  }
+
+  /// Increment `inflight` and return a guard. The guard's `Drop`
+  /// decrements the counter — covers happy-path body completion,
+  /// abandoned client connections, and upstream errors uniformly.
+  /// Cloning the guard increments again; this is one-call-one-grant.
+  pub fn inflight_guard(&self) -> InflightGuard {
+    self
+      .inner
+      .inflight
+      .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    InflightGuard {
+      inner: Arc::clone(&self.inner),
+    }
   }
 
   pub async fn pid(&self) -> Option<u32> {
@@ -342,6 +425,8 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
     ring: Mutex::new(RingBuffer::with_capacity(4096)),
     child: Mutex::new(Some(child)),
     latest_resource: RwLock::new(None),
+    origin: input.origin,
+    inflight: std::sync::atomic::AtomicU64::new(0),
   });
   let model = ManagedModel { inner };
 
@@ -866,6 +951,8 @@ mod tests {
       ring: Mutex::new(RingBuffer::with_capacity(16)),
       child: Mutex::new(None),
       latest_resource: RwLock::new(None),
+      origin: LaunchOrigin::Manual,
+      inflight: std::sync::atomic::AtomicU64::new(0),
     });
     ManagedModel { inner }
   }

@@ -619,6 +619,7 @@ mod tests {
         ollama_compat: false,
         fallback_enabled: true,
         header_read_timeout_secs: 45,
+        idle_ttl_secs: 1800,
       },
       ..Config::default()
     };
@@ -644,6 +645,7 @@ mod tests {
         ollama_compat: false,
         fallback_enabled: true,
         header_read_timeout_secs: 30,
+        idle_ttl_secs: 1800,
       },
       ..Config::default()
     };

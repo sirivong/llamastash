@@ -71,6 +71,7 @@ async fn status_lists_active_supervised_model() {
       interval: Duration::from_millis(40),
       timeout: Duration::from_secs(5),
     },
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
   .expect("spawn supervisor");

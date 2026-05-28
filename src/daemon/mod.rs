@@ -339,6 +339,18 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       header_read_timeout: std::time::Duration::from_secs(opts.proxy.header_read_timeout_secs),
       ..proxy::server::ServeOptions::default()
     };
+    // Idle-TTL eviction sweeper. Skipped entirely when
+    // `idle_ttl_secs = 0` (operator disabled it). Runs in parallel
+    // with the listener; uses the same shutdown token so daemon stop
+    // tears both down at once.
+    if opts.proxy.idle_ttl_secs > 0 {
+      let state_for_evict = std::sync::Arc::clone(&state);
+      let token_for_evict = token.clone();
+      let ttl = std::time::Duration::from_secs(opts.proxy.idle_ttl_secs);
+      supervisor::spawn_supervised("proxy_eviction_sweeper", async move {
+        proxy::eviction::run(state_for_evict, ttl, token_for_evict).await;
+      });
+    }
     supervisor::spawn_supervised("proxy_listener", async move {
       if let Err(e) = proxy::server::serve_with_options(
         state,

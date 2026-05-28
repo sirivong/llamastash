@@ -151,7 +151,13 @@ async fn drive_launch_as_leader(
     model_path: std::path::PathBuf::from(&resolved.path),
     ..StartParams::default()
   };
-  let started = match start_model_inner(&state.ctx, params).await {
+  let started = match start_model_inner(
+    &state.ctx,
+    params,
+    crate::daemon::supervisor::LaunchOrigin::AutoStart,
+  )
+  .await
+  {
     Ok(s) => s,
     Err(e) => {
       return LaunchOutcome::Failed {
@@ -166,6 +172,12 @@ async fn drive_launch_as_leader(
   loop {
     match started.model.state().await {
       ManagedState::Ready => {
+        // Stamp the MRU now so the freshly-auto-started supervisor
+        // has a starting `last_request_at`. Without this its idle
+        // timer would only begin when the first proxy forward
+        // touched the MRU — and a loaded-but-never-queried model
+        // would sit forever with `None` and confuse the sweeper.
+        state.mru.touch(&model_id).await;
         return LaunchOutcome::Ready {
           port: started.port,
           model_id,

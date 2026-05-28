@@ -75,6 +75,7 @@ async fn launching_to_loading_to_ready_within_a_second() {
     mode: LaunchMode::Chat,
     log_path: dir.join("launch.log"),
     probe: fast_probe(),
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
   .expect("spawn");
@@ -111,6 +112,7 @@ async fn embedding_mode_records_correctly() {
     mode: LaunchMode::Embedding,
     log_path: dir.join("launch.log"),
     probe: fast_probe(),
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
   .expect("spawn");
@@ -138,6 +140,7 @@ async fn log_file_and_ring_buffer_capture_child_output() {
     mode: LaunchMode::Chat,
     log_path: log_path.clone(),
     probe: fast_probe(),
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
   .expect("spawn");
@@ -195,6 +198,7 @@ async fn probe_timeout_triggers_error_state_and_releases_child() {
       interval: Duration::from_millis(50),
       timeout: Duration::from_millis(400),
     },
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
   .expect("spawn");
@@ -232,6 +236,7 @@ async fn sigterm_trapping_child_gets_sigkilled_after_grace() {
     mode: LaunchMode::Chat,
     log_path: dir.join("launch.log"),
     probe: fast_probe(),
+    origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
   })
   .await
   .expect("spawn");

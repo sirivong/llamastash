@@ -13,6 +13,7 @@
 //! same-UID, no auth, no TLS, no LAN binding, no MCP, no HTTP/2.
 
 pub(crate) mod coalesce;
+pub mod eviction;
 pub(crate) mod failure_tracker;
 pub(crate) mod forward;
 pub(crate) mod launch;

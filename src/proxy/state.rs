@@ -75,6 +75,16 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
+  /// Stamp `last_request_at` for `id`. Production use is the
+  /// proxy's auto-start path (`proxy::launch::drive_launch_as_leader`)
+  /// and the request-forward path (`proxy::router::forward_request`);
+  /// integration tests under the `test-fixtures` feature also reach
+  /// for this to seed the MRU before a manual `eviction::sweep_once`
+  /// call.
+  pub async fn touch_mru(&self, id: &crate::gguf::identity::ModelId) {
+    self.mru.touch(id).await;
+  }
+
   /// Project the relevant handles out of an existing [`MethodContext`].
   /// The proxy task receives this handle from `run_foreground` after
   /// the rest of the daemon context has been assembled. `ollama_compat`

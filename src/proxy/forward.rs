@@ -100,17 +100,23 @@ pub(crate) async fn forward_to_upstream(
     fallback,
     fallback_reason,
   } = target;
-  // Re-verify the supervisor at `port` is still the one we picked.
-  // Without this, a Ready→Stopping→port-reuse window between
-  // `route::decide` and now can silently route the request to a
-  // different model on the recycled port.
-  if !verify_port_binding(state, port, served_model_key).await {
-    return Ok(error_envelope(
-      StatusCode::BAD_GATEWAY,
-      "upstream_unreachable",
-      "model exited before forwarding could begin",
-    ));
-  }
+  // Re-verify the supervisor at `port` is still the one we picked,
+  // and take an in-flight guard on the matching ManagedModel in the
+  // same snapshot walk so concurrent eviction can't tear down the
+  // supervisor between our snapshot read and the body forward. The
+  // guard's `Drop` decrements the inflight counter — covers happy-
+  // path body completion, abandoned client connections, and upstream
+  // errors uniformly because the response body owns the guard.
+  let inflight_guard = match acquire_inflight_guard(state, port, served_model_key).await {
+    Some(g) => g,
+    None => {
+      return Ok(error_envelope(
+        StatusCode::BAD_GATEWAY,
+        "upstream_unreachable",
+        "model exited before forwarding could begin",
+      ));
+    }
+  };
   // Compose upstream URL: path + query from the original request,
   // host always 127.0.0.1 (loopback only — see plan §Scope Boundaries).
   let path_and_query = inbound_uri
@@ -185,7 +191,43 @@ pub(crate) async fn forward_to_upstream(
     }
   };
 
-  build_streaming_response(upstream, served_model_id, fallback, fallback_reason)
+  build_streaming_response(
+    upstream,
+    served_model_id,
+    fallback,
+    fallback_reason,
+    inflight_guard,
+  )
+}
+
+/// Find the supervisor that owns `expected_id` on `port`, take an
+/// inflight guard, and return it. Returns `None` when no Ready
+/// supervisor matches — same condition the legacy `verify_port_binding`
+/// caught, just folded into one snapshot walk so the gate and the
+/// guard acquisition can't race against an eviction landing in
+/// between.
+async fn acquire_inflight_guard(
+  state: &Arc<ProxyState>,
+  port: u16,
+  expected_id: &crate::gguf::identity::ModelId,
+) -> Option<crate::daemon::supervisor::InflightGuard> {
+  let snap = state.ctx.supervisors.snapshot().await;
+  for (_lid, model) in snap {
+    if model.port() != port {
+      continue;
+    }
+    if model.id() != expected_id {
+      continue;
+    }
+    if !matches!(
+      model.state().await,
+      crate::daemon::supervisor::ManagedState::Ready
+    ) {
+      continue;
+    }
+    return Some(model.inflight_guard());
+  }
+  None
 }
 
 /// Translate `reqwest::Response` into `hyper::Response`, preserving
@@ -197,6 +239,7 @@ fn build_streaming_response(
   served_model_id: &str,
   fallback: bool,
   fallback_reason: Option<&str>,
+  inflight_guard: crate::daemon::supervisor::InflightGuard,
 ) -> ProxyResponse {
   let status = upstream.status();
   let inbound_headers = upstream.headers().clone();
@@ -215,7 +258,17 @@ fn build_streaming_response(
       Box::new(e)
     });
   let stream_body = StreamBody::new(stream);
-  let body: BoxBody<Bytes, BodyError> = stream_body.boxed();
+  let inner_body: BoxBody<Bytes, BodyError> = stream_body.boxed();
+  // Attach the inflight guard to the streamed body. When the body is
+  // dropped — happy-path completion, client disconnect, or upstream
+  // error — the guard's `Drop` decrements the inflight counter so the
+  // idle-TTL sweeper sees `inflight == 0` and can evict the
+  // supervisor at the next sweep tick.
+  let body: BoxBody<Bytes, BodyError> = GuardedBody {
+    inner: inner_body,
+    _guard: inflight_guard,
+  }
+  .boxed();
 
   // Strip the static hop-by-hop set AND anything named in the upstream's
   // own `Connection: <list>` header — RFC 7230 §6.1 extends hop-by-hop
@@ -261,42 +314,48 @@ fn build_streaming_response(
   Ok(builder.body(body).expect("static headers always parse"))
 }
 
+/// Body wrapper that holds an `InflightGuard` next to the streamed
+/// upstream body. When hyper drops the response body — end-of-stream,
+/// client disconnect, or pipeline tear-down — the guard field drops
+/// with it and decrements the supervisor's inflight counter. This is
+/// the single ownership chain that ties "request is being served" to
+/// "supervisor is not idle"; the idle-TTL sweeper reads `inflight`
+/// straight off the supervisor and skips eviction while it's > 0.
+struct GuardedBody {
+  inner: BoxBody<Bytes, BodyError>,
+  _guard: crate::daemon::supervisor::InflightGuard,
+}
+
+impl hyper::body::Body for GuardedBody {
+  type Data = Bytes;
+  type Error = BodyError;
+
+  fn poll_frame(
+    self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    // `BoxBody` is `Pin<Box<dyn Body + Send>>` — already `Unpin`
+    // externally — so safely projecting through `&mut self` to its
+    // `Pin::new` for the inner poll is a structural projection
+    // (`_guard` is not pinned).
+    let inner = &mut self.get_mut().inner;
+    std::pin::Pin::new(inner).poll_frame(cx)
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.inner.is_end_stream()
+  }
+
+  fn size_hint(&self) -> hyper::body::SizeHint {
+    self.inner.size_hint()
+  }
+}
+
 /// reqwest exposes `StatusCode` from the `http` crate; hyper too.
 /// They're the same type but re-exported, so we go via the wire
 /// number for safety.
 fn status_to_hyper(s: reqwest::StatusCode) -> hyper::StatusCode {
   hyper::StatusCode::from_u16(s.as_u16()).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-/// Confirm the supervisor currently bound to `port` is still the
-/// one we picked at `route::decide` time. Returns `false` if the
-/// port no longer maps to `expected_id` (model stopped, port reused
-/// by a different model, or supervisor no longer Ready). Best-effort:
-/// the supervisor could still disappear between this check and the
-/// reqwest send, but that window collapses to "ms," not "stop+start"
-/// — small enough that a stale ManagedState read is acceptable.
-async fn verify_port_binding(
-  state: &Arc<ProxyState>,
-  port: u16,
-  expected_id: &crate::gguf::identity::ModelId,
-) -> bool {
-  let snap = state.ctx.supervisors.snapshot().await;
-  for (_launch_id, model) in snap.into_iter() {
-    if model.port() != port {
-      continue;
-    }
-    if model.id() != expected_id {
-      log::warn!(
-        "proxy: port {port} now bound to a different model than expected; rejecting forward"
-      );
-      return false;
-    }
-    return matches!(
-      model.state().await,
-      crate::daemon::supervisor::ManagedState::Ready
-    );
-  }
-  false
 }
 
 /// Parse a `Connection: <list>` header into a lower-case list of

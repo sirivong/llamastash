@@ -150,6 +150,18 @@ pub struct ProxyConfig {
   /// across a slow link.
   #[serde(default = "ProxyConfig::default_header_read_timeout_secs")]
   pub header_read_timeout_secs: u64,
+  /// Idle-TTL eviction for proxy-auto-started supervisors. After
+  /// `idle_ttl_secs` of no inbound request *and* no in-flight stream,
+  /// the daemon's eviction sweeper calls `model.stop(5s grace)` so a
+  /// long-running daemon doesn't pin VRAM on models nobody is using.
+  /// Default `1800` (30 min). `0` disables eviction entirely;
+  /// supervisors stay resident until explicit `stop_model`.
+  ///
+  /// Only auto-start supervisors (`LaunchOrigin::AutoStart`) are
+  /// evictable — explicit `llamastash start` / TUI launches are
+  /// treated as durable user intent and stay resident regardless.
+  #[serde(default = "ProxyConfig::default_idle_ttl_secs")]
+  pub idle_ttl_secs: u64,
 }
 
 impl ProxyConfig {
@@ -172,6 +184,10 @@ impl ProxyConfig {
   fn default_fallback_enabled() -> bool {
     true
   }
+
+  fn default_idle_ttl_secs() -> u64 {
+    30 * 60
+  }
 }
 
 impl Default for ProxyConfig {
@@ -182,6 +198,7 @@ impl Default for ProxyConfig {
       ollama_compat: false,
       fallback_enabled: Self::default_fallback_enabled(),
       header_read_timeout_secs: Self::default_header_read_timeout_secs(),
+      idle_ttl_secs: Self::default_idle_ttl_secs(),
     }
   }
 }
