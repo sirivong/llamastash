@@ -1,5 +1,8 @@
 # NVIDIA RTX 3050 Ti (Linux) — CUDA vs Vulkan, four-tool cross-comparison
 
+> **Disclaimer (2026-05-28 review):** the defaults-mode delta between LlamaStash and raw `llama-server` on this platform (12–16% decode lead) is larger than the visible defaults overlay explains. `defaults_table.rs` for `gemma3` on Nvidia only injects `n_gpu_layers=99` (gemma is NOT in `FLASH_ATTN_ELIGIBLE`). The 12–16% gap is real in the measured data but the root cause is not fully identified yet. **Do not quote the defaults-mode delta as marketing copy** until a follow-up run instruments the effective argv. Suite A (overhead) and Suite C (proxy) results below are not affected by this caveat. The cross-tool comparison vs Ollama / LM Studio is also not affected.
+
+
 **Hardware:** NVIDIA GeForce RTX 3050 Ti Laptop GPU (Ampere, sm\_86, 4.0 GiB VRAM), Intel i9-11900H (8 cores, AVX-512), 63 GiB RAM, Manjaro Linux kernel 6.6.141, NVIDIA driver 595.71.05, CUDA 13.2.
 
 **Date:** 2026-05-28.
@@ -68,7 +71,7 @@ Zero measurable proxy cost, consistent with the AMD and M1 results.
 | LM Studio 2.16.0 | **48.7 / 318** | **48.3 / 308** |
 | Ollama 0.24.0 | 40.7 / 120 | 42.0 / 115 |
 
-**LlamaStash leads raw `llama-server` in defaults mode** by 12–16% on decode and 33–49% on TTFT — because its defaults overlay injects hardware-aware knobs (larger batch, flash-attn) while raw `llama-server` starts with conservative upstream defaults. Normalized mode collapses them to within ≤0.5 tok/s (see Finding #5).
+**LlamaStash leads raw `llama-server` in defaults mode** by 12–16% on decode and 33–49% on TTFT. The reported cause needs more investigation: the [`defaults_table.rs`](https://github.com/llamastash/llamastash/blob/main/src/launch/defaults_table.rs) overlay for `gemma3` on Nvidia only injects `n_gpu_layers=99` (gemma is NOT in `FLASH_ATTN_ELIGIBLE`), so the 12–16% delta is larger than the overlay alone explains. Possible contributors: raw `llama-server`'s CUDA default `n_gpu_layers` on this build is lower than 99; the auto-fit `ctx` path picks a different (smaller) context than raw's default; or some other knob outside the visible argv. Normalized mode collapses them to within ≤0.5 tok/s (see Finding #5). **This delta should not be quoted as marketing copy until the root cause is identified.**
 
 ---
 
@@ -148,7 +151,7 @@ Same engine source (llamastash + llamacpp share the b9360 binary) → same TTFT 
 
 ### 3. Defaults vs normalized differ substantially — in opposite directions for different tools
 
-- **LlamaStash + llamacpp defaults underperform normalized** by 6–25% on decode (conservative upstream defaults: smaller batch, no `--flash-attn`). LlamaStash's defaults overlay partially closes the gap vs raw llamacpp, but the normalized recipe fully unlocks the hardware.
+- **LlamaStash + llamacpp defaults behavior is inconsistent with the visible overlay.** The `defaults_table.rs` overlay for `gemma3` on Nvidia only injects `n_gpu_layers=99` (gemma is NOT in `FLASH_ATTN_ELIGIBLE`), yet LlamaStash defaults outperform raw llamacpp by 12–16% on decode. That gap is larger than the single visible knob explains. The bench's normalized recipe (`flash_attn=on`, larger batch, fixed `ctx=4096`) collapses LlamaStash and raw to within ≤0.5 tok/s on `chat_turn` and `agent_decode`. Worth instrumenting before the next NVIDIA run: full effective argv comparison between LlamaStash's spawned `llama-server` and the raw invocation, plus a check on what `n_gpu_layers` raw `llama-server` actually defaults to on this CUDA build.
 - **LM Studio defaults outperform normalized** by 6–24%. LM Studio's defaults are tuned to the detected GPU + loaded model; the bench's universal normalized recipe is not.
 - **Ollama: defaults ≈ normalized**. The Ollama OpenAI shim silently caps `ctx` and ignores `ngl`, so normalized knobs land on `unfair_knobs` and have no effect.
 
