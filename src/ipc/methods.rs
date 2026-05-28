@@ -1247,6 +1247,15 @@ pub(crate) async fn start_model_inner(
   // Per-launch log file under cache_dir/logs/<short-id>-<ts>.log.
   let log_path = build_log_path(&env.log_dir, &id);
 
+  // Scale the probe budget by total weight bytes so a slow load
+  // (large multipart GGUF, HIP/ROCm upload, cold disk) doesn't trip
+  // the default 120 s timeout. The catalog row carries the
+  // multipart-aware total via `discovery::shard_sizes`. Fall back to
+  // the path's on-disk total when the model isn't in the catalog
+  // (direct-path launches that bypass scan).
+  let total_weight_bytes = launch_total_bytes(ctx, &launch_params.model_path).await;
+  let scaled_probe = env.probe.scale_for_model(total_weight_bytes);
+
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
     binary: env.binary.clone(),
@@ -1254,7 +1263,7 @@ pub(crate) async fn start_model_inner(
     port,
     mode,
     log_path: log_path.clone(),
-    probe: env.probe,
+    probe: scaled_probe,
   })
   .await;
   let model = match spawn_result {
@@ -1397,6 +1406,23 @@ fn resolve_model_id_and_arch(
   let id = compute_model_id(path, &header.raw);
   let arch = crate::gguf::metadata::summarise(&header.header).arch;
   Ok((id, arch))
+}
+
+/// Total on-disk weight bytes for the model the launch handler is
+/// about to spawn. Prefers the catalog row (which already includes
+/// split-shard aggregation via `discovery::shard_sizes`); falls back
+/// to `shard_sizes::on_disk_total` on the bare path for direct
+/// launches that bypass scan. `0` when neither path is reachable —
+/// the probe scaler treats that as "no signal, keep the default".
+async fn launch_total_bytes(ctx: &MethodContext, model_path: &std::path::Path) -> u64 {
+  let snap = ctx.catalog.snapshot().await;
+  if let Some(row) = snap.iter().find(|m| m.path == model_path) {
+    if let Some(b) = row.metadata.as_ref().and_then(|md| md.weights_bytes) {
+      return b;
+    }
+    return crate::discovery::shard_sizes::on_disk_total(&row.path, &row.split_siblings);
+  }
+  crate::discovery::shard_sizes::on_disk_total(model_path, &[])
 }
 
 /// Live GPU-backend flavor — keys the built-in defaults table.

@@ -38,6 +38,17 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- Launch health-probe timeout now scales by model weight size so a
+  53 GB GGUF on slow disk / HIP doesn't trip the 120 s default
+  before llama-server finishes loading weights. Formula: base 120 s
+  plus an extra second per 200 MiB at conservative load rate, capped
+  at +1 hour. Catalog-aware: pulls the corrected (multipart-summed)
+  `weights_bytes` via `discovery::shard_sizes`.
+- `llamastash status` and `status --json` now surface the daemon's
+  `ManagedState::Error { cause }` payload (e.g. `health probe
+  timeout (last status 503); last stderr lines: …`) so users don't
+  have to grep the launch log to find out *why* a launch landed in
+  the `error` state.
 - `llamastash show --json` now emits a `{"error": {"code", "message"}}`
   envelope on every failure path (model not found / ambiguous / IPC
   failure / daemon-spawn failure) instead of human prose. Exit code

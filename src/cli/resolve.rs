@@ -91,6 +91,11 @@ pub struct RunningRow {
   pub port: u16,
   pub mode: String,
   pub state: String,
+  /// Failure cause from the daemon's `ManagedState::Error { cause }`
+  /// payload. Surfaced so users (and agents) can see *why* a launch
+  /// landed in the `error` state without having to scrape the log
+  /// file separately. `None` for non-error states.
+  pub state_cause: Option<String>,
   pub pid: Option<u64>,
   pub ready_at: Option<u64>,
   /// Per-launch params (ctx / reasoning / advanced / mode). Lets
@@ -429,6 +434,11 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
   let state = parse_running_state_label(v)
     .map(str::to_string)
     .unwrap_or_default();
+  let state_cause = v
+    .get("state")
+    .and_then(|s| s.get("cause"))
+    .and_then(Value::as_str)
+    .map(str::to_string);
   let pid = v.get("pid").and_then(Value::as_u64);
   let ready_at = v.get("ready_at").and_then(Value::as_u64);
   let params = v.get("params").cloned();
@@ -444,6 +454,7 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     port,
     mode,
     state,
+    state_cause,
     pid,
     ready_at,
     params,
@@ -649,6 +660,7 @@ mod tests {
         port: 41100,
         mode: "chat".into(),
         state: "ready".into(),
+        state_cause: None,
         pid: Some(123),
         ready_at: None,
         params: None,
@@ -662,6 +674,7 @@ mod tests {
         port: 41101,
         mode: "chat".into(),
         state: "ready".into(),
+        state_cause: None,
         pid: Some(124),
         ready_at: None,
         params: None,
@@ -682,6 +695,7 @@ mod tests {
       port: 41100,
       mode: "chat".into(),
       state: "ready".into(),
+      state_cause: None,
       pid: None,
       ready_at: None,
       params: None,

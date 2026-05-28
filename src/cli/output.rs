@@ -288,6 +288,27 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
       ]);
     }
     out.push_str(&format::table(&header, &rows));
+    // Surface the failure cause for any error-state row beneath the
+    // table — long-form, so a `health probe timeout` message and its
+    // stderr tail don't trash the column widths. Without this the
+    // user has to scrape the log file just to see *why* a launch
+    // ended up in `error`.
+    let causes: Vec<(&str, &str)> = snap
+      .models
+      .iter()
+      .filter_map(|r| Some((r.launch_id.as_str(), r.state_cause.as_deref()?)))
+      .collect();
+    if !causes.is_empty() {
+      out.push('\n');
+      for (lid, cause) in causes {
+        let cause_header = if tty {
+          colors::dim(&format!("{lid} cause:"))
+        } else {
+          format!("{lid} cause:")
+        };
+        out.push_str(&format!("{cause_header} {cause}\n"));
+      }
+    }
   }
 
   // GPU footer.
@@ -404,6 +425,9 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
       obj.insert("port".into(), serde_json::json!(r.port));
       obj.insert("mode".into(), serde_json::json!(r.mode));
       obj.insert("state".into(), serde_json::json!(r.state));
+      if let Some(cause) = r.state_cause.as_deref() {
+        obj.insert("state_cause".into(), serde_json::json!(cause));
+      }
       obj.insert("pid".into(), serde_json::json!(r.pid));
       obj.insert("ready_at".into(), serde_json::json!(r.ready_at));
       if let Some(params) = r.params.as_ref() {
@@ -771,6 +795,7 @@ mod tests {
         port: 41100,
         mode: "chat".into(),
         state: "ready".into(),
+        state_cause: None,
         pid: Some(123),
         ready_at: Some(1_700_000_000),
         params: None,
@@ -867,6 +892,7 @@ mod tests {
       id: None,
       port,
       state: state.into(),
+      state_cause: None,
       pid: Some(123),
       mode: "chat".into(),
       ready_at: None,
@@ -1154,6 +1180,62 @@ mod tests {
     assert!(
       rendered.starts_with("42") && rendered.contains('M'),
       "expected fallback to cached 42 MiB, got: {rendered}"
+    );
+  }
+
+  #[test]
+  fn status_human_appends_cause_line_for_error_state_launches() {
+    let _g = ColorGuard::set(false);
+    let mut row = running("L1", "error", 41100, "/m/qwen.gguf");
+    row.state_cause = Some("health probe timeout (last status 503); last stderr lines: …".into());
+    let snap = StatusSnapshot {
+      models: vec![row],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: Value::Null,
+    };
+    let rendered = status_human(&snap);
+    assert!(
+      rendered.contains("L1 cause:") && rendered.contains("health probe timeout"),
+      "expected `L1 cause: …` line beneath the launches table, got:\n{rendered}"
+    );
+  }
+
+  #[test]
+  fn status_json_includes_state_cause_when_set() {
+    let mut row = running("L1", "error", 41100, "/m/qwen.gguf");
+    row.state_cause = Some("health probe timeout (last status 503)".into());
+    let snap = StatusSnapshot {
+      models: vec![row],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: Value::Null,
+    };
+    let v = status_json(&snap);
+    assert_eq!(
+      v["models"][0]["state_cause"],
+      serde_json::json!("health probe timeout (last status 503)")
+    );
+  }
+
+  #[test]
+  fn status_json_omits_state_cause_when_none() {
+    let snap = StatusSnapshot {
+      models: vec![running("L1", "ready", 41100, "/m/qwen.gguf")],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: None,
+      proxy: Value::Null,
+    };
+    let v = status_json(&snap);
+    assert!(
+      v["models"][0].get("state_cause").is_none(),
+      "ready-state rows must not carry a state_cause field"
     );
   }
 

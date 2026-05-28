@@ -44,6 +44,38 @@ impl Default for ProbeOptions {
   }
 }
 
+impl ProbeOptions {
+  /// Bump `timeout` to give a large model enough wall-clock to load
+  /// its weights into VRAM before the supervisor declares the probe
+  /// failed. The default 120 s budget covers ~10 GB models on warm
+  /// NVMe + PCIe Gen4; an 80B Q5_K_M (~53 GB) on ROCm routinely needs
+  /// 4-6 minutes and used to hit `health probe timeout (last status
+  /// 503)` even though llama-server was still happily loading.
+  ///
+  /// Formula: assume a conservative 100 MiB/s effective load rate
+  /// (calibrated against an observed 95 MiB/s for a 53 GB Q5_K_M
+  /// model on HIP/ROCm + uncached HF cache reads — generous enough
+  /// to cover slow disks while still letting fast NVMe + CUDA users
+  /// see a few seconds of headroom) and add the derived seconds to
+  /// the base. Capped at one hour so a corrupt `weights_bytes`
+  /// reading (Petabytes) can't pin the supervisor forever.
+  /// `weights_bytes = 0` keeps the base timeout — typical for
+  /// metadata-only rows where the catalog has no estimate.
+  pub fn scale_for_model(self, weights_bytes: u64) -> Self {
+    const ASSUMED_LOAD_MIB_PER_SEC: u64 = 100;
+    const MIB: u64 = 1024 * 1024;
+    const MAX_EXTRA_SECS: u64 = 3600;
+    if weights_bytes == 0 {
+      return self;
+    }
+    let extra_secs = ((weights_bytes / MIB) / ASSUMED_LOAD_MIB_PER_SEC).min(MAX_EXTRA_SECS);
+    Self {
+      interval: self.interval,
+      timeout: self.timeout + Duration::from_secs(extra_secs),
+    }
+  }
+}
+
 /// Poll `/health` on the supplied port until 200 OK or the timeout
 /// fires.
 pub async fn poll_until_ready(port: u16, opts: ProbeOptions) -> ProbeOutcome {
@@ -101,6 +133,49 @@ fn parse_status(bytes: &[u8]) -> Option<u16> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn scale_for_model_leaves_base_alone_when_size_unknown() {
+    let base = ProbeOptions::default();
+    let scaled = base.scale_for_model(0);
+    assert_eq!(scaled.timeout, base.timeout);
+  }
+
+  #[test]
+  fn scale_for_model_adds_seconds_proportional_to_size() {
+    let base = ProbeOptions::default();
+    // 10 GiB at 100 MiB/s → 10*1024/100 = ~102 extra seconds.
+    let small = base.scale_for_model(10u64 * 1024 * 1024 * 1024);
+    assert!(
+      small.timeout > base.timeout,
+      "10 GiB should bump the budget"
+    );
+    let small_extra = small.timeout - base.timeout;
+    assert!(
+      small_extra >= Duration::from_secs(95) && small_extra <= Duration::from_secs(110),
+      "10 GiB should add ~102s, got {small_extra:?}"
+    );
+    // 53 GiB (the Qwen3-Next 80B Q5_K_M case) → ~543 extra seconds.
+    // Calibrated against the observed 95 MiB/s on HIP/ROCm; the
+    // model needed ~9 min to finish loading there.
+    let big = base.scale_for_model(53u64 * 1024 * 1024 * 1024);
+    let big_extra = big.timeout - base.timeout;
+    assert!(
+      big_extra >= Duration::from_secs(500) && big_extra <= Duration::from_secs(580),
+      "53 GiB should add ~543s, got {big_extra:?}"
+    );
+  }
+
+  #[test]
+  fn scale_for_model_caps_extra_at_one_hour() {
+    // 1 TiB at 100 MiB/s would otherwise add ~10485 seconds — clamp
+    // to the 3600s ceiling so a corrupt weights_bytes can't pin the
+    // probe forever.
+    let base = ProbeOptions::default();
+    let huge = base.scale_for_model(1024u64 * 1024 * 1024 * 1024);
+    let extra = huge.timeout - base.timeout;
+    assert_eq!(extra, Duration::from_secs(3600));
+  }
 
   #[test]
   fn parse_status_handles_canonical_response() {

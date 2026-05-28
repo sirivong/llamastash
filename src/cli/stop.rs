@@ -257,6 +257,7 @@ mod tests {
       id: None,
       port: 41100,
       state: "ready".into(),
+      state_cause: None,
       pid: Some(1),
       mode: "chat".into(),
       ready_at: None,
