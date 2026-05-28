@@ -12,8 +12,8 @@
 //! ```
 //!
 //! Backend-specific variants:
-//! * Apple Silicon (unified memory): CPU + `RAM (unified)` + a
-//!   `GPU  unified memory` text row.
+//! * Apple Silicon (unified memory): CPU + `RAM*` + a
+//!   `GPU  unified` text row.
 //! * `CpuOnly`: CPU + RAM only, GPU + VRAM rows omitted.
 
 use ratatui::layout::Rect;
@@ -57,7 +57,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, host: &HostMetricsSnapshot, pal
     s if s == HostMetricsSnapshot::BACKEND_APPLE_METAL => {
       lines.push(Line::from(vec![
         Span::styled("GPU  ", palette.label_style()),
-        Span::styled("unified memory", palette.text_style()),
+        Span::styled("unified", palette.text_style()),
       ]));
     }
     _ => {
@@ -400,7 +400,7 @@ mod tests {
   }
 
   #[test]
-  fn apple_metal_collapses_gpu_to_unified_memory_line() {
+  fn apple_metal_collapses_gpu_to_unified_line() {
     let snap = HostMetricsSnapshot {
       cpu_pct: 30.0,
       ram_used_bytes: 8 * 1024 * 1024 * 1024,
@@ -413,7 +413,12 @@ mod tests {
     let rows = render_lines(snap);
     let body = rows.join("\n");
     assert!(body.contains("GPU"));
-    assert!(body.contains("unified memory"));
+    assert!(
+      rows
+        .iter()
+        .any(|r| r.contains("GPU") && r.contains("unified")),
+      "GPU row should read `GPU  unified`, got: {rows:#?}"
+    );
     assert!(!body.contains("VRAM"));
     assert!(rows.iter().any(|r| r.contains("apple metal")));
   }
