@@ -201,6 +201,7 @@ class RunReport(BaseModel):
   git_sha: Optional[str] = Field(
     default=None, description="llamastash commit at run time (best-effort)"
   )
+  comment: str = ""
   cells: list[Cell] = Field(default_factory=list)
   notes: str = ""
 
