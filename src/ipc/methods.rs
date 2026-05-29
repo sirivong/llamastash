@@ -101,6 +101,12 @@ pub struct MethodContext {
   /// shape. Production wiring always sets this; if `proxy.enabled:
   /// false` the cell holds the disabled proxy status variant.
   pub proxy_status: Option<crate::proxy::StatusCell>,
+  /// HTTP control-plane URL the daemon bound, e.g.
+  /// `http://127.0.0.1:11436`. Surfaced under `status.daemon.ipc_url`
+  /// so the TUI / CLI can render where IPC is listening (helpful when
+  /// debugging port-collision scans). `None` in catalog-only tests
+  /// that don't bring up the control plane.
+  pub ipc_url: Option<String>,
 }
 
 /// Wrapper around the in-memory `DaemonState` plus the directory
@@ -190,6 +196,7 @@ impl MethodContext {
       launch: None,
       external: Arc::new(RwLock::new(Vec::new())),
       proxy_status: None,
+      ipc_url: None,
     }
   }
 
@@ -245,6 +252,15 @@ impl MethodContext {
   /// then omits the `proxy` field entirely.
   pub fn with_proxy_status(mut self, status: crate::proxy::StatusCell) -> Self {
     self.proxy_status = Some(status);
+    self
+  }
+
+  /// Builder helper: record the HTTP control-plane URL the daemon
+  /// bound on so `status` can surface it. Set after the listener
+  /// resolves its bound address (the port may differ from the
+  /// configured one when a scan landed on an offset).
+  pub fn with_ipc_url(mut self, url: impl Into<String>) -> Self {
+    self.ipc_url = Some(url.into());
     self
   }
 }
@@ -485,6 +501,7 @@ async fn status_response(ctx: &MethodContext) -> Value {
         .launch
         .as_ref()
         .map(|env| env.binary.display().to_string()),
+      "ipc_url": ctx.ipc_url,
     },
   });
   if let Some(proxy) = proxy {

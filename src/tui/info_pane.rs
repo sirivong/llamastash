@@ -19,14 +19,14 @@ use crate::tui::app::App;
 use crate::util::paths::model_display_name;
 
 const LABEL_WIDTH: usize = 8;
-const LABEL_SOCKET: &str = "socket  ";
+const LABEL_DAEMON: &str = "daemon  ";
 const LABEL_SERVER: &str = "server  ";
 const LABEL_MODELS: &str = "models  ";
 const LABEL_RUNNING: &str = "running ";
 const LABEL_PROXY: &str = "proxy   ";
 
 /// Render the Daemon info panel into `area`. The block title is
-/// `Daemon`; inner content is five label-prefixed rows (socket,
+/// `Daemon`; inner content is five label-prefixed rows (daemon,
 /// server, proxy, counts, running).
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let block = palette.panel_block(" Daemon ", true);
@@ -35,7 +35,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
 
   let row_budget = inner.width.saturating_sub(LABEL_WIDTH as u16) as usize;
   let lines: Vec<Line<'_>> = vec![
-    socket_row(app, row_budget, palette),
+    daemon_row(app, row_budget, palette),
     server_row(app, row_budget, palette),
     proxy_row(app, palette),
     counts_row(app, palette),
@@ -75,14 +75,14 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
   ])
 }
 
-fn socket_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
-  // Layout: `socket  …/daemon.sock  pid 1234  up 3h12m`. `pid` and
-  // `up` render in the panel's label colour (matching `socket` itself
-  // and the row 4/5 label rhythm); the numeric values render in text
-  // colour. The path takes whatever width is left after reserving the
-  // trailing chunks, left-truncated with `…/`. When the path doesn't
-  // fit at all or the daemon hasn't surfaced one (older builds), the
-  // row drops it and renders just the trailing chunks.
+fn daemon_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
+  // Layout: `daemon  http://127.0.0.1:11436  pid 1234  up 3h12m`.
+  // The control-plane URL is informational (helps debugging when an
+  // agent script wants to know the override URL to set); when there
+  // isn't room for it, the row collapses to `daemon  pid <val>  up
+  // <val>` so the most-used chunks stay readable on narrow terminals.
+  // `pid` and `up` render in the panel's label colour (matching the
+  // row-4/5 label rhythm); the numeric values render in text colour.
   let pid_val = app
     .daemon_info
     .pid
@@ -93,24 +93,25 @@ fn socket_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a>
     _ => "—".into(),
   };
 
-  // Width budget for the path. Match the rendered trailing layout
-  // `  pid <val>  up <val>` exactly so the path truncation lines up
-  // with what ratatui draws.
+  // Reserve the trailing `  pid <val>  up <val>` chunk, then give the
+  // URL whatever fits. A pre-Unit-1 daemon (or one not yet replied to
+  // status) leaves `ipc_url = None`, which is the common case until the
+  // first refresh tick lands.
   let trailing_visual_w = "  pid ".width() + pid_val.width() + "  up ".width() + uptime_val.width();
-  const MIN_PATH_BUDGET: usize = 12;
-  let path_display = app.daemon_info.socket_path.as_deref().and_then(|path| {
-    let path_budget = budget.saturating_sub(trailing_visual_w);
-    if path_budget < MIN_PATH_BUDGET {
+  const MIN_URL_BUDGET: usize = 12;
+  let url_display = app.daemon_info.ipc_url.as_deref().and_then(|url| {
+    let url_budget = budget.saturating_sub(trailing_visual_w);
+    if url_budget < MIN_URL_BUDGET {
       None
     } else {
-      Some(ellipsise(path, path_budget))
+      Some(ellipsise(url, url_budget))
     }
   });
 
   let mut spans: Vec<Span<'a>> = Vec::with_capacity(6);
-  spans.push(Span::styled(LABEL_SOCKET, palette.label_style()));
-  let pid_label = if let Some(p) = path_display {
-    spans.push(Span::styled(p, palette.text_style()));
+  spans.push(Span::styled(LABEL_DAEMON, palette.label_style()));
+  let pid_label = if let Some(u) = url_display {
+    spans.push(Span::styled(u, palette.text_style()));
     "  pid "
   } else {
     "pid "
@@ -487,7 +488,7 @@ mod tests {
   }
 
   #[test]
-  fn socket_row_shows_em_dash_uptime_when_daemon_disconnected() {
+  fn daemon_row_shows_em_dash_uptime_when_daemon_disconnected() {
     let mut app = App::new(AppOptions::default());
     app.daemon_connected = false;
     app.daemon_info = DaemonInfo {
@@ -498,15 +499,15 @@ mod tests {
     let rows = render_lines(&app);
     // The uptime chunk should read `up —`, not `up 2m`, because the
     // connection went down — the cached value is stale.
-    let socket_row = rows.iter().find(|r| r.contains("socket")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
     assert!(
-      socket_row.contains("up —"),
-      "expected `up —` chunk when daemon disconnected, got: {socket_row:?}"
+      daemon_row.contains("up —"),
+      "expected `up —` chunk when daemon disconnected, got: {daemon_row:?}"
     );
   }
 
   #[test]
-  fn socket_row_shows_uptime_chunk_when_daemon_connected() {
+  fn daemon_row_shows_uptime_chunk_when_daemon_connected() {
     let mut app = App::new(AppOptions::default());
     app.daemon_connected = true;
     app.daemon_info = DaemonInfo {
@@ -515,10 +516,10 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let socket_row = rows.iter().find(|r| r.contains("socket")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
     assert!(
-      socket_row.contains("up 3h12m"),
-      "expected `up 3h12m` chunk, got: {socket_row:?}"
+      daemon_row.contains("up 3h12m"),
+      "expected `up 3h12m` chunk, got: {daemon_row:?}"
     );
   }
 
@@ -649,40 +650,41 @@ mod tests {
   }
 
   #[test]
-  fn socket_row_renders_pid_when_daemon_info_carries_one() {
+  fn daemon_row_renders_pid_when_daemon_info_carries_one() {
     let mut app = App::new(AppOptions::default());
     app.daemon_info = DaemonInfo {
       pid: Some(1234),
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let socket_row = rows.iter().find(|r| r.contains("socket")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
     assert!(
-      socket_row.contains("pid 1234"),
-      "expected `pid 1234`, got: {socket_row:?}"
+      daemon_row.contains("pid 1234"),
+      "expected `pid 1234`, got: {daemon_row:?}"
     );
   }
 
   #[test]
-  fn socket_row_renders_path_alongside_pid_when_available() {
-    // After wiring `daemon.socket_path` through the IPC contract,
-    // the row leads with the absolute socket path so the user can
-    // see which daemon they're talking to without an extra command.
+  fn daemon_row_renders_ipc_url_alongside_pid_when_available() {
+    // After wiring `daemon.ipc_url` through the IPC contract, the
+    // row leads with the HTTP control-plane URL so operators can see
+    // where the IPC channel is bound without running a separate
+    // command (useful when scripting against `LLAMASTASH_IPC_URL`).
     let mut app = App::new(AppOptions::default());
     app.daemon_info = DaemonInfo {
       pid: Some(4242),
-      socket_path: Some("/run/user/1000/llamastash/daemon.sock".into()),
+      ipc_url: Some("http://127.0.0.1:11436".into()),
       ..Default::default()
     };
     let rows = render_lines(&app);
-    let socket_row = rows.iter().find(|r| r.contains("socket")).unwrap();
+    let daemon_row = rows.iter().find(|r| r.contains("daemon")).unwrap();
     assert!(
-      socket_row.contains("daemon.sock"),
-      "expected socket basename, got: {socket_row:?}"
+      daemon_row.contains("127.0.0.1:11436"),
+      "expected control-plane URL, got: {daemon_row:?}"
     );
     assert!(
-      socket_row.contains("pid 4242"),
-      "pid must remain on the row alongside the path: {socket_row:?}"
+      daemon_row.contains("pid 4242"),
+      "pid must remain on the row alongside the URL: {daemon_row:?}"
     );
   }
 

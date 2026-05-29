@@ -107,11 +107,12 @@ pub struct DaemonInfo {
   pub uptime_seconds: Option<u64>,
   pub build: Option<String>,
   pub server_path: Option<String>,
-  /// Absolute path of the Unix-domain socket the daemon bound. Used
-  /// by the Daemon info panel to render the `socket  …/daemon.sock
-  /// pid 1234` line. `None` only when talking to an older daemon
-  /// that pre-dates the field.
-  pub socket_path: Option<String>,
+  /// HTTP control-plane URL the daemon bound on (e.g.
+  /// `http://127.0.0.1:11436`). Rendered in the Daemon info panel
+  /// alongside pid + uptime so an operator can see at a glance where
+  /// the IPC channel is. `None` when the daemon hasn't surfaced the
+  /// field (pre-Phase-A binaries don't).
+  pub ipc_url: Option<String>,
   /// Latest snapshot of the OpenAI-compat proxy listener (Unit 5).
   /// `None` when talking to a pre-Unit-5 daemon that omits the
   /// field — info_pane renders the proxy row as `proxy   —` in that case.
@@ -753,8 +754,8 @@ impl App {
           .get("server_path")
           .and_then(Value::as_str)
           .map(String::from),
-        socket_path: daemon
-          .get("socket_path")
+        ipc_url: daemon
+          .get("ipc_url")
           .and_then(Value::as_str)
           .map(String::from),
         proxy,

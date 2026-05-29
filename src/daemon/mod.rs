@@ -400,7 +400,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   log::info!("control plane listening on {ipc_url}");
   let info = RuntimeInfo {
     schema_version: 1,
-    ipc_url,
+    ipc_url: ipc_url.clone(),
     ipc_token: control_token.as_str().to_owned(),
     started_at_unix: SystemTime::now()
       .duration_since(UNIX_EPOCH)
@@ -411,6 +411,11 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   if let Err(e) = runtime_file::save(&opts.state_dir, &info) {
     log::warn!("control plane: could not persist runtime.json: {e}");
   }
+  // Attach the bound URL to the dispatcher's context so `status` can
+  // surface it under `daemon.ipc_url`. Done after the listener resolves
+  // (the configured port may differ from the bound port when a scan
+  // landed on an offset).
+  ctx = ctx.with_ipc_url(ipc_url);
   let control_token_for_serve = Arc::clone(&control_token);
   let control_ctx = ctx.clone();
   let control_token_signal = token.clone();
