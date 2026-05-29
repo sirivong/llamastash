@@ -73,6 +73,7 @@ mod tests {
       proxy_base_url: "http://127.0.0.1:11435/v1".into(),
       api_key: "llamastash".into(),
       model_id: None,
+      is_embed: false,
     }
   }
 

@@ -45,13 +45,23 @@ impl ToolPatcher for ContinueDev {
   }
   fn build_additions(&self, ctx: &PatchContext) -> Value {
     let model_id = ctx.model_id.as_deref().unwrap_or("default");
+    // Continue's `roles` enum drives what the IDE attempts with the
+    // model. Setting `chat`/`edit` on an embedder (nomic-embed-text
+    // etc.) gives confusing errors because Continue tries to chat
+    // with an encoder-only model. The `embed` role is the right
+    // wire for embedding models.
+    let roles = if ctx.is_embed {
+      json!(["embed"])
+    } else {
+      json!(["chat", "edit"])
+    };
     let mut entry = serde_json::Map::new();
     entry.insert("name".into(), json!(LLAMASTASH_MODEL_NAME));
     entry.insert("provider".into(), json!("openai"));
     entry.insert("apiBase".into(), json!(ctx.proxy_base_url));
     entry.insert("model".into(), json!(model_id));
     entry.insert("apiKey".into(), json!(ctx.api_key));
-    entry.insert("roles".into(), json!(["chat", "edit"]));
+    entry.insert("roles".into(), roles);
     json!({
       "name": "llamastash",
       "version": "1.0.0",
@@ -140,6 +150,16 @@ mod tests {
       proxy_base_url: "http://127.0.0.1:11435/v1".into(),
       api_key: "llamastash".into(),
       model_id: Some("qwen3-coder-30b".into()),
+      is_embed: false,
+    }
+  }
+
+  fn embed_ctx() -> PatchContext {
+    PatchContext {
+      proxy_base_url: "http://127.0.0.1:11435/v1".into(),
+      api_key: "llamastash".into(),
+      model_id: Some("nomic-embed-text-v1.5".into()),
+      is_embed: true,
     }
   }
 
@@ -187,6 +207,24 @@ mod tests {
     assert!(body.contains("name: GPT-4"));
     assert!(body.contains("apiBase: http://127.0.0.1:11435/v1"));
     assert!(!body.contains("11434"), "old llamastash entry replaced");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn embed_model_writes_embed_role_not_chat_edit() {
+    let dir = crate::util::test_temp::unique_temp_dir("continue-embed");
+    let path = dir.join("config.yaml");
+    apply(&ContinueDev, &embed_ctx(), Some(path.clone())).expect("apply");
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(body.contains("- embed"), "embed role written");
+    assert!(
+      !body.contains("- chat"),
+      "chat role NOT written for embedder"
+    );
+    assert!(
+      !body.contains("- edit"),
+      "edit role NOT written for embedder"
+    );
     std::fs::remove_dir_all(&dir).ok();
   }
 

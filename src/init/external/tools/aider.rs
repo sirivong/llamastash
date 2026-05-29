@@ -63,6 +63,7 @@ mod tests {
       proxy_base_url: "http://127.0.0.1:11435/v1".into(),
       api_key: "llamastash".into(),
       model_id: Some("qwen3-coder-30b".into()),
+      is_embed: false,
     }
   }
 

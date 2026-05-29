@@ -35,9 +35,18 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - **`init` model id is the GGUF stem, not the first downloaded
   file.** Previous behaviour grabbed `m.files.first()` and got
   `.gitattributes` when HF dropped that into the snapshot dir; the
-  resolver now filters for `.gguf` and strips the
-  `-NNNNN-of-NNNNN` multi-shard suffix so the id matches the
-  catalog row.
+  resolver now filters for `.gguf` and routes the basename through
+  `discovery::split_gguf::parse_shard_name` so multi-shard models
+  resolve to the same canonical base the discovery scanner already
+  shows in `list` / TUI.
+- **`init` integrations: embed models get embed-shaped config.**
+  Continue.dev `roles` flips from `[chat, edit]` to `[embed]` and
+  pi.dev `api` flips from `openai-completions` to
+  `openai-embeddings` when the model id contains `embed`
+  (nomic-embed-text, snowflake-arctic-embed, bge-embed, etc.).
+  Other tools register the model unchanged. Detection is a
+  filename heuristic for now; upgrading to GGUF `ModeHint` is
+  queued.
 - **`init` patches AI dev tool configs.** A new integrations step
   presents a cliclack multiselect over five supported tools —
   **OpenCode** (`~/.config/opencode/opencode.json`), **Aider**

@@ -1128,27 +1128,20 @@ fn canonical_value_bytes(v: &serde_yaml::Value) -> Vec<u8> {
   s.trim_end().as_bytes().to_vec()
 }
 
-/// Strip the `-NNNNN-of-NNNNN` multi-shard suffix from a GGUF
-/// file stem (e.g. `Qwen-...-Q5_K_M-00001-of-00002` →
-/// `Qwen-...-Q5_K_M`). Pattern is "-" + 5 digits + "-of-" + 5 digits
-/// at the end; the indices are always zero-padded to 5 in llama.cpp
-/// split output, so the length is fixed at 15 bytes.
-fn strip_shard_suffix(stem: &str) -> &str {
-  let bytes = stem.as_bytes();
-  let n = bytes.len();
-  if n < 15 {
-    return stem;
-  }
-  let tail = &bytes[n - 15..];
-  let looks_like_suffix = tail[0] == b'-'
-    && tail[1..6].iter().all(|c| c.is_ascii_digit())
-    && &tail[6..10] == b"-of-"
-    && tail[10..15].iter().all(|c| c.is_ascii_digit());
-  if looks_like_suffix {
-    &stem[..n - 15]
-  } else {
-    stem
-  }
+/// Cheap heuristic: does the model id look like an embedding model?
+/// Used to pick embed-shaped fields in the integrations step
+/// (Continue.dev `roles: [embed]`, pi.dev `api: openai-embeddings`).
+/// Matches `nomic-embed-*`, `snowflake-arctic-embed-*`, `bge-*-embed`,
+/// `gte-*-embed`, and anything else with `embed` in the basename.
+///
+/// Trade-off vs the canonical [`crate::gguf::metadata::ModeHint`]
+/// detection (BERT arch + pooling_type + name/tags scan): no GGUF
+/// header parse on the wizard hot path. Misclassifies a pure BERT
+/// model whose name doesn't include "embed" (rare). Upgrade to
+/// ModeHint when init starts carrying parsed metadata through to
+/// the integrations step.
+fn is_embed_model_id(id: &str) -> bool {
+  id.to_ascii_lowercase().contains("embed")
 }
 
 /// Step 5 — external AI tool config patchers.
@@ -1182,23 +1175,33 @@ async fn run_integrations_step(
   // Find the GGUF in the downloaded file set — `.gitattributes` /
   // `README.md` / etc. are also present and would otherwise win
   // `files.first()`. Multi-shard GGUFs (`foo-00001-of-00002.gguf`)
-  // strip the index suffix so the model id we hand to tools matches
-  // the catalog row's name rather than naming shard 1 specifically.
+  // route through the existing
+  // [`crate::discovery::split_gguf::parse_shard_name`] so the id we
+  // hand to tools matches the catalog row's name rather than
+  // shard 1 specifically — same helper the discovery scanner uses
+  // to collapse shard sets into one entry.
   let model_id = model_summary.and_then(|m| {
-    m.files
-      .iter()
-      .find(|f| {
-        f.extension()
-          .and_then(|e| e.to_str())
-          .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
-      })
-      .and_then(|f| f.file_stem())
-      .map(|s| strip_shard_suffix(&s.to_string_lossy()).to_string())
+    let gguf = m.files.iter().find(|f| {
+      f.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gguf"))
+    })?;
+    let filename = gguf.file_name().and_then(|s| s.to_str())?;
+    if let Some(shard) = crate::discovery::split_gguf::parse_shard_name(filename) {
+      Some(shard.base)
+    } else {
+      gguf
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+    }
   });
+  let is_embed = model_id.as_deref().map(is_embed_model_id).unwrap_or(false);
   let ctx = crate::init::external::PatchContext {
     proxy_base_url,
     api_key,
     model_id,
+    is_embed,
   };
 
   let chosen_ids: Vec<String> = if !args.integrations.is_empty() {
@@ -1488,28 +1491,19 @@ mod tests {
   }
 
   #[test]
-  fn strip_shard_suffix_removes_5_digit_of_5_digit_tail() {
-    assert_eq!(
-      strip_shard_suffix("Qwen3-Next-80B-A3B-Instruct-Q5_K_M-00001-of-00002"),
-      "Qwen3-Next-80B-A3B-Instruct-Q5_K_M"
-    );
-    assert_eq!(strip_shard_suffix("model-00007-of-00012"), "model");
+  fn is_embed_model_id_matches_known_embedder_names() {
+    assert!(is_embed_model_id("nomic-embed-text-v1.5"));
+    assert!(is_embed_model_id("nomic-embed-code"));
+    assert!(is_embed_model_id("snowflake-arctic-embed-m"));
+    assert!(is_embed_model_id("Snowflake-Arctic-Embed-L")); // case-insensitive
+    assert!(is_embed_model_id("bge-large-en-embed"));
   }
 
   #[test]
-  fn strip_shard_suffix_leaves_unsharded_names_alone() {
-    assert_eq!(
-      strip_shard_suffix("nomic-embed-text-v1.5"),
-      "nomic-embed-text-v1.5"
-    );
-    assert_eq!(strip_shard_suffix("foo"), "foo");
-    // Short strings can't match the 15-char pattern.
-    assert_eq!(strip_shard_suffix(""), "");
-    // Wrong-shaped tail must not match.
-    assert_eq!(
-      strip_shard_suffix("not-quite-1of2-here"),
-      "not-quite-1of2-here"
-    );
+  fn is_embed_model_id_rejects_chat_names() {
+    assert!(!is_embed_model_id("qwen3-coder-30b"));
+    assert!(!is_embed_model_id("Llama-3.1-8B-Instruct-Q4_K_M"));
+    assert!(!is_embed_model_id("gemma-2-9b-it"));
   }
 
   #[test]

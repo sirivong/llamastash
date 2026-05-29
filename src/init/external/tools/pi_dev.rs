@@ -41,11 +41,19 @@ impl ToolPatcher for PiDev {
         "maxTokens": 8192,
       }));
     }
+    // pi.dev's `api` field distinguishes chat completions from
+    // embedding endpoints. Setting `openai-completions` on an
+    // embedder routes the request to the wrong endpoint shape.
+    let api_kind = if ctx.is_embed {
+      "openai-embeddings"
+    } else {
+      "openai-completions"
+    };
     json!({
       "providers": {
         "llamastash": {
           "baseUrl": ctx.proxy_base_url,
-          "api": "openai-completions",
+          "api": api_kind,
           "apiKey": "$LLAMASTASH_API_KEY",
           "models": models,
         }
@@ -64,6 +72,7 @@ mod tests {
       proxy_base_url: "http://127.0.0.1:11435/v1".into(),
       api_key: "llamastash".into(),
       model_id: Some("qwen3-coder-30b".into()),
+      is_embed: false,
     }
   }
 
@@ -111,5 +120,20 @@ mod tests {
       v["providers"]["llamastash"]["apiKey"],
       "$LLAMASTASH_API_KEY"
     );
+  }
+
+  #[test]
+  fn embed_model_flips_api_to_openai_embeddings() {
+    let mut c = ctx();
+    c.is_embed = true;
+    c.model_id = Some("nomic-embed-text-v1.5".into());
+    let v = PiDev.build_additions(&c);
+    assert_eq!(v["providers"]["llamastash"]["api"], "openai-embeddings");
+  }
+
+  #[test]
+  fn chat_model_keeps_openai_completions() {
+    let v = PiDev.build_additions(&ctx());
+    assert_eq!(v["providers"]["llamastash"]["api"], "openai-completions");
   }
 }

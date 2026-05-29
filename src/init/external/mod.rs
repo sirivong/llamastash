@@ -50,11 +50,18 @@ pub enum Format {
 /// llama-server ignores Authorization; we still set one so clients
 /// that *require* a non-empty key in their config don't refuse to
 /// boot.
+///
+/// `is_embed`: the model is an embedding model (nomic-embed,
+/// snowflake-arctic-embed, etc.). Patchers that care about the
+/// distinction — Continue.dev's `roles` field, pi.dev's `api`
+/// field — branch on this. Tools that don't differentiate just
+/// register the model and let the user wire it up.
 #[derive(Debug, Clone)]
 pub struct PatchContext {
   pub proxy_base_url: String,
   pub api_key: String,
   pub model_id: Option<String>,
+  pub is_embed: bool,
 }
 
 /// One supported external-tool patcher. Implementors declare where
@@ -289,6 +296,7 @@ mod tests {
       proxy_base_url: "http://127.0.0.1:11435/v1".into(),
       api_key: "llamastash".into(),
       model_id: None,
+      is_embed: false,
     }
   }
 
