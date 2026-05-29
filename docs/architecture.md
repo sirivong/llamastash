@@ -40,7 +40,7 @@ flowchart LR
     end
 
     subgraph daemon[llamastash daemon]
-        IPC[Unix-socket JSON-RPC server<br/>peercred auth]
+        IPC[Control-plane HTTP server<br/>127.0.0.1:11436 — bearer token]
         PROXY[OpenAI-compat proxy<br/>127.0.0.1:11434 — loopback HTTP/1.1]
         SCAN[Discovery<br/>scan + watch + caches]
         GGUF[GGUF parser<br/>metadata + identity]
@@ -55,8 +55,8 @@ flowchart LR
         FS[(filesystem)]
     end
 
-    TUI -- attach --> IPC
-    CLI -- attach --> IPC
+    TUI -- HTTP+Bearer --> IPC
+    CLI -- HTTP+Bearer --> IPC
     AGENT -- HTTP /v1/* --> PROXY
     PROXY --> SUP
     PROXY --> SCAN
@@ -72,10 +72,10 @@ flowchart LR
     SUP --> RES
 ```
 
-- **Daemon-on-demand.** The TUI and CLI both try to attach to the daemon socket first. If absent or stale, they fork/exec `llamastash daemon start` (which detaches by default) and retry with exponential backoff.
-- **Socket.** Unix domain socket, mode `0600`, with peer-credential auth (`SO_PEERCRED` on Linux, `getpeereid` on macOS). Wire protocol: length-prefixed JSON-RPC 2.0 envelopes.
+- **Daemon-on-demand.** The TUI and CLI both try to attach via `runtime.json` (URL + bearer token written by the daemon at startup). If absent or stale, they fork/exec `llamastash daemon start` (which detaches by default) and retry once the new daemon publishes a fresh `runtime.json`.
+- **Control plane.** Loopback HTTP/1.1 on `127.0.0.1:11436` (random fallback in `41100..=41300` on collision). Every route except `GET /health` requires a `Bearer` token validated in constant time. The token is 32 bytes from `OsRng`, rotated per daemon start, and persisted to `$XDG_STATE_HOME/llamastash/runtime.json` (mode `0600`) alongside the resolved URL. Wire protocol: JSON-RPC 2.0 envelopes carried in `POST /rpc` bodies.
 - **Proxy.** A loopback HTTP/1.1 listener enabled by default, no auth and no TLS. In normal mode it prefers `127.0.0.1:11435`; in Ollama-compat mode it prefers `127.0.0.1:11434`. It routes `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` by resolving `body.model` through the same fuzzy resolver as `llamastash start <ref>` and forwarding byte-for-byte to the matching `llama-server` child (auto-starting it if not running; falling back to a Ready model on launch failure with `x-llamastash-served-by` + `x-llamastash-fallback-reason` headers). Same-machine threat model — LAN exposure, auth, and TLS are deferred follow-ups. Implementation: `src/proxy/`; user docs: [`usage.md §Proxy (OpenAI-compatible listener)`](usage.md#proxy-openai-compatible-listener); design: [`plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md).
-- **State separation.** XDG-aware. `$XDG_STATE_HOME/llamastash/state.json` for favorites / presets / last-params / running snapshot. `$XDG_CONFIG_HOME/llamastash/config.yaml` for user-authored config. `$XDG_CACHE_HOME/llamastash/logs/<id>-<ts>.log` for per-launch logs.
+- **State separation.** XDG-aware. `$XDG_STATE_HOME/llamastash/state.json` for favorites / presets / last-params / running snapshot (persisted). `runtime.json` alongside it for the per-instance URL + bearer token (removed on shutdown). `$XDG_CONFIG_HOME/llamastash/config.yaml` for user-authored config. `$XDG_CACHE_HOME/llamastash/logs/<id>-<ts>.log` for per-launch logs.
 
 ## Proxy comparison — Ollama, LM Studio, llamastash
 

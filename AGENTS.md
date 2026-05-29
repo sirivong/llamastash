@@ -83,7 +83,7 @@ a new file.
 
 The v1 contract — these are deliberate omissions, not gaps:
 
-- **Loopback-only, same-UID.** The daemon binds a Unix domain socket (mode `0600`) with peercred auth. There is no network listener and no v1 path to one. `--host` / `--listen` / `--bind` / `--api-key` / `--ssl-*` are refused if passed via `advanced[]` to `start_model`, and `LLAMA_ARG_*` env vars are stripped before spawn.
+- **Loopback-only, same-UID.** The daemon binds two loopback TCP listeners on `127.0.0.1`: a JSON-RPC control plane on `:11436` (bearer-token authed; the token + URL land in `$XDG_STATE_HOME/llamastash/runtime.json`, mode `0600`) and the OpenAI-compat proxy (see next bullet). Neither listener accepts LAN traffic in v0.0.2. `--host` / `--listen` / `--bind` / `--api-key` / `--ssl-*` are refused if passed via `advanced[]` to `start_model`, and `LLAMA_ARG_*` env vars are stripped before spawn.
 - **OpenAI-compat proxy carved out of the v1 R34 deferral.** A loopback HTTP/1.1 listener is enabled by default. In normal mode it prefers `127.0.0.1:11435` so a local Ollama daemon on `11434` can coexist; in Ollama-compat mode it prefers `127.0.0.1:11434`. It speaks `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` so OpenAI-compatible agents (OpenCode, Pi, OpenAI SDKs) attach via one stable URL. Same-machine threat model — no auth, no TLS, no LAN binding, no peercred (the listener is plain loopback HTTP, not the IPC socket). The rest of R34 — Anthropic `/v1/messages`, MCP, network exposure, auth/TLS, idle eviction, fallback tuning — stays deferred. See `docs/plans/2026-05-21-001-feat-proxy-router-plan.md`.
 - **`llamastash pull`** graduated in v2 from the v1 `unimplemented!` shim. MVP shape: `llamastash pull <owner/repo[:filename.gguf]>` — downloads via the [`hf-hub`](https://crates.io/crates/hf-hub) crate (0.5 line, resolves the same `reqwest 0.12` we pin elsewhere) into the canonical HF cache layout that discovery already scans. The TUI's `d` HuggingFace pull dialog is the interactive face of this primitive; the CLI `llamastash pull <slug>` stays the only non-TUI browse surface (the dialog is TUI-only, no HTTP / MCP equivalent in v2). The `cli/output.rs::list_json` / `favorites_json` / `CatalogRow::name` JSON shapes stay byte-stable.
 - **`llamastash init` / `llamastash doctor`** are v2 surfaces. Init is the first-run wizard + maintenance tool; doctor is the read-only diagnostic. Both honor `--json` per the v2 plan §"init/doctor mode/flag decision matrix". `init` is **interactive by default**; agents that need non-interactive runs pass `--recommended` (`--yes` remains a hidden alias with identical behavior, and both flags can be combined) and may pre-answer individual prompts with `--install`, `--model`, and `--config-step`.
@@ -125,14 +125,14 @@ cargo run                                # opens the TUI against the same daemon
 cargo run -- daemon stop
 ```
 
-Socket paths: `$XDG_RUNTIME_DIR/llamastash/daemon.sock` (Linux), `$TMPDIR/llamastash-$USER/daemon.sock` (macOS). Override with `LLAMASTASH_SOCKET=/path/daemon.sock` for side-by-side daemons. If wedged, deleting both `daemon.sock` and `daemon.pid` in the same dir is safe — next `daemon start` rebinds clean.
+Attach surface: clients read `$XDG_STATE_HOME/llamastash/runtime.json` (mode `0600`) to discover the daemon's control-plane URL + bearer token. Override the state directory with `LLAMASTASH_STATE_DIR=/path` for side-by-side daemons, or use `LLAMASTASH_IPC_URL` + `LLAMASTASH_IPC_TOKEN` (both required together) for clients that don't want to read runtime.json. If wedged, deleting `runtime.json` and `daemon.pid` in the state dir is safe — next `daemon start` rebinds clean.
 
-For full path isolation (e.g. integration tests, the maintainer UAT command, side-by-side daemon experiments), pair `LLAMASTASH_SOCKET` with `LLAMASTASH_STATE_DIR`, `LLAMASTASH_CONFIG_DIR`, `LLAMASTASH_CACHE_DIR`, and `HF_HOME` so state, config, cache/logs, and the HF cache all redirect together. Each variable is a verbatim override; empty values are treated as unset. See `docs/usage.md §Environment variables`.
+For full path isolation (e.g. integration tests, the maintainer UAT command, side-by-side daemon experiments), pair `LLAMASTASH_STATE_DIR` with `LLAMASTASH_CONFIG_DIR`, `LLAMASTASH_CACHE_DIR`, and `HF_HOME` so state, config, cache/logs, and the HF cache all redirect together. Each variable is a verbatim override; empty values are treated as unset. See `docs/usage.md §Environment variables`.
 
 ## Architecture in one breath
 
 ```
-TUI / CLI ──attach──► Unix-socket JSON-RPC server (peercred, 0600)
+TUI / CLI ──HTTP+Bearer──► Control plane (127.0.0.1:11436, loopback, bearer token)
 OpenCode / Pi / SDK ──HTTP──► Proxy listener (127.0.0.1:11434, loopback, no auth)
                           │
                           ├── Discovery (scan + watch + caches)
@@ -142,11 +142,11 @@ OpenCode / Pi / SDK ──HTTP──► Proxy listener (127.0.0.1:11434, loopbac
                           └── Persisted state (favorites / presets / running)
 ```
 
-- **Wire format.** Length-prefixed JSON-RPC 2.0 envelopes. `src/ipc/framing.rs` is the framing; `src/ipc/methods.rs` is the dispatch table.
+- **Wire format.** JSON-RPC 2.0 envelopes carried in `POST /rpc` request/response bodies. `src/ipc/methods.rs` is the dispatch table; `src/daemon/control_plane.rs` is the hyper service in front of it.
 - **Model lifecycle.** `Launching → Loading → Ready → Stopping → Stopped`, plus `Error{cause}`. Transitions are guarded — once Stopping or Error, the model never moves out. The supervisor health-probes `/health` every 500 ms during Loading. See `src/daemon/supervisor.rs`.
 - **Process survival.** `llama-server` children get their own session via `setsid`, so they outlive the daemon. On daemon restart, an orphan sweep re-adopts each entry in `state.running` only after three-factor confirmation: PID alive, recorded port answering, and `/v1/models` body mentioning the recorded model path.
 - **Model identity.** `(canonical absolute path, BLAKE3 of header bytes)`. Renames survive; symlinks dedupe to target; split GGUFs collapse to shard 1.
-- **Persistence.** `$XDG_STATE_HOME/llamastash/state.json`, written via `state.json.tmp.<pid>.<rand>` + rename so concurrent writes can't clobber and a same-UID symlink plant can't redirect. Parse failure → `state.json.broken-<ts>` quarantine, boot with defaults.
+- **Persistence.** `$XDG_STATE_HOME/llamastash/state.json` (durable user state: favorites, presets, last-params, running snapshot) plus `runtime.json` (per-instance URL + bearer token, deleted on shutdown). Both written via the shared `util::atomic_write::write_secure` path (`*.tmp.<rand>` + `fsync` + atomic rename + parent dir `fsync`), mode `0600` on Unix. Parse failure on `state.json` → `state.json.broken-<ts>` quarantine, boot with defaults.
 
 ## CLI agent surface (Units 8 + 10/13)
 

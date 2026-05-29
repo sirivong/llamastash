@@ -4,6 +4,18 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **IPC transport rewritten on HTTP loopback + bearer token.** The
+  daemon's Unix-domain socket and `SO_PEERCRED` auth are gone.
+  Clients now attach via the URL + bearer token written to
+  `$XDG_STATE_HOME/llamastash/runtime.json` (mode `0600`). The
+  `LLAMASTASH_SOCKET` env var and `--socket-path` CLI flag are
+  removed; use `LLAMASTASH_STATE_DIR` (for the binary's own path
+  resolution) or `LLAMASTASH_IPC_URL` + `LLAMASTASH_IPC_TOKEN`
+  (direct override) instead. The OpenAI-compat proxy listener is
+  unchanged. See `docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`.
+
 ### Added
 
 - **`init` patches AI dev tool configs.** A new integrations step

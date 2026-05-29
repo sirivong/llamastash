@@ -169,11 +169,11 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 ### [Built to be safe to run](FEATURES.md#built-to-be-safe-to-run)
 
-- [Unix-socket peercred auth (`0600`)](FEATURES.md#unix-socket-peercred-auth-0600) — only your UID; the OpenAI-compat [proxy](#drop-in-openai--ollama-proxy) is the only network listener and is loopback-only.
+- [Bearer-token loopback control plane (`runtime.json` `0600`)](FEATURES.md#bearer-token-control-plane) — the per-daemon token + URL live in `$XDG_STATE_HOME/llamastash/runtime.json`; same-UID trust, no network exposure.
 - [Hardened fetch substrate](FEATURES.md#hardened-fetch-substrate) — HTTPS-only, host allowlist, redirect/body-size caps, IP-literal refusal.
 - [Archive-bomb defenses on installers](FEATURES.md#archive-bomb-defenses-on-installers) — entry/size/ratio caps; SHA-256 verified before extract.
 - [Atomic, mode-checked config + state writes](FEATURES.md#atomic-mode-checked-config--state-writes) — `0600` final mode; corrupt state quarantined, not fatal.
-- [Side-by-side daemons](FEATURES.md#side-by-side-daemons) — isolated instances via `LLAMASTASH_*_DIR` + `LLAMASTASH_SOCKET`.
+- [Side-by-side daemons](FEATURES.md#side-by-side-daemons) — isolated instances via `LLAMASTASH_*_DIR` (state / config / cache); each daemon publishes its own `runtime.json`.
 
 ## Benchmarks
 
@@ -246,7 +246,8 @@ Environment variables:
 | `LLAMASTASH_CONFIG`       | Override config-file path                                                                                                                                                                                                                                                                                      |
 | `LLAMASTASH_LLAMA_SERVER` | Path to `llama-server`                                                                                                                                                                                                                                                                                         |
 | `LLAMASTASH_NO_SCAN`      | Skip filesystem scanning                                                                                                                                                                                                                                                                                       |
-| `LLAMASTASH_SOCKET`       | Point a CLI at a non-default daemon socket                                                                                                                                                                                                                                                                     |
+| `LLAMASTASH_IPC_URL`      | Point a CLI/TUI at a non-default daemon control plane (verbatim URL, e.g. `http://127.0.0.1:11436`). Must be set together with `LLAMASTASH_IPC_TOKEN`.                                                                                                                                                         |
+| `LLAMASTASH_IPC_TOKEN`    | Bearer token for the control-plane URL. See `LLAMASTASH_IPC_URL`.                                                                                                                                                                                                                                              |
 | `LLAMASTASH_OFFLINE`      | Disable outbound network for `init`, `pull`, and `doctor` fetch paths. Accepts `true` / `false` when bound via clap's `--offline` flag; the runtime `fetch::offline_requested` check also accepts `1` / `yes` for compatibility with scripts that follow the `XDG`/`gh` convention. Equivalent to `--offline`. |
 | `HF_TOKEN`                | HuggingFace API token. Read by `init` and `pull` only; never propagated into spawned `llama-server` children. Cache-file (`~/.cache/huggingface/token`) source is refused if its mode is group/world-readable.                                                                                                 |
 | `HF_ENDPOINT`             | Override the HuggingFace API endpoint host. Must be `https://` and on the HF-allowlist (`huggingface.co` and its LFS CDN); non-allowlisted values are refused. Default: `https://huggingface.co`.                                                                                                              |
@@ -271,7 +272,7 @@ Every non-interactive subcommand returns a documented exit code so agent scripts
 | ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `0`  | Success                                                                                                                                                                                                        |
 | `64` | Usage error (missing required arg, invalid combination — clap-emitted)                                                                                                                                         |
-| `65` | Daemon unreachable (socket missing, peer hung up, timeout)                                                                                                                                                     |
+| `65` | Daemon unreachable (`runtime.json` absent, control plane refused connection, timeout)                                                                                                                          |
 | `66` | Model reference matched zero or multiple models (stderr lists candidates)                                                                                                                                      |
 | `67` | `start_model` failed at the supervisor (probe timeout, port allocation failure)                                                                                                                                |
 | `68` | `stop_model` / `stop_all` failed                                                                                                                                                                               |
