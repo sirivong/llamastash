@@ -276,7 +276,7 @@ impl ManagedModel {
       self.transition(ManagedState::Stopped).await;
       return self.state().await;
     }
-    signal_child_with_guard(self, libc::SIGTERM).await;
+    signal_child_with_guard(self, SignalFlavour::Graceful).await;
     let deadline = Instant::now() + grace;
     loop {
       if let Some(child) = self.inner.child.lock().await.as_mut() {
@@ -287,7 +287,7 @@ impl ManagedModel {
         break;
       }
       if Instant::now() >= deadline {
-        signal_child_with_guard(self, libc::SIGKILL).await;
+        signal_child_with_guard(self, SignalFlavour::Kill).await;
         // Wait for exit; SIGKILL is unignorable so this completes.
         if let Some(child) = self.inner.child.lock().await.as_mut() {
           let _ = child.wait().await;
@@ -381,26 +381,14 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
   ] {
     cmd.env_remove(var);
   }
-  #[cfg(unix)]
-  {
-    // SAFETY: `pre_exec` runs in the child between fork and exec.
-    // `setsid` is on POSIX's async-signal-safe list — no
-    // allocations, no locks, no tokio state touched.
-    //
-    // `pre_exec` here is the method on `tokio::process::Command`
-    // (re-exposed from `std::os::unix::process::CommandExt`) — the
-    // unused-import lint trips because rustc resolves the call
-    // without needing the trait in scope.
-    unsafe {
-      cmd.pre_exec(|| {
-        if libc::setsid() < 0 {
-          return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-      });
-    }
-  }
-  let mut child = cmd.spawn().map_err(|e| SpawnError::Spawn(e.to_string()))?;
+  // Process-group setup + spawn go through [`ProcessControl`] so
+  // Unit 6's Windows backend can swap in `CREATE_NEW_PROCESS_GROUP`
+  // without touching this call site.
+  let pc = crate::util::process_control::platform_default();
+  let spawned = pc
+    .spawn_supervised(cmd)
+    .map_err(|e| SpawnError::Spawn(e.to_string()))?;
+  let mut child = spawned.into_child();
   let pid = child.id();
   // Prepare the log file lazily — opening it ahead of the child
   // lets us bail out cleanly if the cache_dir/logs/ tree is
@@ -521,7 +509,7 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
         // child draining resources. Guarded against PID reuse by
         // taking the child mutex and re-verifying the handle is
         // still alive — see [`signal_child_with_guard`].
-        signal_child_with_guard(&probe_model, libc::SIGKILL).await;
+        signal_child_with_guard(&probe_model, SignalFlavour::Kill).await;
       }
     }
   });
@@ -603,12 +591,21 @@ where
   });
 }
 
-/// Send `sig` to the supervised child, holding the child mutex
-/// across the syscall so a concurrent reap can't recycle the pid
-/// while we're delivering. If the child handle has already been
-/// reaped (`Ok(Some(_))` from `try_wait`) or never spawned, this
-/// is a no-op.
-async fn signal_child_with_guard(model: &ManagedModel, sig: libc::c_int) {
+/// Whether [`signal_child_with_guard`] should send the graceful or
+/// kill signal. Crosses the trait boundary as the explicit signal
+/// flavour so Windows backends don't need to translate a libc signum.
+#[derive(Debug, Clone, Copy)]
+enum SignalFlavour {
+  Graceful,
+  Kill,
+}
+
+/// Send `flavour` to the supervised child's process group, holding
+/// the child mutex across the syscall so a concurrent reap can't
+/// recycle the pid while we're delivering. If the child handle has
+/// already been reaped (`Ok(Some(_))` from `try_wait`) or never
+/// spawned, this is a no-op.
+async fn signal_child_with_guard(model: &ManagedModel, flavour: SignalFlavour) {
   let mut guard = model.inner.child.lock().await;
   let Some(child) = guard.as_mut() else {
     return;
@@ -620,21 +617,20 @@ async fn signal_child_with_guard(model: &ManagedModel, sig: libc::c_int) {
     return;
   }
   let Some(pid) = child.id() else { return };
-  // SAFETY: `kill(2)` with a *negative* pid signals every process
-  // in the corresponding process group. `pre_exec` ran `setsid()`
-  // for the child, which made it both a session leader and a
-  // process-group leader whose PGID equals its PID — so the
-  // negated PID here is the PGID of llama-server and every
-  // grandchild it spawned. We hold the child mutex across the
-  // call so the kernel can't reap and recycle the PGID between
-  // our `try_wait` check and the signal delivery.
+  // `setsid()` ran in `pre_exec` so the child is its own PGID
+  // leader. Signalling `ProcessGroup(pid)` reaches every process
+  // it forked — addressing audit §2.1 #3 (a SIGTERM to just the
+  // immediate child left grandchildren running).
   //
-  // Audit §2.1 #3: signalling just `pid` left grandchildren
-  // running after SIGTERM. The fix is a one-character negation
-  // (the alternative is pulling in the `command-group` crate,
-  // which boils down to the same syscall on Unix).
-  unsafe {
-    libc::kill(-(pid as i32), sig);
+  // We hold the child mutex across the trait call so the kernel
+  // can't reap-then-recycle the PGID between our `try_wait` check
+  // and the signal delivery.
+  use crate::util::process_control::SignalTarget;
+  let target = SignalTarget::ProcessGroup(pid);
+  let pc = crate::util::process_control::platform_default();
+  match flavour {
+    SignalFlavour::Graceful => pc.signal_graceful(target),
+    SignalFlavour::Kill => pc.signal_kill(target),
   }
 }
 

@@ -308,7 +308,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 ### Phase B — Process supervisor cross-platform abstraction
 
-- [ ] **Unit 5: `ProcessControl` trait + Unix backend wired**
+- [x] **Unit 5: `ProcessControl` trait + Unix backend wired**
 
 **Goal:** Extract `kill(-pgid, SIG)` + `setsid()` semantics behind a `ProcessControl` trait so the supervisor, `stop_external` handler, and orphan re-adoption path all go through one interface. Windows backend stub compiles but isn't wired yet.
 

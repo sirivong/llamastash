@@ -684,7 +684,6 @@ async fn stop_external_handler(
       format!("pid {} exceeds i32::MAX; refusing to signal", parsed.pid),
     ));
   }
-  let pid_i = parsed.pid as i32;
 
   // Helper: returns Some(true) if alive AND start_time matches, Some(false)
   // if alive but pid has been reused, None if dead. We sample via
@@ -742,10 +741,12 @@ async fn stop_external_handler(
       }));
     }
   }
-  // SIGTERM first — give the process time to exit cleanly.
-  unsafe {
-    libc::kill(pid_i, libc::SIGTERM);
-  }
+  // SIGTERM first — give the process time to exit cleanly. Goes
+  // through [`ProcessControl`] so Unit 6 picks up the Windows
+  // single-pid path without a second migration here.
+  use crate::util::process_control::SignalTarget;
+  let pc = crate::util::process_control::platform_default();
+  pc.signal_graceful(SignalTarget::SinglePid(parsed.pid));
   let grace = Duration::from_secs(parsed.grace_secs);
   let mut elapsed = Duration::ZERO;
   let step = Duration::from_millis(100);
@@ -763,9 +764,7 @@ async fn stop_external_handler(
     live_and_same(parsed.pid, recorded_start_time).await,
     Some(true)
   ) {
-    unsafe {
-      libc::kill(pid_i, libc::SIGKILL);
-    }
+    pc.signal_kill(SignalTarget::SinglePid(parsed.pid));
     sent_kill = true;
   }
   ctx.external.write().await.retain(|e| e.pid != parsed.pid);

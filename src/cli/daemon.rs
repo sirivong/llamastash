@@ -175,32 +175,31 @@ async fn handle_stop(force: bool) -> Result<()> {
 
 /// Best-effort PID-based shutdown. Used when the IPC channel is
 /// unusable (no `runtime.json`) or when the user passed `--force`.
-/// Sends `SIGTERM`, waits up to ~3s for the lockfile to release, and
-/// surfaces a clear next-step (`SIGKILL`) if the daemon ignores the
-/// signal.
-#[cfg(unix)]
+/// Sends `SIGTERM` via [`ProcessControl`], waits up to ~3s for the
+/// lockfile to release, then surfaces a clear next-step (`SIGKILL`)
+/// if the daemon ignores the signal.
 fn force_stop_via_pid(pid: i32, attach_dir: &std::path::Path) -> Result<()> {
+  use crate::util::process_control::{platform_default, SignalTarget};
   use std::time::{Duration, Instant};
-  // SAFETY: `libc::kill` is async-signal-safe and operates on a PID
-  // we just read from the lockfile (validated via flock). No memory
-  // is touched.
-  let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
-  if ret != 0 {
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::ESRCH) {
-      // Process already gone — the lock will clear shortly. Treat as
-      // success after a brief settle window so callers can re-run
-      // immediately without seeing "already running".
-      println!(
-        "{}",
-        crate::cli::colors::dim(&format!("daemon: pid {pid} already exited"))
-      );
-      return Ok(());
-    }
+  if pid <= 0 {
     return Err(anyhow::anyhow!(
-      "daemon stop --force: kill(pid {pid}, SIGTERM) failed: {err}"
+      "daemon stop --force: invalid pid {pid} in lockfile"
     ));
   }
+  let pc = platform_default();
+  let pid_u = pid as u32;
+  // Pre-check via `is_alive` so we can surface "already exited" without
+  // having to inspect signal-syscall errno. The trait swallows ESRCH
+  // internally, which is the right behavior for the supervisor but
+  // would hide the user-relevant distinction here.
+  if !pc.is_alive(pid_u) {
+    println!(
+      "{}",
+      crate::cli::colors::dim(&format!("daemon: pid {pid} already exited"))
+    );
+    return Ok(());
+  }
+  pc.signal_graceful(SignalTarget::SinglePid(pid_u));
   let deadline = Instant::now() + Duration::from_secs(3);
   while Instant::now() < deadline {
     if existing_daemon_pid(attach_dir).is_none() {
@@ -215,16 +214,6 @@ fn force_stop_via_pid(pid: i32, attach_dir: &std::path::Path) -> Result<()> {
   Err(anyhow::anyhow!(
     "daemon stop --force: pid {pid} did not exit within 3s after SIGTERM; \
      try `kill -KILL {pid}` and check the daemon logs"
-  ))
-}
-
-#[cfg(not(unix))]
-fn force_stop_via_pid(_pid: i32, _attach_dir: &std::path::Path) -> Result<()> {
-  // Non-Unix targets will land in Phase B/C with their own process
-  // control. For now, refuse explicitly so the error doesn't get
-  // misread as "daemon stopped".
-  Err(anyhow::anyhow!(
-    "daemon stop --force is not yet supported on this platform"
   ))
 }
 

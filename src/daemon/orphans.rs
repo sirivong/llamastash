@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
-use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
 use crate::daemon::state_store::RunningSnapshot;
 
@@ -95,7 +95,7 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
   let mut adopted: Vec<RunningSnapshot> = Vec::new();
   let mut stale: Vec<RunningSnapshot> = Vec::new();
   for snap in inputs.recorded_running.iter().cloned() {
-    if !pid_alive(&sys, snap.pid) {
+    if !pid_alive(snap.pid) {
       stale.push(snap);
       continue;
     }
@@ -153,11 +153,13 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
   }
 }
 
-fn pid_alive(sys: &System, pid: i32) -> bool {
+fn pid_alive(pid: i32) -> bool {
   if pid <= 0 {
     return false;
   }
-  sys.process(Pid::from_u32(pid as u32)).is_some()
+  // Defer to the cross-platform liveness check so the Windows
+  // backend (Unit 6) lights up here without a second migration.
+  crate::util::process_control::platform_default().is_alive(pid as u32)
 }
 
 /// Probe `/v1/models` on the recorded port and check that the
