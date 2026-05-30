@@ -343,7 +343,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 ### Phase C — Windows wiring
 
-- [ ] **Unit 6: Windows `ProcessControl` backend (Job Objects)**
+- [x] **Unit 6: Windows `ProcessControl` backend (Job Objects)**
 
 **Goal:** Implement the `#[cfg(windows)]` half of `ProcessControl` using a Windows Job Object per supervised spawn. Graceful drain via `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`; force-kill via `TerminateJobObject` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` set so daemon exit cleans up children even on ungraceful daemon death.
 

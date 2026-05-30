@@ -640,15 +640,81 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   }
 }
 
-#[cfg(not(unix))]
-pub fn start_detached(_opts: DaemonOptions) -> Result<StartOutcome> {
-  Err(anyhow!("--detach is only supported on Unix targets"))
+/// Windows detached-start. Unlike Unix there's no `fork()` or
+/// `setsid()` — `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` at spawn
+/// time gives us a console-less child outside the parent's group, and
+/// the surrounding `runtime.json` poll loop is identical to the Unix
+/// path.
+#[cfg(windows)]
+pub fn start_detached(opts: DaemonOptions) -> Result<StartOutcome> {
+  let exe = std::env::current_exe().context("locating current executable for --detach")?;
+  start_detached_with_exe(opts, exe)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[doc(hidden)]
-pub fn start_detached_with_exe(_opts: DaemonOptions, _exe: PathBuf) -> Result<StartOutcome> {
-  Err(anyhow!("--detach is only supported on Unix targets"))
+pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<StartOutcome> {
+  use std::{
+    os::windows::process::CommandExt,
+    process::{Command, Stdio},
+  };
+  use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+
+  // Fast path: a live daemon already owns the state dir. Don't spawn a
+  // child only to have it bail.
+  if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
+    if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
+      return Ok(StartOutcome::AlreadyRunning(pid));
+    }
+  }
+
+  let mut cmd = Command::new(&exe);
+  for arg in &opts.propagated_cli_args {
+    cmd.arg(arg);
+  }
+  cmd
+    .arg("daemon")
+    .arg("start")
+    .arg("--foreground")
+    .arg("--state-dir")
+    .arg(&opts.state_dir)
+    .arg("--proxy-port")
+    .arg(opts.proxy.effective_port().to_string());
+  if opts.proxy.ollama_compat {
+    cmd.arg("--ollama-compat");
+  }
+  cmd
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+
+  let mut child = cmd.spawn().context("spawning detached daemon")?;
+
+  let deadline = std::time::Instant::now() + Duration::from_secs(3);
+  loop {
+    if let Some(status) = child.try_wait()? {
+      if let Some(pid) = existing_daemon_pid(&opts.state_dir) {
+        return Ok(StartOutcome::AlreadyRunning(pid));
+      }
+      return Err(anyhow!(
+        "detached daemon exited before binding control plane (exit code: {:?})",
+        status.code()
+      ));
+    }
+    if matches!(runtime_file::load(&opts.state_dir), Ok(Some(_))) {
+      return Ok(StartOutcome::RanToCompletion);
+    }
+    if std::time::Instant::now() > deadline {
+      let _ = child.kill();
+      let _ = child.wait();
+      return Err(anyhow!(
+        "detached daemon did not bind control plane within 3s (state_dir: {})",
+        opts.state_dir.display()
+      ));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+  }
 }
 
 /// Returns the PID owning the daemon lockfile if (and only if) a live
@@ -683,6 +749,28 @@ pub(crate) fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
   // the lock, the PID value is informational.
   let raw = std::fs::read_to_string(&pidfile).ok()?;
   raw.trim().parse::<i32>().ok().filter(|p| *p > 0)
+}
+
+/// Windows backend for the daemon-liveness probe. Until Unit 7 wires
+/// `LockFileEx`-based ownership detection into `daemon/lockfile.rs`,
+/// this falls back to "PID file exists + the recorded PID is alive
+/// per `ProcessControl::is_alive`". PID reuse can theoretically alias
+/// a long-dead daemon to a live unrelated process; the downstream
+/// `runtime.json` check (`load(&state_dir)` returning `Some`) is what
+/// actually decides whether a control plane is reachable, so the
+/// PID-reuse window only affects the friendly "already running"
+/// message — not correctness.
+#[cfg(windows)]
+pub(crate) fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
+  let pidfile = state_dir.join("daemon.pid");
+  let raw = std::fs::read_to_string(&pidfile).ok()?;
+  let pid = raw.trim().parse::<i32>().ok().filter(|p| *p > 0)?;
+  let pc = crate::util::process_control::platform_default();
+  if pc.is_alive(pid as u32) {
+    Some(pid)
+  } else {
+    None
+  }
 }
 
 // Re-export the symbols downstream callers reach for.

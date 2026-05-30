@@ -112,6 +112,46 @@ pub fn install_signal_handlers(token: ShutdownToken) -> tokio::task::JoinHandle<
   })
 }
 
+/// Windows equivalent of [`install_signal_handlers`]. Listens for
+/// CTRL+C and CTRL+BREAK on the daemon's console (when present). Note
+/// that a daemon self-spawned via `CREATE_NEW_PROCESS_GROUP |
+/// DETACHED_PROCESS` has no console, so these handlers fire only when
+/// the daemon is run in the foreground (`--foreground`). The detached
+/// daemon path relies on `TerminateProcess` from `daemon stop --force`
+/// — equivalent to SIGKILL on Unix.
+#[cfg(windows)]
+pub fn install_signal_handlers(token: ShutdownToken) -> tokio::task::JoinHandle<()> {
+  use tokio::signal::windows::{ctrl_break, ctrl_c};
+
+  tokio::spawn(async move {
+    let mut cc = match ctrl_c() {
+      Ok(s) => s,
+      Err(e) => {
+        log::error!(
+          "failed to install CTRL+C handler: {e}; triggering shutdown so the daemon is not signal-immune"
+        );
+        token.trigger();
+        return;
+      }
+    };
+    let mut cb = match ctrl_break() {
+      Ok(s) => s,
+      Err(e) => {
+        log::error!(
+          "failed to install CTRL+BREAK handler: {e}; triggering shutdown so the daemon is not signal-immune"
+        );
+        token.trigger();
+        return;
+      }
+    };
+    tokio::select! {
+      _ = cc.recv() => log::info!("CTRL+C received; initiating shutdown"),
+      _ = cb.recv() => log::info!("CTRL+BREAK received; initiating shutdown"),
+    }
+    token.trigger();
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use std::time::Duration;

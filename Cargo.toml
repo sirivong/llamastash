@@ -205,6 +205,19 @@ hyper-util = { version = "0.1", default-features = false, features = [
 ] }
 http-body-util = "0.1"
 
+# Windows-only Win32 surface for the Unit 6 process-supervision backend
+# (`src/util/process_control.rs`): Job Objects for kill-on-job-close
+# semantics, GenerateConsoleCtrlEvent for CTRL+BREAK delivery, and
+# OpenProcess / GetExitCodeProcess for liveness probing. Pulled in only
+# on `cfg(windows)` so Linux/macOS binaries don't grow.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  "Win32_System_Console",
+] }
+
 [lib]
 name = "llamastash"
 path = "src/lib.rs"
