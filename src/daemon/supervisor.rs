@@ -533,6 +533,7 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
         None => return,
       };
       let try_wait = watched.try_wait();
+      let watched_pid = watched.id();
       drop(guard);
       match try_wait {
         Ok(Some(status)) => {
@@ -558,6 +559,15 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
               }
               *state = ManagedState::Error { cause };
             }
+          }
+          drop(state);
+          // Release any backend-side bookkeeping for the pid (Windows
+          // Job Object handle; no-op on Unix). Without this the
+          // WindowsProcessControl map would retain one HANDLE per
+          // naturally-exited launch for the daemon's lifetime —
+          // meaningful under idle-TTL eviction churn.
+          if let Some(exited_pid) = watched_pid {
+            crate::util::process_control::platform_default().forget(exited_pid);
           }
           return;
         }

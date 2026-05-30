@@ -90,29 +90,40 @@ impl SpawnedChild {
 pub trait ProcessControl: Send + Sync + 'static {
   /// Configure `cmd` for supervised spawn and spawn it. On Unix this
   /// installs a `pre_exec` hook running `setsid()` so the child
-  /// becomes its own session + process-group leader. On Windows it
-  /// will set `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` (Unit 6).
+  /// becomes its own session + process-group leader. On Windows this
+  /// sets `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` and assigns
+  /// the child to a fresh Job Object with `KILL_ON_JOB_CLOSE`.
   fn spawn_supervised(&self, cmd: Command) -> std::io::Result<SpawnedChild>;
 
   /// Send the graceful-shutdown signal to `target`. On Unix this is
-  /// `SIGTERM`. On Windows it will be `GenerateConsoleCtrlEvent(
-  /// CTRL_BREAK_EVENT, …)` for `ProcessGroup` and a graceful close on
-  /// `SinglePid`.
+  /// `SIGTERM` (delivered to the PGID for `ProcessGroup`). On Windows
+  /// this delegates to [`Self::signal_kill`] because
+  /// `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, …)` cannot reach a
+  /// `CREATE_NO_WINDOW` child (different consoles) and llama-server
+  /// has nothing to flush — see the Windows impl for full rationale.
   ///
   /// Best-effort: silently swallows `ESRCH` (process already gone).
   fn signal_graceful(&self, target: SignalTarget);
 
-  /// Force-kill `target`. On Unix this is `SIGKILL`. On Windows it
-  /// will be `TerminateJobObject` (`ProcessGroup`) or
-  /// `TerminateProcess` (`SinglePid`).
+  /// Force-kill `target`. On Unix this is `SIGKILL`. On Windows this
+  /// is `TerminateJobObject` (`ProcessGroup`) or `TerminateProcess`
+  /// (`SinglePid`).
   ///
   /// Best-effort: silently swallows `ESRCH`.
   fn signal_kill(&self, target: SignalTarget);
 
   /// True iff `pid` corresponds to a live process. Implemented via
   /// `kill(pid, 0)` on Unix; `OpenProcess` + `GetExitCodeProcess` on
-  /// Windows (Unit 6).
+  /// Windows.
   fn is_alive(&self, pid: u32) -> bool;
+
+  /// Release any backend-side bookkeeping associated with `pid` (Job
+  /// Object handles on Windows; no-op on Unix). Call after the
+  /// supervised child has been observed exited so the controller's
+  /// per-pid map doesn't grow unboundedly across the daemon's
+  /// lifetime. Idempotent: calling with an unknown / already-forgotten
+  /// pid is a no-op.
+  fn forget(&self, pid: u32);
 }
 
 /// Build the production [`ProcessControl`] for the current platform.
@@ -203,6 +214,10 @@ impl ProcessControl for UnixProcessControl {
       .map(|e| e == libc::EPERM)
       .unwrap_or(false)
   }
+
+  fn forget(&self, _pid: u32) {
+    // No per-pid bookkeeping on Unix.
+  }
 }
 
 #[cfg(unix)]
@@ -236,8 +251,11 @@ fn kill_target(target: SignalTarget, sig: libc::c_int) {
 /// The job-object handles are stashed in a PID-keyed map inside the
 /// controller because they must outlive the `Child` (closing the handle
 /// would immediately kill the child via the kill-on-close flag). The
-/// map grows by one per supervised spawn — daemon lifetimes and launch
-/// counts are bounded enough that explicit eviction is unnecessary.
+/// map shrinks via [`ProcessControl::signal_kill`] on the
+/// `ProcessGroup` path and via [`ProcessControl::forget`] when the
+/// supervisor observes a natural child exit. Without `forget` the map
+/// would leak one HANDLE per launch across the daemon's lifetime —
+/// meaningful under idle-TTL eviction churn.
 #[cfg(windows)]
 pub struct WindowsProcessControl {
   jobs: std::sync::Mutex<std::collections::HashMap<u32, JobHandle>>,
@@ -445,6 +463,21 @@ impl ProcessControl for WindowsProcessControl {
       TerminateProcess(handle, 1);
       CloseHandle(handle);
     }
+  }
+
+  fn forget(&self, pid: u32) {
+    if pid == 0 {
+      return;
+    }
+    // Remove + drop the JobHandle. `Drop` closes the kernel handle;
+    // KILL_ON_JOB_CLOSE is a no-op here because the supervisor only
+    // calls `forget` after observing the child exited — the job is
+    // already empty.
+    let mut guard = self
+      .jobs
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = guard.remove(&pid);
   }
 
   fn is_alive(&self, pid: u32) -> bool {
