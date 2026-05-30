@@ -56,14 +56,6 @@ fn allocate_port_range() -> PortRange {
   }
 }
 
-// Skipped on Windows for the same R2 reason as the other
-// supervisor-lifecycle tests: `stop_model` falls through to the 5s
-// grace + TerminateJobObject path because CTRL+BREAK can't reach a
-// CREATE_NO_WINDOW child (different consoles).
-#[cfg_attr(
-  windows,
-  ignore = "windows: stop_model grace overruns deadline — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
   let state = unique_temp("happy");
@@ -299,12 +291,6 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
   std::fs::remove_dir_all(&model_dir).ok();
 }
 
-// See `start_model_drives_supervisor_status_logs_stop_and_last_params`
-// for the shared R2 rationale.
-#[cfg_attr(
-  windows,
-  ignore = "windows: stop_model grace overruns deadline — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prefer_port_falls_back_to_range_allocator_when_busy() {
   // `prefer_port` is the soft preference the TUI uses to honour the
@@ -484,12 +470,6 @@ async fn start_model_refuses_forbidden_extras_without_leaking_secret_values() {
   std::fs::remove_dir_all(&model_dir).ok();
 }
 
-// See `start_model_drives_supervisor_status_logs_stop_and_last_params`
-// for the shared R2 rationale (this test does two start/stop cycles).
-#[cfg_attr(
-  windows,
-  ignore = "windows: stop_model grace overruns deadline — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn last_params_persists_only_user_supplied_knob_deltas() {
   // Source-chip semantics on the editor depend on a precise contract:

@@ -325,17 +325,6 @@ async fn run_dispatch_at(state_dir: Option<&Path>, model_dir: &Path, command: Co
   code
 }
 
-// Skipped on Windows: tracked in TODO.md R2 under "Windows integration
-// test triage". Six sister tests in this file now run green on Windows
-// after the Phase-B Job Object fix; this one + the three below depend
-// on multi-step start/stop chains or on killing the in-process daemon
-// mid-test, both of which surface a separate Windows quirk (the
-// supervisor's CTRL+BREAK path doesn't reach a CREATE_NO_WINDOW child
-// because they have different consoles) that needs its own brainstorm.
-#[cfg_attr(
-  windows,
-  ignore = "windows: multi-step supervisor chain — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_script_round_trip_list_start_status_logs_stop() {
   let h = spawn_daemon_with_model("happy", "m.gguf", "llama").await;
@@ -718,12 +707,6 @@ async fn presets_list_json_emits_array_for_agents() {
   h.shutdown().await;
 }
 
-// See `agent_script_round_trip_list_start_status_logs_stop` for the
-// shared rationale.
-#[cfg_attr(
-  windows,
-  ignore = "windows: multi-step supervisor chain — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn start_preset_chain_seeds_supervisor_with_saved_params() {
   let h = spawn_daemon_with_model("pchain", "m.gguf", "llama").await;
@@ -793,12 +776,6 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
   h.shutdown().await;
 }
 
-// See `agent_script_round_trip_list_start_status_logs_stop` for the
-// shared rationale (this test spawns two supervised children).
-#[cfg_attr(
-  windows,
-  ignore = "windows: multi-step supervisor chain — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
   let h = spawn_daemon_with_model_wide_range("dup", "m.gguf", "llama").await;
@@ -871,9 +848,6 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
   h.shutdown().await;
 }
 
-// See `agent_script_round_trip_list_start_status_logs_stop` for the
-// shared rationale (this test explicitly kills the daemon mid-flight).
-#[cfg_attr(windows, ignore = "windows: daemon-kill mid-test — R2 follow-up")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn logs_follow_returns_daemon_unreachable_when_daemon_dies() {
   let mut h = spawn_daemon_with_model_wide_range("logsdrop", "m.gguf", "llama").await;

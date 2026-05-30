@@ -116,16 +116,6 @@ async fn build_state(registry: SupervisorRegistry, log_dir: &Path) -> Arc<ProxyS
   ProxyState::from_context(&ctx, false, true)
 }
 
-// Skipped on Windows for the same reason as the four
-// `cli_integration_test` cases in TODO.md R2: `supervisor.stop()` on
-// Windows falls through to the 5s grace + TerminateJobObject path
-// because CTRL+BREAK can't reach a CREATE_NO_WINDOW child (different
-// consoles), and the test's 5s eviction-poll deadline is too tight
-// for that path under parallel CI load.
-#[cfg_attr(
-  windows,
-  ignore = "windows: 5s eviction grace overruns poll — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sweep_evicts_idle_auto_start_supervisor() {
   let dir = unique_temp("autostart-idle");
@@ -185,13 +175,6 @@ async fn sweep_skips_manual_launched_supervisor() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-// See `sweep_evicts_idle_auto_start_supervisor` for the shared
-// rationale (this test exercises the same eviction-stop path after
-// dropping the inflight guard).
-#[cfg_attr(
-  windows,
-  ignore = "windows: 5s eviction grace overruns poll — R2 follow-up"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sweep_skips_auto_start_with_inflight_request() {
   let dir = unique_temp("inflight-skip");

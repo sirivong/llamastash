@@ -378,26 +378,24 @@ impl ProcessControl for WindowsProcessControl {
   }
 
   fn signal_graceful(&self, target: SignalTarget) {
-    use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
-    let pid = target.pid();
-    if pid == 0 {
-      return;
-    }
-    // CTRL+BREAK to the spawned process group. For supervised children
-    // this reaches the whole group via CREATE_NEW_PROCESS_GROUP at
-    // spawn. For external single-pid targets the API will succeed iff
-    // the foreign process happens to be a group leader — best-effort
-    // matches the contract.
+    // Graceful shutdown on Windows is structurally impossible for our
+    // supervised children: we spawn with `CREATE_NO_WINDOW` so the
+    // child runs against its own hidden console. `GenerateConsoleCtrlEvent`
+    // only delivers to processes sharing the *caller's* console, so a
+    // CTRL+BREAK from here is silently dropped, every call. Pretending
+    // to do "graceful then kill" just burns the full grace window
+    // before the inevitable `TerminateJobObject`.
     //
-    // Reliability for `llama-server.exe`'s SIGINT handler under
-    // DETACHED_PROCESS is the open question called out in the plan;
-    // the supervisor's SIGTERM→SIGKILL grace window escalates to
-    // `signal_kill` if the graceful path doesn't reap the child.
+    // For our actual supervised workload (`llama-server.exe`, an
+    // OpenAI-compat HTTP inference server with no persistent state to
+    // flush) and the test-fixture `fake_llama_server.exe`, an immediate
+    // job termination is identical in effect to a graceful shutdown
+    // that the child would ignore anyway. So on Windows, "graceful"
+    // is just "kill" — instant, deterministic, no wasted grace.
     //
-    // SAFETY: Win32 syscall, no memory referenced.
-    unsafe {
-      GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
-    }
+    // Unix keeps the SIGTERM → wait → SIGKILL sequence because there
+    // the SIGTERM actually reaches the child via the process group.
+    self.signal_kill(target);
   }
 
   fn signal_kill(&self, target: SignalTarget) {
