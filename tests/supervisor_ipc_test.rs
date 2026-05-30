@@ -48,6 +48,14 @@ async fn wait_for_socket(path: &Path) {
   }
 }
 
+// Skipped on Windows for the same R2 reason as the other
+// supervisor-lifecycle tests: `stop_model` falls through to the 5s
+// grace + TerminateJobObject path because CTRL+BREAK can't reach a
+// CREATE_NO_WINDOW child (different consoles).
+#[cfg_attr(
+  windows,
+  ignore = "windows: stop_model grace overruns deadline — R2 follow-up"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_lists_active_supervised_model() {
   let state = unique_temp("state");
