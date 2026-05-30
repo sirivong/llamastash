@@ -655,6 +655,12 @@ mod tests_windows {
 
   #[test]
   fn is_alive_returns_false_for_zero() {
+    // pid 0 is uniformly special-cased to "dead" across both backends
+    // for a consistent contract — `OpenProcess(_, _, 0)` returns NULL
+    // on Windows so the syscall would already say dead, but the
+    // explicit early-return keeps the surface identical to the Unix
+    // backend (where `kill(0, …)` would otherwise signal the caller's
+    // PGID).
     let ctl = WindowsProcessControl::new();
     assert!(!ctl.is_alive(0), "pid 0 must report dead");
   }
