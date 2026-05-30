@@ -2,6 +2,7 @@ pub mod atomic_write;
 pub mod clipboard;
 pub mod config_patch;
 pub mod datetime;
+pub mod file_security;
 pub mod hex;
 pub mod logging;
 pub mod model_caches;

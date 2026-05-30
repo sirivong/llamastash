@@ -751,26 +751,61 @@ pub(crate) fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
   raw.trim().parse::<i32>().ok().filter(|p| *p > 0)
 }
 
-/// Windows backend for the daemon-liveness probe. Until Unit 7 wires
-/// `LockFileEx`-based ownership detection into `daemon/lockfile.rs`,
-/// this falls back to "PID file exists + the recorded PID is alive
-/// per `ProcessControl::is_alive`". PID reuse can theoretically alias
-/// a long-dead daemon to a live unrelated process; the downstream
-/// `runtime.json` check (`load(&state_dir)` returning `Some`) is what
-/// actually decides whether a control plane is reachable, so the
-/// PID-reuse window only affects the friendly "already running"
-/// message — not correctness.
+/// Windows backend for the daemon-liveness probe. Mirrors the Unix
+/// path exactly: open `daemon.pid` and attempt a non-blocking
+/// `LockFileEx`. If the lock is contended a daemon owns it; read the
+/// recorded PID for the friendly "already running" message. If the
+/// lock acquires (or the file doesn't exist), no daemon is running.
 #[cfg(windows)]
 pub(crate) fn existing_daemon_pid(state_dir: &Path) -> Option<i32> {
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::Storage::FileSystem::{
+    LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+  };
+  use windows_sys::Win32::System::IO::OVERLAPPED;
+  const MAXDWORD: u32 = u32::MAX;
+
   let pidfile = state_dir.join("daemon.pid");
-  let raw = std::fs::read_to_string(&pidfile).ok()?;
-  let pid = raw.trim().parse::<i32>().ok().filter(|p| *p > 0)?;
-  let pc = crate::util::process_control::platform_default();
-  if pc.is_alive(pid as u32) {
-    Some(pid)
-  } else {
-    None
+  let file = std::fs::OpenOptions::new()
+    .read(true)
+    .write(true)
+    .open(&pidfile)
+    .ok()?;
+  // SAFETY: OVERLAPPED is POD; zero-init satisfies LockFileEx's
+  // synchronous-mode contract.
+  let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+  // SAFETY: handle borrowed from `file` for the call's duration.
+  let ok = unsafe {
+    LockFileEx(
+      file.as_raw_handle() as _,
+      LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+      0,
+      MAXDWORD,
+      MAXDWORD,
+      &mut overlapped as *mut _,
+    )
+  };
+  if ok != 0 {
+    // We acquired the lock — no daemon is running. Release before
+    // dropping so the file handle close is the only side effect.
+    let mut o2: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // SAFETY: matched UnlockFileEx for the LockFileEx call above.
+    unsafe {
+      UnlockFileEx(
+        file.as_raw_handle() as _,
+        0,
+        MAXDWORD,
+        MAXDWORD,
+        &mut o2 as *mut _,
+      );
+    }
+    return None;
   }
+  // Lock contended → a daemon owns the pidfile. Read the recorded PID
+  // for the friendly message; ownership is decided by the lock, the
+  // PID value is informational.
+  let raw = std::fs::read_to_string(&pidfile).ok()?;
+  raw.trim().parse::<i32>().ok().filter(|p| *p > 0)
 }
 
 // Re-export the symbols downstream callers reach for.

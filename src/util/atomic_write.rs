@@ -16,6 +16,7 @@
 //! the rename target dir has a permissive umask whose mode bits a
 //! future `rename` implementation might pick up.
 
+#[cfg(unix)]
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -65,6 +66,12 @@ pub fn write_secure(
     // The file contents are durable after the tempfile fsync above, but the
     // rename is not crash-safe until the parent directory is fsynced too.
     File::open(dir)?.sync_all()?;
+  }
+  // Windows analogue of the 0o600 chmod: protected DACL granting access
+  // only to the file owner. No-op on Unix (the chmod above handled it).
+  // Best-effort — `set_owner_only_dacl` swallows failures.
+  if mode_unix.is_some() {
+    crate::util::file_security::set_owner_only_dacl(final_path);
   }
   Ok(body.len() as u64)
 }

@@ -1287,69 +1287,90 @@ struct InitConfigAdditions {
   llama_server_path: Option<String>,
 }
 
-/// Advisory flock around `init_snapshot.json` writes so two concurrent
+/// Advisory lock around `init_snapshot.json` writes so two concurrent
 /// `llamastash init` runs can't clobber each other's persisted state.
-/// Failure to acquire (unsupported FS, EACCES on the lock file) is
-/// non-fatal — the lock is best-effort and the caller proceeds
-/// unsynchronised, which is no worse than v2's pre-fix behaviour.
+/// Failure to acquire (unsupported FS, EACCES / ERROR_LOCK_VIOLATION
+/// on the lock file) is non-fatal — the lock is best-effort and the
+/// caller proceeds unsynchronised, which is no worse than v2's
+/// pre-fix behaviour. Uses `flock` on Unix and `LockFileEx` on
+/// Windows; both release on handle close.
 struct SnapshotWriteLock {
-  // Held to keep the underlying fd alive — flock releases on close.
-  // Allowed because the field is never read directly: its presence
-  // is what extends the fd lifetime, and `Drop` on `File` is what
-  // releases the flock.
-  #[cfg(unix)]
+  // Held to keep the underlying handle alive — both flock and
+  // LockFileEx release on close. The field is never read directly:
+  // its presence is what extends the handle lifetime, and `Drop` on
+  // `File` is what releases the lock.
   #[allow(dead_code)]
   file: Option<std::fs::File>,
 }
 
 impl SnapshotWriteLock {
   fn acquire(state_dir: &std::path::Path) -> Self {
-    #[cfg(unix)]
-    {
-      let path = state_dir.join("init_snapshot.json.lock");
-      // Ensure the state dir exists so the lock file open below
-      // doesn't ENOENT on a first-run machine.
-      let _ = std::fs::create_dir_all(state_dir);
-      match std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .read(true)
-        .open(&path)
-      {
-        Ok(file) => {
-          use std::os::fd::AsRawFd;
-          // SAFETY: `flock` is a stable POSIX syscall with no
-          // memory-safety implications.
-          //
-          // `LOCK_NB` (non-blocking) is critical: this function is
-          // called from an async context. A blocking `LOCK_EX` would
-          // stall the Tokio worker thread if a concurrent `llamastash
-          // init` already holds the lock. EWOULDBLOCK / EAGAIN map
-          // to "couldn't lock now" which we treat as best-effort and
-          // proceed unsynchronised — matching the wider best-effort
-          // stance for snapshot writes documented above.
-          let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-          if rc == 0 {
-            Self { file: Some(file) }
-          } else {
-            Self { file: None }
-          }
-        }
-        Err(_) => Self { file: None },
-      }
-    }
-    #[cfg(not(unix))]
-    {
-      Self {}
+    let path = state_dir.join("init_snapshot.json.lock");
+    // Ensure the state dir exists so the lock file open below doesn't
+    // ENOENT on a first-run machine.
+    let _ = std::fs::create_dir_all(state_dir);
+    let Ok(file) = std::fs::OpenOptions::new()
+      .create(true)
+      .truncate(false)
+      .write(true)
+      .read(true)
+      .open(&path)
+    else {
+      return Self { file: None };
+    };
+    if try_lock_exclusive_nonblocking(&file) {
+      Self { file: Some(file) }
+    } else {
+      Self { file: None }
     }
   }
 }
 
+/// Non-blocking exclusive lock. True iff the lock was acquired and is
+/// now held by `file`. Best-effort: any error is treated as "could
+/// not lock" so the caller can proceed unsynchronised.
+#[cfg(unix)]
+fn try_lock_exclusive_nonblocking(file: &std::fs::File) -> bool {
+  use std::os::fd::AsRawFd;
+  // SAFETY: `flock` is a stable POSIX syscall with no memory-safety
+  // implications. `LOCK_NB` (non-blocking) is critical: this function
+  // is called from an async context. A blocking `LOCK_EX` would stall
+  // the Tokio worker thread if a concurrent `llamastash init` already
+  // holds the lock.
+  let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+  rc == 0
+}
+
+#[cfg(windows)]
+fn try_lock_exclusive_nonblocking(file: &std::fs::File) -> bool {
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::Storage::FileSystem::{
+    LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+  };
+  use windows_sys::Win32::System::IO::OVERLAPPED;
+  const MAXDWORD: u32 = u32::MAX;
+  // SAFETY: OVERLAPPED is POD; zero-init matches LockFileEx's
+  // synchronous-mode contract.
+  let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+  // SAFETY: handle borrowed from `file` outlives the call.
+  let ok = unsafe {
+    LockFileEx(
+      file.as_raw_handle() as _,
+      LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+      0,
+      MAXDWORD,
+      MAXDWORD,
+      &mut overlapped as *mut _,
+    )
+  };
+  ok != 0
+}
+
 impl Drop for SnapshotWriteLock {
   fn drop(&mut self) {
-    // Lock is released when the file descriptor closes; explicit
-    // unlock is unnecessary and `Drop` on `File` handles it.
+    // Lock is released when the file handle closes; explicit unlock
+    // is unnecessary and `Drop` on `File` handles it on both
+    // platforms.
   }
 }
 

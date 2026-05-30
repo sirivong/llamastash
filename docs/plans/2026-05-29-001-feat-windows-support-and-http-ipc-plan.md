@@ -376,7 +376,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 **Verification:** `cargo test --target x86_64-pc-windows-msvc --features test-fixtures` passes on Windows CI lane. Manual: spawn + stop a model on Win11; no orphan `llama-server.exe` after daemon exit.
 
-- [ ] **Unit 7: Windows storage portability — lockfile, snapshot lock, DACL**
+- [x] **Unit 7: Windows storage portability — lockfile, snapshot lock, DACL**
 
 **Goal:** Make `src/daemon/lockfile.rs`, `src/init/wizard.rs` snapshot lock, and the new `runtime.json` + existing `state.json` write paths fully portable. Unix mode-bit code short-circuits on Windows; DACL-restriction takes its place.
 

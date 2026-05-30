@@ -1,31 +1,31 @@
 //! Single-instance enforcement via a PID lockfile with kernel-backed
-//! ownership (`flock(2)` on Unix).
+//! ownership (`flock(2)` on Unix; `LockFileEx` on Windows).
 //!
-//! Why flock and not "is the recorded PID alive?":
+//! Why kernel-backed and not "is the recorded PID alive?":
 //! - If the daemon crashes (SIGKILL, segfault, OOM), the file persists
 //!   with the dead PID. If the OS later recycles that PID for an unrelated
 //!   process, a live-PID probe says "alive" and the new daemon falsely
 //!   reports `AlreadyRunning` — while `daemon status` correctly reports
 //!   "not running" because nothing owns the socket. The two surfaces
 //!   disagree.
-//! - `flock(LOCK_EX | LOCK_NB)` ties ownership to the file descriptor.
+//! - `flock(LOCK_EX | LOCK_NB)` / `LockFileEx(LOCKFILE_EXCLUSIVE_LOCK |
+//!   LOCKFILE_FAIL_IMMEDIATELY)` tie ownership to the file descriptor.
 //!   The kernel releases the lock when the owning process dies, however
-//!   it dies. A surviving pidfile with no flock holder is, by
-//!   construction, stale — no PID-recycling false positive is possible.
+//!   it dies. A surviving pidfile with no holder is, by construction,
+//!   stale — no PID-recycling false positive is possible.
 //!
 //! Lifecycle:
 //! 1. `acquire(state_dir)` opens `daemon.pid` (creating it if missing)
-//!    and attempts a non-blocking exclusive `flock`.
-//! 2. If the `flock` fails with `EWOULDBLOCK`, another live daemon holds
-//!    the lock; read the pid for a friendly message and return
-//!    `AlreadyRunning`.
-//! 3. If the `flock` succeeds, we own the lock. Truncate the file and
-//!    write our PID. The held `File` keeps the lock for the daemon
-//!    lifetime.
-//! 4. On `Drop`, close the fd (kernel releases the lock) and unlink the
-//!    file. A SIGKILL'd daemon still releases the lock at fd-teardown
-//!    time; the file is left behind, which is exactly the "stale" case
-//!    the next `acquire` is built to handle.
+//!    and attempts a non-blocking exclusive lock.
+//! 2. If the lock is contended, another live daemon holds it; read the
+//!    pid for a friendly message and return `AlreadyRunning`.
+//! 3. If the lock succeeds, we own it. Truncate the file and write our
+//!    PID. The held `File` keeps the lock for the daemon lifetime.
+//! 4. On `Drop`, close the fd / handle (kernel releases the lock) and
+//!    unlink the file. A SIGKILL'd or `TerminateProcess`'d daemon still
+//!    releases the lock at handle-teardown time; the file is left behind,
+//!    which is exactly the "stale" case the next `acquire` is built to
+//!    handle.
 
 use std::{
   fs::{File, OpenOptions},
@@ -196,13 +196,55 @@ fn try_flock_exclusive(file: &File) -> io::Result<FlockOutcome> {
   }
 }
 
-#[cfg(not(unix))]
-fn try_flock_exclusive(_file: &File) -> io::Result<FlockOutcome> {
-  // Non-Unix isn't a supported daemon target; refuse to acquire so we
-  // never silently coexist with a peer.
-  Err(io::Error::other(
-    "lockfile flock not supported on this platform",
-  ))
+/// Windows backend: `LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK |
+/// LOCKFILE_FAIL_IMMEDIATELY` covers the same kernel-backed-ownership
+/// contract as POSIX `flock`. The kernel releases the lock when the
+/// HANDLE closes — including via `TerminateProcess` — so a stale
+/// pidfile left behind by an ungraceful daemon death is re-acquirable.
+#[cfg(windows)]
+fn try_flock_exclusive(file: &File) -> io::Result<FlockOutcome> {
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::Storage::FileSystem::{
+    LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+  };
+  use windows_sys::Win32::System::IO::OVERLAPPED;
+
+  // SAFETY: `OVERLAPPED` is a plain-old-data struct; zero-init matches
+  // the documented "synchronous-only" use (no events, no hOffset/Offset
+  // wraparound concerns for the full-range lock below).
+  let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+
+  // Lock the full file range. `MAXDWORD` for both high and low DWORDs
+  // covers any conceivable pidfile content (pidfile is one line of
+  // ASCII; the range is intentionally larger than the file so the lock
+  // is a single-file-scope mutex).
+  const MAXDWORD: u32 = u32::MAX;
+  // SAFETY: handle is borrowed from `file` (lives as long as the call);
+  // `&mut overlapped` is a writable OVERLAPPED the kernel reads/writes.
+  let ok = unsafe {
+    LockFileEx(
+      file.as_raw_handle() as _,
+      LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+      0,
+      MAXDWORD,
+      MAXDWORD,
+      &mut overlapped as *mut _,
+    )
+  };
+  if ok != 0 {
+    return Ok(FlockOutcome::Acquired);
+  }
+  let err = io::Error::last_os_error();
+  // ERROR_LOCK_VIOLATION (33) is what LockFileEx returns when another
+  // process already holds the requested range. ERROR_IO_PENDING (997)
+  // shouldn't fire with LOCKFILE_FAIL_IMMEDIATELY but defensively map
+  // it to Contended too.
+  const ERROR_LOCK_VIOLATION: i32 = 33;
+  const ERROR_IO_PENDING: i32 = 997;
+  match err.raw_os_error() {
+    Some(ERROR_LOCK_VIOLATION) | Some(ERROR_IO_PENDING) => Ok(FlockOutcome::Contended),
+    _ => Err(err),
+  }
 }
 
 fn read_pid(path: &Path) -> Result<i32, LockfileError> {
