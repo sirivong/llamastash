@@ -91,10 +91,16 @@ Linux x86_64.
 
 ### Windows (cold-smoke only)
 
-Status: cold-smoke + manual TUI verify only. Windows AMD GPU
-detection is out of 0.0.2 scope; warm-mode warm-up bench is
-unsupported because it depends on `nvidia-smi` / `rocm-smi` for
-sampling.
+Status: code-complete, end-to-end behavior **not yet verified on a
+real Windows host** as of 0.0.2. The Windows-latest CI lane added in
+Unit 10 is the first lane that will actually exercise the daemon +
+supervisor lifecycle on Windows; the cold-smoke command below
+becomes the per-release verification gate once the maintainer has
+run it manually on a Win11 machine. Until then, treat this section
+as "this is how it's *intended* to run" rather than a tested
+recipe. Windows AMD GPU detection is out of 0.0.2 scope; warm-mode
+warm-up bench is unsupported because it depends on `nvidia-smi` /
+`rocm-smi` for sampling.
 
 Prerequisites:
 
@@ -105,7 +111,8 @@ Prerequisites:
 - For CUDA: matching NVIDIA driver version for the chosen CUDA build.
 - For HIP / Vulkan: vendor driver installed and current.
 
-Run the cold smoke from PowerShell (no admin elevation needed):
+Intended cold-smoke invocation from PowerShell (no admin elevation
+needed):
 
 ```powershell
 cargo run --features test-fixtures,uat -- uat `
@@ -122,10 +129,24 @@ Known platform differences vs. Linux/macOS:
   machine.
 - Symlink-dependent integration tests are gated `#[cfg(unix)]` and
   skip on Windows.
-- TUI is verified manually in Windows Terminal, ConEmu, and
-  PowerShell ISE; the keybinding + colour matrix is the same as the
-  macOS/Linux verify, with CTRL combinations as the only platform-
-  specific surface to retest after a TUI change.
+
+Open verification work (to be done on a real Win11 host before tag
+push):
+
+- [ ] Confirm `llamastash init` picks the right `win-<accel>-x64.zip`
+      asset and extracts cleanly.
+- [ ] Confirm `daemon start` (detached) writes `runtime.json` under
+      `%LOCALAPPDATA%\llamastash` with the protected DACL applied.
+- [ ] Confirm `daemon stop` (graceful CTRL+BREAK) reaps the
+      supervised `llama-server.exe` within the grace window.
+- [ ] TUI manual verify on Windows Terminal: keybindings (especially
+      CTRL combinations), Unicode/symbol rendering, colour palette,
+      mouse selection.
+- [ ] Cold-smoke UAT report JSON is the same shape as Linux/macOS.
+
+Document the actual observed behavior here once verified; remove the
+"not yet verified" disclaimer at the top of this section at that
+point.
 
 ### HuggingFace cache pre-population (all backends)
 
