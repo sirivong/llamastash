@@ -98,18 +98,22 @@ Two release tracks:
 - [x] **IP**: Release setup validation (CI/CD etc).
 - [x] Setup llamastash.dev domain
 - [x] Release tag 0.0.1
+
+## R2 (v0.0.2 checklist)
+
 - [x] **IP**: **R1 launch promotion** — telling the world about v0.0.1.
   - [ ] Release blog.
   - [ ] Social promotion — research an approach for max reach.
-
-## R2 (v0.0.2 roadmap)
-
 - [ ] **IP**: Agent run UAT
-- [ ] Publish to Clawhub/Hermes/etc
-- [ ] Publish to https://www.skills.sh/
 - [ ] **Windows AMD GPU detection.** Today Windows AMD hosts get "GPU detection unavailable" in the host pane (daemon + proxy + supervisor still work). Follow-up brainstorm needs to pick a probe path: DXGI (broadest reach, querying adapter info) vs. WMI (`Win32_VideoController`, slow but standard) vs. ADLX (AMD's official C SDK, most accurate but vendor-specific). 0.0.2 plan §Scope Boundaries.
 - [ ] Verify in WIndows
-- [ ] **Need brainstorm/plan**: **SSE for `logs_tail` streaming.** Today the CLI polls `logs_tail` every 250 ms over HTTP and de-dupes (works correctly; not a regression). SSE would collapse N polls/sec into one long-lived connection. Unit 3 of the 0.0.2 plan was explicitly deferred — needs its own brainstorm + plan.
+  - `llamastash daemon start` (the `actual start_detached_with_exe` path, not `cargo test`) on Win11. Confirm supervisor pumps reach Ready when the daemon was launched via
+    `DETACHED_PROCESS` (finding #2).
+  - `install.ps1` against a tagged release end-to-end: download → SHA256SUMS verify → extract → PATH update.
+  - Protected `DACL` on `%LOCALAPPDATA%\llamastash\runtime.json` via `icacls`. The Linux audit only proves the syscall returned success.
+  - `CTRL+BREAK` non-delivery to a real `llama-server.exe` (validates the `signal_graceful = signal_kill` decision under the actual workload).
+  - Long-running daemon + repeated launch churn → check `Handle Count` in Task Manager Performance tab to confirm finding #1 in practice.
+  - Scoop install from the live bucket: `scoop bucket add llamastash https://github.com/llamastash/scoop-llamastash; scoop install llamastash`.
 - [x] **IP**: Windows support including scoop — landed via [`docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`](docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md) in 0.0.2. HTTP-loopback IPC unification, Job Object process control, LockFileEx + DACL hardening, .zip extraction, win-cpu/win-vulkan/win-cuda/win-hip asset routing, install.ps1, Scoop bucket auto-published via release.yml. See below for Windows follow-ups deferred from 0.0.2.
 - [x] **IP**: AUR package
 - [x] **IP**: Offer to update OpenCode and other supported tools (lets see what popular tools we can support) during `init`. Init should provide a multiselect of tools to choose (skip if none choosen) and then update the config for those tools to point to the proxy.
@@ -131,6 +135,8 @@ Two release tracks:
 
 ### High priority
 
+- [ ] Publish to Clawhub/Hermes/etc
+- [ ] Publish to https://www.skills.sh/
 - [ ] `start` should support advanced params like TUI.
 - [ ] **Need brainstorm/plan**: Look into gpu/cpu offload split
 - [ ] Manual UAT smoke run
@@ -145,6 +151,7 @@ Two release tracks:
 - [ ] Benchmark against Ollama, LMStudio and other popular options.
   - [ ] AMD GPU : Linux
     - [ ] gemma-3-4b-it.Q3_K_M
+- [ ] **Need brainstorm/plan**: **SSE for `logs_tail` streaming.** Today the CLI polls `logs_tail` every 250 ms over HTTP and de-dupes (works correctly; not a regression). SSE would collapse N polls/sec into one long-lived connection. Unit 3 of the 0.0.2 plan was explicitly deferred — needs its own brainstorm + plan.
 - [ ] **Build CUDA llama.cpp prebuilts in CD** — ggml-org ships CUDA only for Windows (`cudart-llama-bin-win-cuda-{12.4,13.3}-x64.zip`); Linux+NVIDIA users get routed to the Vulkan prebuilt today, which is ~10–30% slower than native CUDA for LLM inference. Building CUDA doesn't need a GPU runner (only `nvcc`), so a standard `ubuntu-latest` runner + `Jimver/cuda-toolkit` action + `cmake -DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES="70;75;80;86;89;90"` produces a fat binary covering Volta→Hopper. Publish to `llamastash/llamastash` releases tagged with the same `bNNNN` as the upstream llama.cpp tag so `pick_release_with_asset` keeps working. Then extend `pick_asset_suffix` in `src/init/install/gh_releases.rs:70` with a CUDA branch for Linux+NVIDIA (parameterise `RELEASES_URL` per-asset), and add a wizard prompt to choose CUDA vs Vulkan. Static-link libcudart (Ollama precedent) so users don't need the CUDA toolkit installed — adds ~100MB but zero user-side prereqs. Scope: ~1–2 days for workflow + routing + tests. Folds into the broader [version-drift brainstorm](#) above since both questions share the "do we own a llama.cpp build pipeline?" decision.
 - [ ] **Need brainstorm/plan**: **Anthropic `/v1/messages` compatibility shim** on top of the OpenAI-compat proxy. Most agents do OpenAI; Claude Code prefers Anthropic shape.
 - [ ] **Need brainstorm/plan**: **LAN-exposed HTTP surfaces — auth + TLS + LAN binding for the proxy.** Today the OpenAI-compat proxy is loopback-only. The HTTP-IPC refactor in 0.0.2 keeps the two listeners structurally separate so the proxy's R34 LAN-binding future stays available without touching the control plane. Brainstorm-grade work; not a small feature.
@@ -158,6 +165,9 @@ Two release tracks:
   - [ ] **`CTRL_BREAK_EVENT` reliability for `llama-server.exe`** — currently relies on the SIGTERM→SIGKILL grace window escalating to `TerminateJobObject` if CTRL+BREAK doesn't reach the child. If the grace window fires consistently, file upstream issue against llama.cpp Windows binary's signal handler. 0.0.2 plan §Deferred to Implementation.
   - [ ] **Optional graceful-stop path for Windows.** Today `signal_graceful` on Windows delegates straight to `signal_kill` (TerminateJobObject) because `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, …)` can't reach a `CREATE_NO_WINDOW` child (different consoles) — see `src/util/process_control.rs`. This is fine for `llama-server` which has nothing to flush, but if we ever supervise a stateful binary, a real graceful path would need either (a) a shared-console spawn so CTRL+BREAK is delivered, or (b) an HTTP `/shutdown` endpoint on the supervised process. Not a 0.0.2 blocker.
   - [ ] **`tests/tui_chat_smoke_test.rs` parallel-test contention on Windows.** Five tests (`chat_stream_drains_deltas_and_signals_finished`, `embed_returns_dim_and_preview`, `chat_stream_surfaces_http_4xx_as_error_message`, `chat_stream_skips_malformed_sse_frame_and_emits_delta`, `rerank_returns_sorted_scores`) are `#[cfg_attr(windows, ignore)]`. Each spins a full daemon + supervisor + fake_llama_server + reqwest HTTP client per test, and cargo test runs them in parallel — on the small windows-latest runner the cumulative process/port/socket churn pushes them past cargo's 60s "running too long" reporter into hangs. The supervisor surface is otherwise well-covered by `supervisor_ipc_test`, `start_model_ipc_test`, and `supervisor_lifecycle_test` (all green on Windows). Follow-up options: serialize via a process-wide `std::sync::Mutex`, restructure to share one daemon across the binary, or move the HTTP-client smoke coverage off the supervisor stack entirely.
+  - [ ] **`safe_extract_zip` duplicate-path overwrites silently** — two zip entries with the same `safe_rel` will pass `safe_relative_path` and `File::create` overwrites the first. Same characteristic on the tar codepath. Cheap defence: a `HashSet<PathBuf>` of seen entries → refuse on collision. Low risk because release zips are auto-built from a clean dir; only matters if a non-llamastash zip is ever piped through the same extractor or if the GitHub Release signing chain is compromised. See `src/init/install/safe_extract.rs:410-415` (and the tar equivalent ~L220).
+  - [ ] **Windows orphan adoption downgrades to single-PID kills** — when a daemon restart re-adopts a still-live `llama-server` PID, the new daemon doesn't have a `JobHandle` for it (the Job belonged to the previous `WindowsProcessControl` instance). A later `signal_kill(ProcessGroup(adopted_pid))` misses the map and falls through to `OpenProcess + TerminateProcess`, killing only the immediate child. `llama-server.exe` doesn't spawn descendants today so it's theoretical — but worth a module-doc note so it isn't a footgun when another supervised binary forks. See `src/daemon/orphans.rs:162` + `src/util/process_control.rs:401-448`.
+  - [ ] **`atomic_write.rs` DACL race window on Windows** — order is `persist` (rename) → `set_owner_only_dacl` (apply DACL). Between those calls the file at the final path carries the default inherited ACL. Microseconds wide and bounded by `%LOCALAPPDATA%`'s per-user inheritance, so not exploitable in any normal setup — but the rationale should live at the write-then-tighten site, not only in `file_security.rs` module docs. See `src/util/atomic_write.rs:62-75`.
 
 ### Low priority
 
