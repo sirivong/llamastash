@@ -7,9 +7,11 @@
 //! - a substring matched case-insensitively against the file name and
 //!   the parent directory.
 //!
-//! Running-launch references (used by `stop`, `logs`) accept either a
-//! `LaunchId` (e.g. `L3`) or a port number. Multiple matches surface
-//! as `MODEL_NOT_FOUND` with a disambiguation hint.
+//! Running-launch references (used by `stop`, `logs`) accept a
+//! `LaunchId` (e.g. `L3`), a port number, or a case-insensitive
+//! substring of the running model's file name / parent directory.
+//! Multiple matches surface as `MODEL_NOT_FOUND` with a
+//! disambiguation hint.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -536,16 +538,22 @@ fn parse_external_row(v: &Value) -> Option<ExternalRow> {
   })
 }
 
-/// Resolve a `--id-or-port` reference against the running snapshot.
-/// Numeric → port match; otherwise → launch-id match. Multiple
-/// matches (e.g. two launches on the same port — shouldn't happen but
-/// guard anyway) surface as `MODEL_NOT_FOUND`.
+/// Resolve a reference against the running snapshot. Tiers, first hit wins:
+/// 1. numeric → port match;
+/// 2. exact (case-insensitive) launch-id (`L<n>`);
+/// 3. case-insensitive substring of the model file name or its parent dir —
+///    the same reference shape `start` / `show` / `presets` / `favorites`
+///    accept against the catalog, here matched against the running launches
+///    (usage.md §Concepts "Model references"). So `logs gemma` / `stop qwen`
+///    work, not just `logs L3` / `stop 41100`.
+///
+/// Multiple matches surface as `MODEL_NOT_FOUND` with the launch ids listed.
 pub fn resolve_running(rows: &[RunningRow], reference: &str) -> Result<RunningRow, CliExit> {
   let needle = reference.trim();
   if needle.is_empty() {
     return Err(CliExit::new(
       MODEL_NOT_FOUND,
-      "empty target; supply a launch id (e.g. L3) or a port",
+      "empty target; supply a launch id (e.g. L3), a port, or a model name",
     ));
   }
   if let Ok(port) = needle.parse::<u16>() {
@@ -560,7 +568,20 @@ pub fn resolve_running(rows: &[RunningRow], reference: &str) -> Result<RunningRo
     .iter()
     .filter(|r| r.launch_id.to_lowercase() == lower)
     .collect();
-  single_or_error(by_id, reference)
+  if !by_id.is_empty() {
+    return single_or_error(by_id, reference);
+  }
+  // Fall back to a name / parent-dir substring against the running rows.
+  let by_name: Vec<&RunningRow> = rows
+    .iter()
+    .filter(|r| {
+      let path = std::path::Path::new(&r.model_path);
+      let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+      let parent = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+      name.to_lowercase().contains(&lower) || parent.to_lowercase().contains(&lower)
+    })
+    .collect();
+  single_or_error(by_name, reference)
 }
 
 fn single_or_error(matches: Vec<&RunningRow>, reference: &str) -> Result<RunningRow, CliExit> {
@@ -751,6 +772,52 @@ mod tests {
     }];
     let err = resolve_running(&rows, "9999").unwrap_err();
     assert_eq!(err.code, MODEL_NOT_FOUND);
+  }
+
+  #[test]
+  fn resolve_running_by_name_substring() {
+    let row = |id: &str, path: &str, port: u16| RunningRow {
+      launch_id: id.into(),
+      model_path: path.into(),
+      id: None,
+      port,
+      mode: "chat".into(),
+      state: "ready".into(),
+      state_cause: None,
+      pid: Some(1),
+      ready_at: None,
+      params: None,
+      latest_rss_bytes: None,
+      latest_cpu_pct: None,
+    };
+    let rows = vec![
+      row("L1", "/cache/gemma-4-E2B-it-Q4_K_M.gguf", 41100),
+      row("L2", "/cache/qwen3-reranker-0.6b-q8_0.gguf", 41101),
+    ];
+    // File-name substring — the documented model reference — resolves the
+    // running launch (this is the F-04 regression: only L<n>/port worked).
+    assert_eq!(resolve_running(&rows, "gemma").unwrap().launch_id, "L1");
+    assert_eq!(
+      resolve_running(&rows, "GEMMA-4-E2B-it-Q4_K_M.gguf")
+        .unwrap()
+        .launch_id,
+      "L1"
+    );
+    assert_eq!(resolve_running(&rows, "reranker").unwrap().launch_id, "L2");
+    // launch-id and port still take precedence and behave as before.
+    assert_eq!(resolve_running(&rows, "L2").unwrap().launch_id, "L2");
+    assert_eq!(resolve_running(&rows, "41100").unwrap().launch_id, "L1");
+    // A substring matching multiple running launches (shared parent dir)
+    // disambiguates rather than picking arbitrarily.
+    assert_eq!(
+      resolve_running(&rows, "cache").unwrap_err().code,
+      MODEL_NOT_FOUND
+    );
+    // No match.
+    assert_eq!(
+      resolve_running(&rows, "nope").unwrap_err().code,
+      MODEL_NOT_FOUND
+    );
   }
 
   #[test]

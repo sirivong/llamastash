@@ -6,6 +6,13 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- **`logs` and `stop` accept a model-name reference.** Both only resolved a
+  `<launch_id>` or port, so `logs qwen` / `stop gemma` failed with "no
+  running launch matches" even though `start` / `show` / `presets` /
+  `favorites` accept that reference — contradicting the documented model-
+  reference contract. They now also match a case-insensitive substring of a
+  running launch's file name or parent dir (ambiguous → exit `66` with the
+  candidate ids). `ext-<pid>` / port / launch-id behaviour is unchanged.
 - **A malformed config is rejected loudly, not silently defaulted.** A bad
   value or an unknown key inside a `deny_unknown_fields` block (e.g. a typo
   under `[proxy]`) used to log one buried `WARN` and boot on defaults —

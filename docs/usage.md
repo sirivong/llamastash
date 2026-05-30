@@ -257,7 +257,7 @@ Modes are strict: when the catalog reports `mode_hint = unknown` and no `--mode`
 
 ### `llamastash stop <target>` / `llamastash stop --all`
 
-Stop a managed launch by `<launch_id>` (e.g. `L3`), by port, or — for unmanaged processes the daemon surfaced — by `ext-<pid>` or bare PID.
+Stop a managed launch by `<launch_id>` (e.g. `L3`), by port, by a case-insensitive substring of the running model's file name or parent dir (e.g. `stop qwen`), or — for unmanaged processes the daemon surfaced — by `ext-<pid>` or bare PID. A name substring that matches more than one running launch exits `66` with the candidate launch ids.
 
 ```
 llamastash stop <target>     # exit 68 on failure, 66 on no match
@@ -282,7 +282,7 @@ The `proxy` block is documented in detail under [Proxy → Is the proxy up?](#is
 
 ### `LlamaStash logs <target>`
 
-Tail (or follow) a launch's log file.
+Tail (or follow) a launch's log file. `<target>` is a `<launch_id>` (e.g. `L3`), a port, or a case-insensitive substring of the running model's file name / parent dir (e.g. `logs qwen`). An ambiguous name exits `66` with the matching launch ids.
 
 ```
 LlamaStash logs <target> [-n N] [-f]
