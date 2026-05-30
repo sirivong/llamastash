@@ -254,7 +254,7 @@ A TODO entry tracks the AMD/HIP `no_mmap` measurement follow-up.
 
 ## Common gotchas
 
-- The CLI/TUI/daemon are one binary. `cargo run -- daemon start` and `cargo run` (TUI) talk to each other via the same socket — running two `cargo run` invocations in parallel without distinct `LLAMASTASH_SOCKET` will both attach to the same daemon.
+- The CLI/TUI/daemon are one binary. `cargo run -- daemon start` and `cargo run` (TUI) attach to the same daemon via `runtime.json` (URL + bearer token) under the state dir — running two `cargo run` invocations in parallel without distinct `LLAMASTASH_STATE_DIR` will both attach to the same daemon.
 - Integration tests bind to a temp dir per test (`unique_temp_dir(label)`); never share `state_dir` between tests, or they'll race the lockfile.
 - `cargo build` (without `--features test-fixtures`) intentionally omits `fake_llama_server` and `_test_sleep`. CI runs both with and without the feature to catch accidental dependencies on test-only surface.
 - `cargo install` artifacts deliberately exclude `src/gguf/test_fixtures` and the `_test_sleep` IPC method via feature gating — don't move them out from behind `#[cfg(any(test, feature = "test-fixtures"))]`.

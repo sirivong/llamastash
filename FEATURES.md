@@ -60,9 +60,9 @@ New GGUFs anywhere under the scan roots appear without restarting the daemon or 
 
 ### Daemon-on-demand
 
-A single binary plays TUI, CLI, and background daemon. The first client (TUI or CLI) auto-spawns the daemon if no socket is present; subsequent clients reuse it. Running models survive TUI close and daemon restart via process detach and a three-factor orphan re-adoption check (PID alive + port listening + `/v1/models` path matches the recorded GGUF). See [`docs/usage.md` § `llamastash daemon`](docs/usage.md#llamastash-daemon).
+A single binary plays TUI, CLI, and background daemon. The first client (TUI or CLI) auto-spawns the daemon if its control-plane URL isn't reachable; subsequent clients reuse it via the `runtime.json` handshake file in the state dir. Running models survive TUI close and daemon restart via process detach and a three-factor orphan re-adoption check (PID alive + port listening + `/v1/models` path matches the recorded GGUF). See [`docs/usage.md` § `llamastash daemon`](docs/usage.md#llamastash-daemon).
 
-`--no-spawn` opts out of auto-spawn for scripts that want to fail fast against a missing daemon. Side-by-side daemons are supported via [`LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG_DIR` / `LLAMASTASH_CACHE_DIR` / `LLAMASTASH_SOCKET`](docs/usage.md#environment-variables) overrides.
+`--no-spawn` opts out of auto-spawn for scripts that want to fail fast against a missing daemon. Side-by-side daemons are supported via [`LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG_DIR` / `LLAMASTASH_CACHE_DIR`](docs/usage.md#environment-variables) overrides; each state dir gets its own `runtime.json` so clients route to the right daemon automatically.
 
 ### Multi-model concurrency
 
@@ -195,9 +195,9 @@ The proxy has **no authentication**. This is intentional for the local-machine s
 
 ## Built to be safe to run
 
-### Unix-socket peercred auth (`0600`)
+### Bearer-token loopback control plane
 
-Only your own UID can drive the daemon. The socket sits under the state dir with mode `0600` and peercred-verifies the connecting process's UID against the owner. No tokens to manage; no network surface in the first release.
+Only your own UID can drive the daemon. The control plane is a 127.0.0.1 HTTP listener fronted by a per-daemon-start bearer token; the URL + token live in `runtime.json` under the state dir (`chmod 0600` on Unix, Protected-DACL owner-only on Windows). No off-host surface, no LAN binding, no long-lived secret — the token rotates by construction on every restart. The OpenAI-compat proxy is a separate listener that intentionally has no auth (local same-UID threat model).
 
 ### Hardened fetch substrate
 
@@ -220,4 +220,4 @@ Every persisted file (config, state, snapshot) goes through temp-file + rename. 
 
 ### Side-by-side daemons
 
-[`LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG_DIR` / `LLAMASTASH_CACHE_DIR` / `LLAMASTASH_SOCKET`](docs/usage.md#environment-variables) let you run isolated instances without colliding on persisted state. Useful for testing config changes against a known-good baseline, or running a separate daemon per project.
+[`LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG_DIR` / `LLAMASTASH_CACHE_DIR`](docs/usage.md#environment-variables) let you run isolated instances without colliding on persisted state. Each state dir gets its own `runtime.json` so clients attach to the right daemon automatically. Useful for testing config changes against a known-good baseline, or running a separate daemon per project.

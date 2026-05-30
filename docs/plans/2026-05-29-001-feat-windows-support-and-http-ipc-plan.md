@@ -528,7 +528,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 **Verification:** Three consecutive `release-gate` runs with the Windows lane green. Manual TUI session on Win11 looks usable.
 
-- [ ] **Unit 12: Docs and website sweep — finalize 0.0.2 release**
+- [x] **Unit 12: Docs and website sweep — finalize 0.0.2 release**
 
 **Goal:** Sweep all user-facing docs (repo + website) to reflect the new transport, env-var names, Windows install instructions, and rewritten threat model. Land CHANGELOG, version bump, and any remaining test skip-list audit. Last unit before tag push.
 

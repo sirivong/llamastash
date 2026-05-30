@@ -193,10 +193,11 @@ LLAMASTASH_LLAMA_SERVER=/path/to/llama.cpp/build-vulkan/bin/llama-server \
 Each command:
 
 - Creates a fresh tempdir under `$TMPDIR` (`/tmp` on Linux, `$TMPDIR`
-  on macOS) keyed by `<backend>-<mode>-<pid>-<nanos>`. Set as
-  `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CACHE_DIR` / `LLAMASTASH_SOCKET` /
-  `HF_HOME` for the child processes so the run never touches your
-  real daily-driver state.
+  on macOS, `%TEMP%` on Windows) keyed by `<backend>-<mode>-<pid>-<nanos>`.
+  Set as `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG_DIR` /
+  `LLAMASTASH_CACHE_DIR` / `HF_HOME` for the child processes so the
+  sandboxed daemon writes its own `runtime.json` under the state dir
+  and never touches your real daily-driver state.
 - Runs the 6-step lifecycle (`doctor_preflight` → `init` → `start_model`
   → `smoke_chat` → `stop` → `doctor_postrun`).
 - Writes the JSON report to the `--report-out` path (`-` redirects to

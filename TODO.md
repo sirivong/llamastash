@@ -104,16 +104,17 @@ Two release tracks:
 
 ## R2 (v0.0.2 roadmap)
 
-- [ ] **IP**: Offer to update OpenCode and other supported tools (lets see what popular tools we can support) during `init`. Init should provide a multiselect of tools to choose (skip if none choosen) and then update the config for those tools to point to the proxy.
-- [ ] **IP**: AUR package
-- [ ] **Need brainstorm/plan**: Windows support including scoop.
-- [ ] Publish to clawhub/Hermes/etc
+- [x] **IP**: Windows support including scoop — landed via [`docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`](docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md) in 0.0.2. HTTP-loopback IPC unification, Job Object process control, LockFileEx + DACL hardening, .zip extraction, win-cpu/win-vulkan/win-cuda/win-hip asset routing, install.ps1, Scoop manifest scaffolded (bucket publication deferred). Windows-AMD detection and aarch64-pc-windows-msvc remain on the roadmap.
+- [ ] Publish to Clawhub/Hermes/etc
+- [ ] Publish to https://www.skills.sh/
+- [x] **IP**: AUR package
+- [x] **IP**: Offer to update OpenCode and other supported tools (lets see what popular tools we can support) during `init`. Init should provide a multiselect of tools to choose (skip if none choosen) and then update the config for those tools to point to the proxy.
 - [x] `start/stop` command with no param should offer a clicklack picker. All available models for start and non idle models for stop
 - [x] `list` command should show status/port of running models with glyph if its easy to add
 - [x] `status` command, remove path from normal output but keep in json. Show models name.
 - [x] Wrong size on multipart gguf.
 - [x] Running `make snapshot` gives different results than CI, especially source and scores
-- [x] `show` command shows model info. gguf parsed values, full path, size, etc, arch defauklts, last run vals, and any other useful stuff
+- [x] `show` command shows model info. gguf parsed values, full path, size, etc, arch defaults, last run vals, and any other useful stuff
 - [x] Why does macos show unified memory for GPU in Host panel
 - [x] Idle-TTL eviction for the proxy's auto-started supervisors — landed in `37d389a`. `proxy.idle_ttl_secs` (default 1800 = 30 min, `0` disables) drives a sweeper task that stops Ready auto-start supervisors after the configured idle window. Refcount-gated via an atomic on `ManagedModel` (decremented when the streamed response body drops) so long generations can't be SIGTERM'd mid-stream. Manual launches (`LaunchOrigin::Manual` from TUI/CLI `start`) are exempt, mirroring LM Studio's rule. MRU seeded on auto-start success so a freshly-loaded supervisor has a starting deadline. Unit + integration tests under `proxy::eviction`. Update [`docs/architecture.md §Proxy comparison`](docs/architecture.md#proxy-comparison--ollama-lm-studio-llamastash) to remove the "Not in v1" row.
 - [x] flag to disable proxy fallback (or flip to off by default?)
@@ -132,11 +133,14 @@ Two release tracks:
   - [ ] Apple Metal : macOS
   - [ ] AMD GPU ROCm: Linux
   - [ ] AMD GPU Vulkan: Linux
+  - [ ] AMD GPU Vulkan: Windows
+  - [ ] AMD GPU ROCm: Windows
+  - [ ] NVidia CUDA: Windows
+  - [ ] NVidia Vulkan: Windows
 - [ ] Benchmark against Ollama, LMStudio and other popular options.
   - [ ] AMD GPU : Linux
     - [ ] gemma-3-4b-it.Q3_K_M
 - [ ] **Build CUDA llama.cpp prebuilts in CD** — ggml-org ships CUDA only for Windows (`cudart-llama-bin-win-cuda-{12.4,13.3}-x64.zip`); Linux+NVIDIA users get routed to the Vulkan prebuilt today, which is ~10–30% slower than native CUDA for LLM inference. Building CUDA doesn't need a GPU runner (only `nvcc`), so a standard `ubuntu-latest` runner + `Jimver/cuda-toolkit` action + `cmake -DGGML_CUDA=1 -DCMAKE_CUDA_ARCHITECTURES="70;75;80;86;89;90"` produces a fat binary covering Volta→Hopper. Publish to `llamastash/llamastash` releases tagged with the same `bNNNN` as the upstream llama.cpp tag so `pick_release_with_asset` keeps working. Then extend `pick_asset_suffix` in `src/init/install/gh_releases.rs:70` with a CUDA branch for Linux+NVIDIA (parameterise `RELEASES_URL` per-asset), and add a wizard prompt to choose CUDA vs Vulkan. Static-link libcudart (Ollama precedent) so users don't need the CUDA toolkit installed — adds ~100MB but zero user-side prereqs. Scope: ~1–2 days for workflow + routing + tests. Folds into the broader [version-drift brainstorm](#) above since both questions share the "do we own a llama.cpp build pipeline?" decision.
-- [ ] **Need brainstorm/plan**: check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
 - [ ] **Need brainstorm/plan**: Look into gpu/cpu offload split
 - [ ] **Need brainstorm/plan**: Consider Loopback + LAN binding options for the proxy.
 - [ ] **Need brainstorm/plan**: Anthropic API compatibility.
@@ -147,9 +151,11 @@ Two release tracks:
 ### Low priority
 
 - [ ] **Need brainstorm/plan**: HTTP and MCP surfaces (origin: R34).
+- [ ] **Need brainstorm/plan**: check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
 - [ ] **Need brainstorm/plan**: MLX and vLLM if cheap to add.
 - [ ] **Need brainstorm/plan**: Docker-ready packaging.
-- [ ] llama.cpp version drift — surveyed empirically (2026-05-28). The official llama-server breaking-change tracker ([ggml-org/llama.cpp#9291](https://github.com/ggml-org/llama.cpp/issues/9291)) lists ~30 entries since Sept 2024 (~2/month). Categorised against llamastash's actual exposure surface:
+- [ ] More colors in CLI outs, including the --help.
+- [ ] **Deferred**: llama.cpp version drift — surveyed empirically (2026-05-28). The official llama-server breaking-change tracker ([ggml-org/llama.cpp#9291](https://github.com/ggml-org/llama.cpp/issues/9291)) lists ~30 entries since Sept 2024 (~2/month). Categorised against llamastash's actual exposure surface:
   - **Additive changes (~60%)** — new fields/endpoints/options. Byte-pass forwards them transparently. No action.
   - **/v1/\* schema tweaks (~15%)** — OpenAI-compat tightening. No endpoint has been _removed_. Body is forwarded verbatim; client owns parsing. No action.
   - **/slots / /props / /metrics schema (~15%)** — llamastash doesn't inspect these. No action.
@@ -162,12 +168,11 @@ Two release tracks:
 - [ ] **Daemon idle RSS** (1.5 GB RSS on a long-running supervisor with no children, observed 2026-05-22). Audit ruled out the original suspects (metadata cache is bounded LRU 2048, per-launch log buffers exist only while a child is alive, external-process discovery is one-shot at startup). The CPU fix above may incidentally cure this if subprocess-allocation churn was the driver; if it doesn't, run `heaptrack` / `samply` on a freshly-started daemon attached to a populated HF + Ollama cache and watch RSS over the first hour.
 - [ ] **Release pipeline ops** — secret/token plumbing around `release.yml` and the org bootstrap.
   - [ ] Write `docs/runbooks/secret-rotation.md` — operational steps for rotating `CRATES_IO_TOKEN` + `GH_BUMP_TOKEN`. Referenced from [`docs/runbooks/release-0.0.1-bootstrap.md`](docs/runbooks/release-0.0.1-bootstrap.md) §"Token rotation cadence".
+  - [ ] **Need brainstorm/plan**: Migrate release pipeline secrets from PATs to a scoped GitHub App with OIDC. Eliminates `GH_BUMP_TOKEN` rotation and shrinks token blast radius. Deferred from 0.0.1 per the release-setup plan §"Token rotation surface".
 - [ ] **UAT follow-up** — items deferred from [`docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md`](docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md) that don't block R1 ship but are tracked against the UAT subsystem.
   - [x] ~~Lock in reference-model commit SHAs in `src/cli/uat/model.rs` — both `PRIMARY` and `FALLBACK` ship a `<TBD-locked-on-first-dry-run>` sentinel that the orchestrator surfaces as a `host.warnings` entry. First warm-mode dry-run on the maintainer's box lands the lock-in commit. Procedure: [`docs/runbooks/verify-uat-reintroduction.md`](docs/runbooks/verify-uat-reintroduction.md) §8b.~~
   - [ ] `Hardware UAT report` GitHub issue template — deferred until first contributor wants to file one (origin §Acceptance checklist). Recreate the `uat-caught` label if it's ever deleted: `gh label create uat-caught --color B60205 --description "Release PR where UAT caught a regression that would otherwise have shipped"`.
   - [ ] Cloud-runner re-evaluation — gated on user-base trigger (>500 installs + 3 RC cycles silence) per [`docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md`](docs/plans/2026-05-19-002-feat-uat-e2e-hardware-strategy-plan.md) §Companion trigger.
-- [ ] **Release pipeline ops** (continued from R1).
-  - [ ] **Need brainstorm/plan**: Migrate release pipeline secrets from PATs to a scoped GitHub App with OIDC. Eliminates `GH_BUMP_TOKEN` rotation and shrinks token blast radius. Deferred from 0.0.1 per the release-setup plan §"Token rotation surface".
 - [ ] **Proxy perf (R-08)**: Replace the per-request `Vec<CatalogRow>` clone in `proxy::route::decide` with an `ArcSwap<Vec<CatalogRow>>` pre-built by the discovery task. Today every inbound `/v1/...` request walks the catalog snapshot and allocates a fresh `CatalogRow` per row before handing it to the resolver. Origin: PR #7 ce-review (R-08), deferred from this PR's scope. Needs catalog publish-side wiring (`ModelCatalog::publish_view()` → `ArcSwap` slot read by the proxy).
 - [ ] **Proxy stability (R-12)**: Move the GGUF header read inside `ipc::methods::resolve_model_id_and_arch` onto `spawn_blocking`. Today the call is invoked from async IPC handlers but does up to ~16 MiB of synchronous file I/O on the tokio worker, which can stall a worker thread under concurrent IPC load. The proxy-side call site was already fixed in this PR (`proxy::launch::canonical_id_for_row` via `spawn_blocking`); the IPC site is the remaining gap. Origin: PR #7 ce-review (R-12 partial).
 - [ ] **Ollama-compat digest from cached header BLAKE3**: Today `/api/tags` and `/api/ps` both emit `blake3:<hex>` derived from the canonical path string (`ollama_compat::digest_for_path`) — stable across the two endpoints but not the truthful GGUF header BLAKE3 that `ModelId.header_blake3` carries. Lifting the digest to the header hash requires caching `header_blake3` alongside `ModelMetadata` at discovery time (the parser already reads the header bytes; caching the BLAKE3 is incremental cost). Once cached, both endpoints look up the same field and clients that validate the digest against an external source (e.g. an Ollama manifest mirror) get a meaningful answer. Origin: PR #7 follow-up review.
@@ -175,7 +180,6 @@ Two release tracks:
 - [ ] **GGUF parser revisit**: web scan found lighter crates (`gguf`) and fuller readers (`gguf-rs-lib`, `gguf-rs`), but none are yet proven to satisfy llamastash's real constraints together: cheap header-only parsing, exact raw parsed header bytes for `ModelId.header_blake3`, split-GGUF behavior, and HF snapshot-symlink path semantics. Do not do a wholesale crate swap unless a spike proves those constraints hold against the current fixtures and integration paths. Or maybe move our impl to a crate `gguf-lite`
 - [ ] **GGUF scope-reduction audit**: the research did _not_ prove every line under `src/gguf/` is necessary. Keep the custom header/split/HF-path behavior unless replaced by a proven crate, but audit `metadata.rs` / `memory.rs` / helpers for code that is not serving a shipped feature. Separate question from "use a crate": can the current custom subsystem be materially smaller while keeping header-only parsing and current UX/identity behavior?
 - [ ] **IPC framing revisit**: re-evaluate swapping the hand-rolled length-prefixed codec for `tokio-util::codec::LengthDelimitedCodec` only if the surrounding IPC layer grows enough that the extra dependency meaningfully simplifies maintenance. Current framing is small, bounded, and fully tested; a swap is not justified today.
-- [ ] More colors in CLI outs, including the --help.
 - [ ] Ollama-compat Tier 2 inference surface (`/api/chat`, `/api/generate`, `/api/embed`) remains deferred. See [`src/proxy/router.rs`](src/proxy/router.rs) and [`tests/proxy_ollama_compat.rs`](tests/proxy_ollama_compat.rs).
 - [ ] Ollama-compat digest should switch from path-derived `blake3:` to cached header BLAKE3 when the catalog exposes it. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).
 - [ ] Proxy idle-TTL eviction is still deferred for `/api/ps` expiry reporting. See [`src/proxy/ollama_compat.rs`](src/proxy/ollama_compat.rs).

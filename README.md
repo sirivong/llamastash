@@ -35,6 +35,9 @@ Pick whichever channel you prefer — all install the same binary. Full per-plat
 # macOS + Linux, one-shot
 curl -fsSL https://llamastash.dev/install.sh | sh
 
+# Windows 11 (PowerShell, no admin elevation)
+irm https://llamastash.dev/install.ps1 | iex
+
 # Homebrew (macOS + Linuxbrew)
 brew install llamastash/llamastash/llamastash
 
@@ -287,18 +290,19 @@ Every non-interactive subcommand returns a documented exit code so agent scripts
 
 ## Platforms
 
-Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel). Windows support is on the roadmap.
+Linux (x86_64, aarch64), macOS (Apple Silicon, Intel), and Windows 11 (x86_64). One binary, one TUI, one CLI — the daemon's control plane is bearer-token-authed HTTP loopback on every platform, and the supervisor uses the OS's native process-group semantics (POSIX `setsid` + signals, Windows Job Objects + CTRL+BREAK). Windows AMD GPU detection and `aarch64-pc-windows-msvc` are on the roadmap.
 
 ## Roadmap
 
-Tracked in detail in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md). The headline items on deck after the first release:
+Tracked in detail in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md). The headline items on deck:
 
 - **llama.cpp version pinning** — prevent silent drift / incompatibility on `brew upgrade`.
 - **MCP and LAN-exposed HTTP surfaces** — Model Context Protocol, plus auth + TLS + LAN binding for the proxy. The loopback OpenAI-compatible proxy ships today (see [Drop-in OpenAI + Ollama proxy](#drop-in-openai--ollama-proxy)); the rest of the v1 R34 deferral (Anthropic compat, MCP, network exposure) stays on the roadmap.
 - **Anthropic API compatibility** — `/v1/messages` shim on top of the existing OpenAI-compatible endpoints.
 - **Per-PID VRAM attribution** via NVML's `nvmlDeviceGetComputeRunningProcesses`. Today the right pane shows per-model RAM + CPU%; VRAM is reported only at the host level.
 - **GPU/CPU offload split UI** — first-class control over which layers go where.
-- **Windows support** — first-class platform, not a port.
+- **Windows AMD GPU detection** — pick a probe path (DXGI / WMI / ADLX). 0.0.2 shows "GPU detection unavailable" on Windows AMD hosts.
+- **`aarch64-pc-windows-msvc`** — Snapdragon X / Surface Pro coverage. Deferred from 0.0.2.
 - **MLX and vLLM backends** — if the surface area lands cheaply alongside llama.cpp.
 - **Docker-ready packaging** — official images plus a documented `docker run` path.
 

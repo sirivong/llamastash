@@ -1,6 +1,6 @@
 [package]
 name = "llamastash"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Deepu K Sasidharan <d4udts@gmail.com>"]
 description = "A fast, keyboard-driven TUI for running local models via llama.cpp"
 documentation = "https://github.com/llamastash/llamastash"

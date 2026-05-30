@@ -19,19 +19,23 @@ Quick reference for the common ways LlamaStash can refuse to do what you want, w
 - **Apple Silicon:** LlamaStash parses `system_profiler SPDisplaysDataType -json`. If this is empty, the macOS install is unusual — try the command manually and file an issue with the output.
 - **Intel macOS:** there is no Metal support to detect; LlamaStash falls back to CPU-only and that's correct.
 
-## Daemon socket already exists (stale)
+## Stale daemon handshake file
 
-**Symptom:** `llamastash daemon start` complains about an existing socket, or `llamastash list` exits `65` because the socket file is there but no listener is.
+**Symptom:** `llamastash list` exits `65` (`DaemonUnreachable`) even though `daemon.pid` is present and locked. The recorded daemon is dead but the handshake file (`runtime.json`) didn't get cleaned up.
 
-**Fix:** LlamaStash auto-detects stale sockets on `daemon start` and unlinks them. If you hit this anyway, remove the socket manually:
+**Fix:** `daemon stop --force` falls back to a PID-targeted graceful-then-kill that also clears the handshake. If that's unreachable too, remove the handshake + lockfile manually:
 
 ```bash
-ls -l "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/llamastash/daemon.sock"
-rm -- "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/llamastash/daemon.sock"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/llamastash"
+rm -- "$state_dir/runtime.json" "$state_dir/daemon.pid"
 llamastash daemon start
 ```
 
-On macOS the socket lives under `$TMPDIR/llamastash-$UID/daemon.sock`.
+State-dir paths per platform:
+
+- Linux: `$XDG_STATE_HOME/llamastash` (default `~/.local/state/llamastash`)
+- macOS: `~/Library/Application Support/llamastash`
+- Windows: `%LOCALAPPDATA%\llamastash`
 
 ## Stale PID lockfile after a crash
 

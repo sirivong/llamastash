@@ -4,17 +4,52 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+## [0.0.2] — 2026-05-30
+
+### Added
+
+- **Windows 11 x64 as a first-class platform.** Same binary, same
+  TUI, same CLI. Install via `irm https://llamastash.dev/install.ps1 |
+  iex` or by extracting `llamastash-0.0.2-x86_64-pc-windows-msvc.zip`
+  from the GitHub Release. Process supervision uses Windows Job
+  Objects with kill-on-job-close, the daemon lockfile uses
+  `LockFileEx`, and `runtime.json` + `state.json` get an owner-only
+  Protected DACL. Per-OS scope:
+  - AMD GPU detection on Windows: deferred (shows "GPU detection
+    unavailable").
+  - `aarch64-pc-windows-msvc`: deferred.
+  - Scoop manifest scaffolded under `deployment/scoop/`; bucket
+    publication deferred.
+- **`init`'s GitHub Releases routing now picks Windows assets.**
+  Maps the host's GPU to llama.cpp's `win-cpu-x64.zip` /
+  `win-vulkan-x64.zip` / `win-cuda-*-x64.zip` /
+  `win-hip-radeon-x64.zip`. `safe_extract` gained a `.zip` branch
+  with the same path-traversal / size-cap / drive-prefix defenses
+  as the existing `.tar.gz` codepath.
+- **Windows CI lane.** `clippy` and `test` matrices in `ci.yml` now
+  include `windows-latest`; the release workflow ships
+  `x86_64-pc-windows-msvc` as a `.zip` artifact alongside the
+  existing Linux/macOS tarballs.
+
 ### Changed (breaking)
 
 - **IPC transport rewritten on HTTP loopback + bearer token.** The
   daemon's Unix-domain socket and `SO_PEERCRED` auth are gone.
   Clients now attach via the URL + bearer token written to
-  `$XDG_STATE_HOME/llamastash/runtime.json` (mode `0600`). The
-  `LLAMASTASH_SOCKET` env var and `--socket-path` CLI flag are
-  removed; use `LLAMASTASH_STATE_DIR` (for the binary's own path
-  resolution) or `LLAMASTASH_IPC_URL` + `LLAMASTASH_IPC_TOKEN`
-  (direct override) instead. The OpenAI-compat proxy listener is
-  unchanged. See `docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`.
+  `runtime.json` under the state dir (`chmod 0600` on Unix,
+  owner-only Protected DACL on Windows). The `LLAMASTASH_SOCKET`
+  env var and `--socket-path` CLI flag are removed; use
+  `LLAMASTASH_STATE_DIR` (for the binary's own path resolution) or
+  `LLAMASTASH_IPC_URL` + `LLAMASTASH_IPC_TOKEN` (direct override)
+  instead. The OpenAI-compat proxy listener is unchanged. See
+  `docs/plans/2026-05-29-001-feat-windows-support-and-http-ipc-plan.md`.
+- **Default control-plane port is `48134`** (high range, outside the
+  proxy's `11434..11440` family). On collision the daemon falls
+  back to a random port in `41100..=41300`. Users never need to
+  memorise the port — it's discovered via `runtime.json`.
+- **`daemon stop --force` added** as an escape hatch for stale
+  daemons whose flock is held but whose `runtime.json` is missing.
+  Pretty error messages now point at the stale state explicitly.
 
 ### Added
 

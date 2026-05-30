@@ -39,16 +39,17 @@ Same shape for both runs.
   export PATH="$PWD/target/release:$PATH"
   ```
 
-2. Wipe any stale daemon socket and pidfile so the smoke starts from
-   a clean process:
+2. Wipe any stale daemon handshake + pidfile so the smoke starts
+   from a clean process:
 
   ```bash
-  llamastash daemon stop || true
-  rm -f "$XDG_RUNTIME_DIR/llamastash/daemon.sock" \
-        "$XDG_RUNTIME_DIR/llamastash/daemon.pid"
+  llamastash daemon stop --force || true
+  rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/llamastash/runtime.json" \
+        "${XDG_STATE_HOME:-$HOME/.local/state}/llamastash/daemon.pid"
   ```
 
-  macOS uses `$TMPDIR/llamastash-$USER/` instead of `$XDG_RUNTIME_DIR/llamastash/`.
+  macOS uses `~/Library/Application Support/llamastash/`; Windows
+  uses `%LOCALAPPDATA%\llamastash\`.
 
 3. Confirm at least two models are discovered so the dormant /
    running split has something to land on:

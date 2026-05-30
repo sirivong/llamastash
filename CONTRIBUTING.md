@@ -42,14 +42,16 @@ cargo run -- daemon status             # pid / uptime / connections
 cargo run -- daemon stop               # graceful shutdown
 ```
 
-The daemon binds its socket under `$XDG_RUNTIME_DIR/llamastash/daemon.sock` on Linux and `$TMPDIR/llamastash-$USER/daemon.sock` on macOS. If you need two daemons side-by-side (e.g. testing migrations), point each at a distinct path:
+The daemon binds two loopback HTTP listeners: the control plane (default `127.0.0.1:48134`) and the OpenAI-compat proxy (default `127.0.0.1:11434/11435`). Connection details — URL + bearer token — live in `runtime.json` under the state dir (`$XDG_STATE_HOME/llamastash` on Linux, `~/Library/Application Support/llamastash` on macOS, `%LOCALAPPDATA%\llamastash` on Windows). Clients read it to attach.
+
+If you need two daemons side-by-side (e.g. testing migrations), give each its own state dir:
 
 ```bash
-LLAMASTASH_SOCKET=/tmp/llamastash-dev/daemon.sock cargo run -- daemon start
-LLAMASTASH_SOCKET=/tmp/llamastash-dev/daemon.sock cargo run -- list
+LLAMASTASH_STATE_DIR=/tmp/llamastash-dev cargo run -- daemon start
+LLAMASTASH_STATE_DIR=/tmp/llamastash-dev cargo run -- list
 ```
 
-If something is wedged and the normal `daemon stop` won't go through, deleting the socket file and `daemon.pid` in the same directory is safe — the next `daemon start` re-binds clean.
+The daemon allocates its own control-plane port if `48134` is taken (random in `41100..=41300`); concurrent state dirs never collide. If something is wedged and the normal `daemon stop` won't go through, `cargo run -- daemon stop --force` falls back to a PID-targeted signal; alternatively, delete `runtime.json` and `daemon.pid` in the state dir — the next `daemon start` re-binds clean.
 
 ## Code conventions
 

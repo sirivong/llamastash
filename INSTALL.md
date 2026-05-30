@@ -65,7 +65,27 @@ Useful for trying unreleased changes or hacking on the codebase.
 
 ### Option 6 — Manual download from GitHub Releases
 
-If you'd rather inspect the tarball first, grab the matching asset from <https://github.com/llamastash/llamastash/releases/latest>, verify its SHA-256 against the `*.sha256` sidecar file, extract, and move `llamastash` somewhere on your `PATH`.
+If you'd rather inspect the tarball first, grab the matching asset from <https://github.com/llamastash/llamastash/releases/latest>, verify its SHA-256 against the `*.sha256` sidecar file, extract, and move `llamastash` (or `llamastash.exe` on Windows) somewhere on your `PATH`.
+
+### Option 7 — Windows (PowerShell)
+
+```powershell
+irm https://llamastash.dev/install.ps1 | iex
+```
+
+The PowerShell installer mirrors `install.sh`: pulls the latest `x86_64-pc-windows-msvc.zip` from the GitHub Release, verifies the SHA-256 against the `SHA256SUMS` file, expands into `%LOCALAPPDATA%\Programs\llamastash`, and is purely user-scope (no admin elevation, no `Set-ExecutionPolicy` rituals). Add `-AddToPath` to append the install dir to your user PATH idempotently:
+
+```powershell
+& ([scriptblock]::Create((irm https://llamastash.dev/install.ps1))) -AddToPath
+```
+
+Or pin a specific release:
+
+```powershell
+& ([scriptblock]::Create((irm https://llamastash.dev/install.ps1))) -Version v0.0.2 -AddToPath
+```
+
+A Scoop manifest scaffold lives at `deployment/scoop/llamastash.json`; bucket publication is on the roadmap (`scoop install <raw-url>` works ad hoc in the meantime).
 
 ### Platform notes
 
@@ -83,7 +103,7 @@ xattr -d com.apple.quarantine ./llamastash
 
 **Arch Linux.** Prefer the AUR (`yay -S llamastash` / `llamastash-bin` / `llamastash-git`) so updates ride pacman. The install-script path also works if you'd rather not pull in an AUR helper.
 
-**Windows.** Not supported in the first release. Tracked in [the roadmap](README.md#roadmap).
+**Windows.** x86_64 Windows 11 is first-class as of 0.0.2. Use `irm https://llamastash.dev/install.ps1 | iex` (Option 7) or download the `.zip` from the GitHub Release directly. GPU detection covers NVIDIA (CUDA build via init wizard) and discrete-GPU Vulkan fallback; AMD-on-Windows detection is on the roadmap (shows "GPU detection unavailable" in 0.0.2). `aarch64-pc-windows-msvc` is also on the roadmap. The daemon's state dir is `%LOCALAPPDATA%\llamastash`; `runtime.json` + `state.json` get a Protected DACL restricting them to the file owner.
 
 ### Post-install
 
