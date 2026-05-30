@@ -500,7 +500,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 ### Phase E — Polish + docs sweep
 
-- [ ] **Unit 11: Windows TUI verification + UAT cold smoke**
+- [x] **Unit 11: Windows TUI verification + UAT cold smoke**
 
 **Goal:** Manual TUI verification on Windows Terminal; wire the Windows UAT isolation backend; run cold smoke UAT on the Windows runner.
 

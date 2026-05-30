@@ -89,6 +89,44 @@ llama.cpp must be built with `-DGGML_VULKAN=on`; the upstream prebuilt
 asset under llama.cpp's GH Releases includes a Vulkan-capable build on
 Linux x86_64.
 
+### Windows (cold-smoke only)
+
+Status: cold-smoke + manual TUI verify only. Windows AMD GPU
+detection is out of 0.0.2 scope; warm-mode warm-up bench is
+unsupported because it depends on `nvidia-smi` / `rocm-smi` for
+sampling.
+
+Prerequisites:
+
+- Windows 11 x64 with PowerShell 5+ (ships in-box) or PowerShell 7+.
+- A llama.cpp Windows binary on PATH or pointed at via `--llama-server`
+  / `init`. The init wizard picks the matching `win-<accel>-x64.zip`
+  asset from llama.cpp's GH Releases (CPU / CUDA / Vulkan / HIP).
+- For CUDA: matching NVIDIA driver version for the chosen CUDA build.
+- For HIP / Vulkan: vendor driver installed and current.
+
+Run the cold smoke from PowerShell (no admin elevation needed):
+
+```powershell
+cargo run --features test-fixtures,uat -- uat `
+  --host-backend cpu_only `
+  --mode cold `
+  --report-out uat-windows.json
+```
+
+Known platform differences vs. Linux/macOS:
+
+- The graceful-shutdown signal is CTRL+BREAK (delivered via Job
+  Object), not SIGTERM. Force-kill uses `TerminateJobObject` instead
+  of SIGKILL — both surface as `Stopped` in the supervisor state
+  machine.
+- Symlink-dependent integration tests are gated `#[cfg(unix)]` and
+  skip on Windows.
+- TUI is verified manually in Windows Terminal, ConEmu, and
+  PowerShell ISE; the keybinding + colour matrix is the same as the
+  macOS/Linux verify, with CTRL combinations as the only platform-
+  specific surface to retest after a TUI change.
+
 ### HuggingFace cache pre-population (all backends)
 
 Warm mode assumes the locked reference GGUF is already in the cache.

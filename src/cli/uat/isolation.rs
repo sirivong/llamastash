@@ -1,16 +1,19 @@
 //! Tempdir isolation + child-process env-var configuration (Unit 4).
 //!
-//! The UAT runs against a fresh tempdir so its state, config, runtime
-//! socket, cache/logs, and the HuggingFace download cache never
-//! collide with the maintainer's real daily-driver paths. Five env
-//! vars + Linux's XDG equivalents fully fence the child processes:
+//! The UAT runs against a fresh tempdir so its state, config, control-
+//! plane runtime info, cache/logs, and the HuggingFace download cache
+//! never collide with the maintainer's real daily-driver paths. The
+//! daemon's control-plane URL + bearer token are not pre-set as env
+//! vars: the sandboxed daemon binds its own port at startup and
+//! writes them into `runtime.json` under `LLAMASTASH_STATE_DIR`, and
+//! clients (TUI / CLI) read that file to attach. That keeps the
+//! sandbox single-rooted at `LLAMASTASH_STATE_DIR`.
 //!
 //! | env var | resolved by |
 //! |---|---|
-//! | `LLAMASTASH_STATE_DIR`  | `paths::state_dir()` (Unit 1) |
+//! | `LLAMASTASH_STATE_DIR`  | `paths::state_dir()`; daemon writes `runtime.json` + `state.json` here |
 //! | `LLAMASTASH_CONFIG_DIR` | `paths::config_dir()`; `user_config_file()` inherits |
-//! | `LLAMASTASH_CACHE_DIR`  | `paths::cache_dir()` (Unit 1); `log_dir()` inherits |
-//! | `LLAMASTASH_SOCKET`     | `paths::runtime_socket_path()` (pre-existing) |
+//! | `LLAMASTASH_CACHE_DIR`  | `paths::cache_dir()`; `log_dir()` inherits |
 //! | `HF_HOME`              | `init::download::hf_cache_dir()` (HF convention) |
 //! | `HF_HUB_CACHE`         | `init::download::hf_cache_dir()` (takes precedence over `HF_HOME`) |
 //!
@@ -69,7 +72,6 @@ pub const LLAMASTASH_ENV_KEYS: &[&str] = &[
   "LLAMASTASH_STATE_DIR",
   "LLAMASTASH_CONFIG_DIR",
   "LLAMASTASH_CACHE_DIR",
-  "LLAMASTASH_SOCKET",
   "HF_HOME",
   "HF_HUB_CACHE",
 ];
@@ -140,15 +142,6 @@ impl TempdirGuard {
     &self.root_path
   }
 
-  /// Path to the daemon's runtime socket inside the sandbox.
-  /// Placed directly under the `runtime/` subdir with a short filename
-  /// to stay within the 104-byte `sun_path` limit on macOS. Long
-  /// tempdir prefixes (e.g. `/var/folders/.../llamastash-uat-...`) can
-  /// exceed that limit if we use `daemon.sock` as the leaf.
-  pub fn socket_path(&self) -> PathBuf {
-    self.root_path.join("runtime").join("d.sock")
-  }
-
   /// Path to the sandbox's HF cache root. Children see this via
   /// `HF_HOME`; hf-hub appends `hub/` internally.
   pub fn hf_home(&self) -> PathBuf {
@@ -170,17 +163,17 @@ impl TempdirGuard {
     let config = self.root_path.join("config");
     let cache = self.root_path.join("cache");
     let runtime = self.root_path.join("runtime");
-    let socket = self.socket_path();
     let hf = self.hf_home();
     let hf_hub = self.hf_hub_cache();
     vec![
       ("LLAMASTASH_STATE_DIR", state.clone()),
       ("LLAMASTASH_CONFIG_DIR", config.clone()),
       ("LLAMASTASH_CACHE_DIR", cache.clone()),
-      ("LLAMASTASH_SOCKET", socket),
       ("HF_HOME", hf),
       ("HF_HUB_CACHE", hf_hub),
-      // XDG mirror (no-op on macOS, redundant safety on Linux).
+      // XDG mirror (no-op on macOS / Windows; redundant safety on
+      // Linux where `directories` honours XDG_*_HOME independently of
+      // the LLAMASTASH_* overrides).
       ("XDG_STATE_HOME", state),
       ("XDG_CONFIG_HOME", config),
       ("XDG_CACHE_HOME", cache),
@@ -264,36 +257,32 @@ fn sanitize_label(raw: &str) -> String {
   }
 }
 
-#[cfg(unix)]
+/// Graceful-then-force shutdown of a tracked PID. Routes through
+/// [`crate::util::process_control::ProcessControl`] so Unix gets
+/// SIGTERM-then-SIGKILL and Windows gets CTRL+BREAK-then-
+/// TerminateJobObject — both implementations share this call site.
+/// Drop is synchronous and has no tokio runtime; sleep+probe loop is
+/// fine because the child is `llama-server` which exits in under a
+/// second on the maintainer's hardware.
 fn send_term_then_kill(pid: i32) {
+  use crate::util::process_control::{platform_default, SignalTarget};
   use std::time::{Duration, Instant};
-  // SIGTERM first.
-  unsafe {
-    libc::kill(pid, libc::SIGTERM);
+
+  if pid <= 0 {
+    return;
   }
-  // Wait up to 2 seconds for the child to exit. Polling is OK here
-  // because Drop is synchronous and we don't have a tokio runtime to
-  // lean on; the child is `llama-server`, which terminates cleanly on
-  // SIGTERM in under a second on the maintainer's hardware.
+  let pc = platform_default();
+  let target = SignalTarget::SinglePid(pid as u32);
+  pc.signal_graceful(target);
+
   let deadline = Instant::now() + Duration::from_secs(2);
   while Instant::now() < deadline {
-    // `kill(pid, 0)` returns 0 if the process is still alive, -1 if not.
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
-    if !alive {
+    if !pc.is_alive(pid as u32) {
       return;
     }
     std::thread::sleep(Duration::from_millis(100));
   }
-  // Still alive — escalate.
-  unsafe {
-    libc::kill(pid, libc::SIGKILL);
-  }
-}
-
-#[cfg(not(unix))]
-fn send_term_then_kill(_pid: i32) {
-  // Windows isn't in v1 scope (origin §Out of scope). Stub so the
-  // module still compiles on Windows hosts for the doc-build CI lane.
+  pc.signal_kill(target);
 }
 
 #[cfg(test)]
