@@ -162,7 +162,14 @@ async fn reconcile_binary_with_running_daemon(
   // verbatim falsely triggers a restart on every dispatch and the
   // spawned re-exec panics because the test binary has no daemon
   // entry point.
-  let current_canon = current.as_ref().and_then(|c| std::fs::canonicalize(c).ok());
+  //
+  // Use `tokio::fs::canonicalize` here too so the reconcile gate
+  // doesn't block the async runtime on a slow inode lookup — same
+  // reasoning as `desired` above.
+  let current_canon = match current.as_ref() {
+    Some(c) => tokio::fs::canonicalize(c).await.ok(),
+    None => None,
+  };
   let matches = match (current_canon.as_ref(), current.as_ref()) {
     (Some(canon), _) => canon == &desired,
     (None, Some(raw)) => raw == &desired,
