@@ -23,7 +23,12 @@ const RUNTIME_SCHEMA_VERSION: u32 = 1;
 
 /// On-disk shape of `runtime.json`. The control plane writes this at
 /// startup; clients read it to attach.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually to elide `ipc_token` — wrapping the
+/// struct in `format!("{info:?}")` (panic formatters, debug logs,
+/// future telemetry) must not leak the bearer secret. Mirrors
+/// [`crate::daemon::auth::IpcToken`]'s posture.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeInfo {
   /// Schema version; bumps when breaking changes land.
   #[serde(default = "current_schema_version")]
@@ -46,6 +51,18 @@ pub struct RuntimeInfo {
 
 fn current_schema_version() -> u32 {
   RUNTIME_SCHEMA_VERSION
+}
+
+impl std::fmt::Debug for RuntimeInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("RuntimeInfo")
+      .field("schema_version", &self.schema_version)
+      .field("ipc_url", &self.ipc_url)
+      .field("ipc_token_len", &self.ipc_token.len())
+      .field("started_at_unix", &self.started_at_unix)
+      .field("daemon_pid", &self.daemon_pid)
+      .finish()
+  }
 }
 
 /// Path of the runtime info file under `state_dir`.
@@ -193,6 +210,17 @@ mod tests {
     remove(&dir);
     assert!(!path(&dir).exists());
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn debug_does_not_leak_ipc_token() {
+    let info = RuntimeInfo {
+      ipc_token: "super-secret-bearer-value".into(),
+      ..sample()
+    };
+    let dbg = format!("{info:?}");
+    assert!(!dbg.contains("super-secret-bearer-value"));
+    assert!(dbg.contains("ipc_token_len"));
   }
 
   #[test]
