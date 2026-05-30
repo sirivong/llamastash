@@ -109,6 +109,35 @@ pub fn parse_render_size(raw: &str) -> Result<(u16, u16), String> {
   Ok((w, h))
 }
 
+/// Whether a `LLAMASTASH_OFFLINE=<value>` should enable offline mode.
+/// Mirrors `init::fetch::offline_requested`'s truthy set so the flag and
+/// the helper agree.
+fn offline_env_truthy(value: &str) -> bool {
+  matches!(
+    value.trim().to_ascii_lowercase().as_str(),
+    "1" | "true" | "yes"
+  )
+}
+
+/// Normalize `LLAMASTASH_OFFLINE` *before* clap parses argv.
+///
+/// The three `--offline` flags bind this env var, but clap strict-parses it
+/// as a boolean (only `true` / `false`), so the documented `LLAMASTASH_OFFLINE=1`
+/// — and `=0`, and an empty value — would otherwise abort every `init` /
+/// `pull` / `recommend` run with `error: invalid value '1' for '--offline'`.
+/// Translate a truthy value to the literal `true` clap accepts and treat
+/// everything else (`0`, empty, junk) as unset, matching the documented
+/// "empty value does not enable" convention.
+pub fn normalize_offline_env() {
+  if let Ok(v) = std::env::var("LLAMASTASH_OFFLINE") {
+    if offline_env_truthy(&v) {
+      std::env::set_var("LLAMASTASH_OFFLINE", "true");
+    } else {
+      std::env::remove_var("LLAMASTASH_OFFLINE");
+    }
+  }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
   /// Manage the background daemon (auto-spawned on attach).
@@ -1605,6 +1634,18 @@ mod tests {
     let without_flag = parse(&[]);
     assert!(!without_flag.render);
     assert!(without_flag.render_size.is_none());
+  }
+
+  #[test]
+  fn offline_env_truthy_matches_documented_values() {
+    // The documented `LLAMASTASH_OFFLINE=1` and friends enable offline;
+    // `0`, empty, and junk do not (mirrors `offline_requested`).
+    for v in ["1", "true", "TRUE", " yes ", "Yes"] {
+      assert!(offline_env_truthy(v), "`{v}` should be truthy");
+    }
+    for v in ["0", "false", "no", "", " ", "off", "2", "enabled"] {
+      assert!(!offline_env_truthy(v), "`{v}` should be falsy");
+    }
   }
 
   #[test]

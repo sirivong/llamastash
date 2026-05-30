@@ -8,6 +8,10 @@ use llamastash::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+  // Translate `LLAMASTASH_OFFLINE=1`/`0`/empty into the `true`/unset clap's
+  // boolean env binding accepts, before parsing argv (see the fn doc).
+  cli::cli_args::normalize_offline_env();
+
   // Parse by hand so clap's arg-rejection exit code matches our contract:
   // a usage error exits USAGE (64), not clap's default 2. `--help` /
   // `--version` are not errors — clap writes them to stdout and we exit 0.

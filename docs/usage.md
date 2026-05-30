@@ -175,7 +175,7 @@ The "nav focuses" alias means `List` + `RightPane`; "input focuses" means `ChatI
 | `LLAMASTASH_NO_SCAN` | Skip filesystem scanning |
 | `LLAMASTASH_IPC_URL` | Point a CLI/TUI at a non-default daemon control plane (verbatim URL, e.g. `http://127.0.0.1:48134`). Must be set together with `LLAMASTASH_IPC_TOKEN`; partial overrides are rejected. Bypasses `runtime.json` lookup entirely. |
 | `LLAMASTASH_IPC_TOKEN` | Bearer token for the control-plane URL. See `LLAMASTASH_IPC_URL`. |
-| `LLAMASTASH_OFFLINE` | Refuse any outbound network from `init` / `pull` / `doctor` (equivalent to `--offline` on those subcommands) |
+| `LLAMASTASH_OFFLINE` | Refuse any outbound network from `init` / `pull` / `recommend` (equivalent to `--offline` on those subcommands). Truthy values `1` / `true` / `yes` (case-insensitive) enable it; `0`, an empty value, and unset leave it off. |
 | `HF_HOME` | Honored by `init::download::hf_cache_dir()` per HuggingFace convention; controls where pulled GGUFs land |
 | `NO_COLOR` | Any non-empty value disables ANSI styling on every human-readable output (per [no-color.org](https://no-color.org/)). An empty value (`NO_COLOR=`) does **not** disable. |
 | `LLAMASTASH_BENCH_DISABLE_DEFAULTS` | **Maintainer / bench-internal.** When set to `"1"`, the launch-knob resolver skips presets, last-used, yaml-arch, and compiled-in arch defaults — only knobs the caller explicitly supplied land on the wire. Used by `scripts/bench/` to make `llamastash start` produce byte-identical argv to raw `llama-server` for fair Suite-A overhead comparison. **Do not set in normal use** — it disables the auto-tuning the launcher exists to do. |

@@ -6,6 +6,12 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- **`LLAMASTASH_OFFLINE=1` no longer aborts every command.** The env var
+  was bound to a boolean flag clap strict-parsed as `true`/`false`, so the
+  documented `=1` (and `=0`, and an empty value) failed with
+  `error: invalid value '1' for '--offline'`. The value is now normalized
+  before parsing: `1` / `true` / `yes` enable offline; `0`, empty, and
+  unset leave it off.
 - **Usage errors exit `64` consistently.** clap's own arg rejections
   (unknown flag/subcommand, mutually-exclusive flags, missing value)
   exited `2`, and a malformed `--render-size` exited `71`; both now map
