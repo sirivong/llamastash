@@ -155,7 +155,19 @@ async fn reconcile_binary_with_running_daemon(
     .and_then(|v| v.as_array())
     .map(|a| !a.is_empty())
     .unwrap_or(false);
-  let matches = current.as_ref().map(|c| c == &desired).unwrap_or(false);
+  // Canonicalize both sides so the comparison is stable across
+  // platforms. Windows `fs::canonicalize` returns a `\\?\C:\…`
+  // UNC-prefixed path; the daemon stores `server_path` as the raw
+  // input from CLI/env, which lacks the prefix. Comparing them
+  // verbatim falsely triggers a restart on every dispatch and the
+  // spawned re-exec panics because the test binary has no daemon
+  // entry point.
+  let current_canon = current.as_ref().and_then(|c| std::fs::canonicalize(c).ok());
+  let matches = match (current_canon.as_ref(), current.as_ref()) {
+    (Some(canon), _) => canon == &desired,
+    (None, Some(raw)) => raw == &desired,
+    (None, None) => false,
+  };
   if matches {
     return Ok(client);
   }

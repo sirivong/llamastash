@@ -108,7 +108,11 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
     port,
     ProbeOptions {
       interval: Duration::from_millis(100),
-      timeout: Duration::from_secs(15),
+      // 30 s headroom: the macOS GitHub runner periodically takes 15+
+      // seconds to launch the fake binary under parallel test load,
+      // and a short cap surfaces as flake without exercising anything
+      // about the supervisor itself.
+      timeout: Duration::from_secs(30),
     },
   )
   .await
