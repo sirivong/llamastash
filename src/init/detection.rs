@@ -83,6 +83,7 @@ pub struct HardwareSnapshot {
 pub enum OsFamily {
   Linux,
   MacOs,
+  Windows,
   Other,
 }
 
@@ -91,6 +92,7 @@ impl OsFamily {
     match std::env::consts::OS {
       "linux" => Self::Linux,
       "macos" => Self::MacOs,
+      "windows" => Self::Windows,
       _ => Self::Other,
     }
   }

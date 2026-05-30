@@ -265,6 +265,182 @@ pub fn safe_extract_tar_gz(
   })
 }
 
+/// Dispatch on `archive_name`'s extension to either the tar.gz or
+/// (Windows-only) zip extraction codepath. The picked filename's
+/// trailing extension drives the choice — `.zip` routes through the
+/// Windows backend, `.tar.gz` / `.tgz` routes through the tar reader.
+/// Anything else surfaces an `UnsafeArchive` refusal so the caller
+/// can fall back to the manual-path install flow.
+pub fn safe_extract(
+  archive_name: &str,
+  archive_bytes: &[u8],
+  dest_root: &Path,
+  version_dir_name: &str,
+) -> Result<ExtractedBinary, InstallError> {
+  let lower = archive_name.to_ascii_lowercase();
+  if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+    return safe_extract_tar_gz(archive_bytes, dest_root, version_dir_name);
+  }
+  #[cfg(windows)]
+  if lower.ends_with(".zip") {
+    return safe_extract_zip(archive_bytes, dest_root, version_dir_name);
+  }
+  #[cfg(not(windows))]
+  if lower.ends_with(".zip") {
+    // Linux/macOS aren't picking Windows .zip assets via `pick_asset_suffix`,
+    // so a `.zip` here means either a corrupt picker or a misrouted manual
+    // install path. Refuse loudly rather than silently fall through.
+    return Err(InstallError::UnsafeArchive {
+      path: archive_name.into(),
+      reason: ".zip extraction is only supported on Windows".into(),
+    });
+  }
+  Err(InstallError::UnsafeArchive {
+    path: archive_name.into(),
+    reason: "unsupported archive extension (expected .tar.gz, .tgz, or .zip)".into(),
+  })
+}
+
+/// Stream the `.zip` body in `archive_bytes` into a unique tmp dir
+/// under `dest_root`. Same safety contract as
+/// [`safe_extract_tar_gz`]: entry path validation rejects `..` /
+/// absolute / Windows-drive-prefix entries, per-entry and total-size
+/// caps prevent zip-bombs, and only regular files + directories are
+/// emitted (zip's analogue of symlinks via central-directory mode
+/// bits is ignored — Windows llama.cpp releases don't ship SONAME
+/// chains the way Linux .tar.gz does).
+#[cfg(windows)]
+pub fn safe_extract_zip(
+  archive_bytes: &[u8],
+  dest_root: &Path,
+  version_dir_name: &str,
+) -> Result<ExtractedBinary, InstallError> {
+  use std::io::Cursor;
+
+  std::fs::create_dir_all(dest_root).map_err(|e| InstallError::Io(e.to_string()))?;
+
+  let final_dir = dest_root.join(version_dir_name);
+  if final_dir.exists() {
+    let existing = find_llama_server(&final_dir).ok_or_else(|| InstallError::UnsafeArchive {
+      path: final_dir.display().to_string(),
+      reason: "pre-existing versioned dir does not contain a `llama-server` binary".into(),
+    })?;
+    return Ok(ExtractedBinary { path: existing });
+  }
+
+  let tmp = tempfile::Builder::new()
+    .prefix(&format!("{version_dir_name}.tmp."))
+    .tempdir_in(dest_root)
+    .map_err(|e| InstallError::Io(e.to_string()))?;
+
+  let cursor = Cursor::new(archive_bytes);
+  let mut archive =
+    zip::ZipArchive::new(cursor).map_err(|e| InstallError::Io(format!("zip open: {e}")))?;
+
+  let entry_count = archive.len();
+  if entry_count > MAX_ENTRIES {
+    return Err(InstallError::UnsafeArchive {
+      path: String::new(),
+      reason: format!("zip entry count {entry_count} exceeds the {MAX_ENTRIES} cap"),
+    });
+  }
+
+  let mut total_uncompressed: u64 = 0;
+  let mut found_binary: Option<PathBuf> = None;
+
+  for i in 0..entry_count {
+    let mut entry = archive
+      .by_index(i)
+      .map_err(|e| InstallError::Io(format!("zip entry {i}: {e}")))?;
+    let raw_name = entry.name().to_string();
+    // `zip` exposes a sanitized `enclosed_name()` that already rejects
+    // absolute paths, `..` traversal, and Windows drive prefixes — but
+    // we re-validate via `safe_relative_path` to keep the refusal
+    // surface identical to the tar codepath.
+    let enclosed = entry
+      .enclosed_name()
+      .ok_or_else(|| InstallError::UnsafeArchive {
+        path: raw_name.clone(),
+        reason: "zip entry name resolves outside the archive root".into(),
+      })?;
+    let safe_rel = safe_relative_path(&enclosed).map_err(|reason| InstallError::UnsafeArchive {
+      path: raw_name.clone(),
+      reason,
+    })?;
+    let target = tmp.path().join(&safe_rel);
+
+    if entry.is_dir() {
+      std::fs::create_dir_all(&target).map_err(|e| InstallError::Io(e.to_string()))?;
+      continue;
+    }
+    if !entry.is_file() {
+      // is_symlink() returns true for the zip equivalent of symlinks
+      // (Unix mode bits in the external-attributes field). Windows
+      // llama.cpp release assets do not ship symlinks; refuse rather
+      // than silently emit a broken file.
+      return Err(InstallError::UnsafeArchive {
+        path: raw_name,
+        reason: "zip entry is neither a regular file nor a directory".into(),
+      });
+    }
+
+    let declared_size = entry.size();
+    if declared_size > MAX_PER_ENTRY_UNCOMPRESSED_BYTES {
+      return Err(InstallError::UnsafeArchive {
+        path: raw_name,
+        reason: format!(
+          "zip entry size {declared_size} exceeds per-entry cap of \
+           {MAX_PER_ENTRY_UNCOMPRESSED_BYTES} bytes"
+        ),
+      });
+    }
+    total_uncompressed = total_uncompressed.saturating_add(declared_size);
+    if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES {
+      return Err(InstallError::UnsafeArchive {
+        path: raw_name,
+        reason: format!(
+          "zip total uncompressed size exceeded the {MAX_TOTAL_UNCOMPRESSED_BYTES}-byte cap"
+        ),
+      });
+    }
+
+    if let Some(parent) = target.parent() {
+      std::fs::create_dir_all(parent).map_err(|e| InstallError::Io(e.to_string()))?;
+    }
+    let mut out = std::fs::File::create(&target).map_err(|e| InstallError::Io(e.to_string()))?;
+    // Cap the stream itself in case the declared size lied: read at
+    // most MAX_PER_ENTRY_UNCOMPRESSED_BYTES regardless of what the
+    // header said.
+    let mut limited = (&mut entry).take(MAX_PER_ENTRY_UNCOMPRESSED_BYTES);
+    std::io::copy(&mut limited, &mut out).map_err(|e| InstallError::Io(e.to_string()))?;
+    drop(out);
+
+    // Windows binaries: `.exe` is the executable signal; no +x bit
+    // bookkeeping. The init wizard looks for `llama-server.exe`.
+    if safe_rel.file_name().and_then(|n| n.to_str()) == Some("llama-server.exe") {
+      found_binary = Some(target.clone());
+    }
+  }
+
+  let binary = found_binary.ok_or_else(|| InstallError::UnsafeArchive {
+    path: String::new(),
+    reason: "zip archive did not contain a `llama-server.exe` entry".into(),
+  })?;
+
+  let from = tmp.keep();
+  if let Err(e) = std::fs::rename(&from, &final_dir) {
+    let _ = std::fs::remove_dir_all(&from);
+    return Err(InstallError::Io(format!("rename: {e}")));
+  }
+  let rel = binary
+    .strip_prefix(&from)
+    .or_else(|_| binary.strip_prefix(&final_dir))
+    .map_err(|e| InstallError::Io(format!("strip prefix after rename: {e}")))?;
+  Ok(ExtractedBinary {
+    path: final_dir.join(rel),
+  })
+}
+
 /// Search `root` for a regular file named `llama-server`. Bounded BFS
 /// to `MAX_SCAN_DEPTH` so an attacker-planted versioned dir can't
 /// turn this into an unbounded filesystem walk. Depth 4 covers the
@@ -272,13 +448,20 @@ pub fn safe_extract_tar_gz(
 /// top-level) plus headroom for one extra wrapping directory.
 fn find_llama_server(root: &Path) -> Option<PathBuf> {
   const MAX_SCAN_DEPTH: u8 = 4;
+  // Both Unix (`llama-server`) and Windows (`llama-server.exe`)
+  // shapes — the early-return scan applies to whichever the
+  // pre-existing dir actually holds.
+  let names: &[&std::ffi::OsStr] = &[
+    std::ffi::OsStr::new("llama-server"),
+    std::ffi::OsStr::new("llama-server.exe"),
+  ];
   let mut queue: Vec<(PathBuf, u8)> = vec![(root.to_path_buf(), 0)];
   while let Some((dir, depth)) = queue.pop() {
     let Ok(entries) = std::fs::read_dir(&dir) else {
       continue;
     };
     for entry in entries.flatten() {
-      if entry.file_name() == "llama-server" {
+      if names.iter().any(|n| entry.file_name() == *n) {
         let path = entry.path();
         if std::fs::metadata(&path)
           .map(|m| m.is_file())
@@ -772,6 +955,136 @@ mod tests {
     // not the discarded temp extraction.
     assert!(out_b.path.starts_with(dest.join("b9999")));
     std::fs::remove_dir_all(&dest).ok();
+  }
+
+  #[test]
+  fn safe_extract_dispatches_on_extension() {
+    // Anything that isn't a known archive extension surfaces an
+    // actionable refusal — callers should not silently pass through.
+    let dest = temp_dir("dispatch-bad-ext");
+    let err = safe_extract("artifact.exe", b"not an archive", &dest, "b9999").unwrap_err();
+    assert!(
+      matches!(err, InstallError::UnsafeArchive { ref reason, .. } if reason.contains("unsupported archive extension")),
+      "expected unsupported-extension refusal, got {err:?}"
+    );
+    std::fs::remove_dir_all(&dest).ok();
+  }
+
+  #[test]
+  fn safe_extract_routes_tar_gz_to_tar_path() {
+    let archive = build_archive(|tar| {
+      write_file_entry(tar, "build/bin/llama-server", b"#!/bin/sh\necho ok\n");
+    });
+    let dest = temp_dir("dispatch-targz");
+    let out = safe_extract(
+      "llama-b9999-bin-ubuntu-x64.tar.gz",
+      &archive,
+      &dest,
+      "b9999",
+    )
+    .expect("tar.gz route");
+    assert!(out.path.ends_with("build/bin/llama-server"));
+    std::fs::remove_dir_all(&dest).ok();
+  }
+
+  #[cfg(not(windows))]
+  #[test]
+  fn safe_extract_refuses_zip_on_non_windows() {
+    let dest = temp_dir("dispatch-zip-not-windows");
+    let err = safe_extract(
+      "llama-b9999-bin-win-cpu-x64.zip",
+      b"PK\x03\x04",
+      &dest,
+      "b9999",
+    )
+    .unwrap_err();
+    assert!(
+      matches!(err, InstallError::UnsafeArchive { ref reason, .. } if reason.contains("only supported on Windows")),
+      "expected non-Windows zip refusal, got {err:?}"
+    );
+    std::fs::remove_dir_all(&dest).ok();
+  }
+
+  // Windows-only zip extraction tests live inside `cfg(windows)`
+  // because the `zip` crate isn't compiled on other platforms (per
+  // the Cargo.toml gate). The Windows CI lane (Unit 10) exercises
+  // them; locally on Linux they're a no-op.
+  #[cfg(windows)]
+  mod windows_zip {
+    use super::*;
+    use std::io::Cursor;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    fn build_zip<F: FnOnce(&mut ZipWriter<Cursor<Vec<u8>>>)>(f: F) -> Vec<u8> {
+      let buf = Cursor::new(Vec::<u8>::new());
+      let mut writer = ZipWriter::new(buf);
+      f(&mut writer);
+      writer.finish().unwrap().into_inner()
+    }
+
+    fn write_zip_file(writer: &mut ZipWriter<Cursor<Vec<u8>>>, path: &str, body: &[u8]) {
+      use std::io::Write as _;
+      writer
+        .start_file(path, SimpleFileOptions::default())
+        .unwrap();
+      writer.write_all(body).unwrap();
+    }
+
+    #[test]
+    fn extracts_well_formed_zip() {
+      let archive = build_zip(|w| {
+        write_zip_file(w, "llama-server.exe", b"MZ\x90\x00");
+        write_zip_file(w, "README.txt", b"docs");
+      });
+      let dest = temp_dir("zip-happy");
+      let out = safe_extract_zip(&archive, &dest, "b9999").expect("zip extract");
+      assert!(out.path.is_file(), "binary not extracted");
+      assert!(out.path.ends_with("llama-server.exe"));
+      std::fs::remove_dir_all(&dest).ok();
+    }
+
+    #[test]
+    fn refuses_zip_without_llama_server_entry() {
+      let archive = build_zip(|w| {
+        write_zip_file(w, "other.exe", b"MZ");
+      });
+      let dest = temp_dir("zip-no-binary");
+      let err = safe_extract_zip(&archive, &dest, "b9999").unwrap_err();
+      assert!(
+        matches!(err, InstallError::UnsafeArchive { ref reason, .. } if reason.contains("llama-server.exe")),
+        "expected missing-binary refusal, got {err:?}"
+      );
+      std::fs::remove_dir_all(&dest).ok();
+    }
+
+    #[test]
+    fn refuses_zip_with_traversal_entry() {
+      // The `zip` crate's `enclosed_name()` already rejects `..`
+      // segments. Verify the resulting UnsafeArchive error path is
+      // what production callers see.
+      let archive = build_zip(|w| {
+        write_zip_file(w, "../escape.exe", b"evil");
+      });
+      let dest = temp_dir("zip-traversal");
+      let err = safe_extract_zip(&archive, &dest, "b9999").unwrap_err();
+      assert!(
+        matches!(err, InstallError::UnsafeArchive { .. }),
+        "expected traversal refusal, got {err:?}"
+      );
+      std::fs::remove_dir_all(&dest).ok();
+    }
+
+    #[test]
+    fn dispatch_routes_zip_to_zip_path() {
+      let archive = build_zip(|w| {
+        write_zip_file(w, "llama-server.exe", b"MZ");
+      });
+      let dest = temp_dir("dispatch-zip");
+      let out = safe_extract("llama-b9999-bin-win-cpu-x64.zip", &archive, &dest, "b9999")
+        .expect("zip route");
+      assert!(out.path.ends_with("llama-server.exe"));
+      std::fs::remove_dir_all(&dest).ok();
+    }
   }
 
   #[test]

@@ -407,7 +407,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 **Verification:** `cargo test` passes on both targets. Manual on Windows: deleting `runtime.json` and `daemon.pid` while daemon is up does not corrupt state; restart rebinds cleanly.
 
-- [ ] **Unit 8: Windows archive extraction (`.zip` branch in `safe_extract`)**
+- [x] **Unit 8: Windows archive extraction (`.zip` branch in `safe_extract`)**
 
 **Goal:** Add a `.zip` codepath to `src/init/install/safe_extract.rs` so the init wizard can extract llama.cpp's Windows GitHub Releases assets. Asset extension dispatches between `.tar.gz` and `.zip`; all existing safety checks (tar-bomb / SONAME / Windows-drive-prefix / path-prefix validation) apply to both.
 

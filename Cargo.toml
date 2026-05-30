@@ -224,6 +224,12 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
 ] }
+# Unit 8: llama.cpp's Windows GitHub Releases assets ship as `.zip`
+# (`win-cuda-*-x64.zip`, `win-vulkan-x64.zip`, etc.). Default features
+# pull in bzip2 / time / aes; we only need DEFLATE so the dep stays
+# small. Linux/macOS binary size is unchanged since this is
+# Windows-only.
+zip = { version = "5", default-features = false, features = ["deflate"] }
 
 [lib]
 name = "llamastash"

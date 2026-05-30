@@ -30,7 +30,7 @@ use crate::gpu::GpuInfo;
 use crate::init::detection::{CpuArch, HardwareSnapshot, OsFamily};
 use crate::init::fetch::{FetchClient, FetchError};
 
-use super::safe_extract::safe_extract_tar_gz;
+use super::safe_extract::safe_extract;
 use super::{sha256_file, BinaryInstall, InstallError};
 use crate::init::snapshot::InstallMethod;
 
@@ -86,6 +86,15 @@ pub fn pick_asset_suffix(hw: &HardwareSnapshot) -> Option<String> {
       Some(format!("ubuntu-vulkan-{arch_suffix}.tar.gz"))
     }
     (GpuInfo::CpuOnly, OsFamily::Linux) => Some(format!("ubuntu-{arch_suffix}.tar.gz")),
+    // Windows asset naming: `llama-bXXXX-bin-win-<accel>-x64.zip`.
+    // AMD Windows GPU detection is out of 0.0.2 scope, so AMD-on-Windows
+    // falls through to Vulkan (the universal fallback for discrete GPUs
+    // without explicit detection). CUDA wants a `-X.Y` version suffix
+    // which the existing `*` glob handles.
+    (GpuInfo::Amd { .. }, OsFamily::Windows) => Some(format!("win-hip-radeon-{arch_suffix}.zip")),
+    (GpuInfo::Nvidia { .. }, OsFamily::Windows) => Some(format!("win-cuda-*-{arch_suffix}.zip")),
+    (GpuInfo::Unknown { .. }, OsFamily::Windows) => Some(format!("win-vulkan-{arch_suffix}.zip")),
+    (GpuInfo::CpuOnly, OsFamily::Windows) => Some(format!("win-cpu-{arch_suffix}.zip")),
     _ => None,
   }
 }
@@ -230,7 +239,7 @@ pub async fn install_picked(
       actual,
     });
   }
-  let extracted = safe_extract_tar_gz(&bytes, install_root, &pick.tag)?;
+  let extracted = safe_extract(&pick.asset_name, &bytes, install_root, &pick.tag)?;
   let digest = sha256_file(&extracted.path)?;
   Ok(BinaryInstall {
     method: InstallMethod::GhReleases,

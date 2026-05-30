@@ -373,6 +373,7 @@ fn os_short(os: OsFamily) -> &'static str {
   match os {
     OsFamily::Linux => "linux",
     OsFamily::MacOs => "macos",
+    OsFamily::Windows => "windows",
     OsFamily::Other => "other",
   }
 }
