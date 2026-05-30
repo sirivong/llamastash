@@ -438,7 +438,7 @@ Existing supervisor code calls `ProcessControl` through the trait; the per-OS su
 
 **Verification:** `cargo test --features test-fixtures init_archive_extract` passes on Linux + macOS with the cfg-gated dep, and on Windows with the dep active. Manual on Windows: `llamastash init` against a real llama.cpp Windows release.
 
-- [ ] **Unit 9: Windows `Cargo.toml` cfg-gating and first clean Windows build**
+- [x] **Unit 9: Windows `Cargo.toml` cfg-gating and first clean Windows build**
 
 **Goal:** Gate `arboard`'s Wayland feature and any other Unix-only dep features behind `cfg(unix)` in `Cargo.toml` so `cargo build --target x86_64-pc-windows-msvc` succeeds. This unit is the "Windows compiles" milestone.
 

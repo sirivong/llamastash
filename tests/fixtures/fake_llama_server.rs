@@ -105,7 +105,10 @@ async fn main() {
   if args.trap_sigterm {
     // Re-register the SIGTERM handler as a no-op so the supervisor's
     // SIGKILL-after-5s grace path is exercised. SIGINT still exits
-    // the test process cleanly.
+    // the test process cleanly. Windows has no SIGTERM — supervisor
+    // tests that exercise force-kill use CTRL+BREAK + TerminateJobObject,
+    // so the trap flag is a no-op on Windows.
+    #[cfg(unix)]
     tokio::spawn(async {
       let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("install sigterm handler");
