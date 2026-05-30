@@ -281,7 +281,7 @@ impl ProcessControl for WindowsProcessControl {
       SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
       JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
-    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
     // 1. Create the Job Object up front so spawn failure doesn't leak
     //    OS objects.
@@ -315,9 +315,12 @@ impl ProcessControl for WindowsProcessControl {
 
     // 3. Spawn with CREATE_NEW_PROCESS_GROUP (required for the child to
     //    receive CTRL+BREAK via GenerateConsoleCtrlEvent) plus
-    //    DETACHED_PROCESS (no console window for headless daemon
-    //    children whose stdout/stderr is piped).
-    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    //    CREATE_NO_WINDOW (hide the console window without leaving the
+    //    child consoleless — DETACHED_PROCESS gives no console at all,
+    //    which interacts poorly with `tokio::process::Child`'s piped
+    //    stdio handles on Windows and surfaced as the supervisor
+    //    never reaching Ready in CI integration tests).
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     let child = cmd.spawn()?;
 
     // 4. Assign the just-spawned child to the job. There's a brief
