@@ -675,9 +675,9 @@ jobs:
           git config --global credential.helper ""
 
           git clone "https://x-access-token@github.com/llamastash/scoop-llamastash.git" --branch main scoop
-          cp llamastash.json scoop/bucket/llamastash.json
+          cp llamastash.json scoop/llamastash.json
           cd scoop
-          git add bucket/llamastash.json
+          git add llamastash.json
           if git diff-index --quiet HEAD; then
             echo "bucket already up to date for ${RELEASE_TAG}; nothing to commit"
             exit 0
