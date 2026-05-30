@@ -125,9 +125,13 @@ Per-launch logs are tee'd to a 10 MB × 5-file rotating log on disk and a 4K-lin
 
 1. PID is alive (`kill(pid, 0)` via sysinfo).
 2. Recorded port answers on `127.0.0.1`.
-3. The port's `/v1/models` response mentions the recorded model path.
+3. The port's `/v1/models` advertises the recorded model. `data[].id` is
+   matched against the recorded full path (older llama-server echoed the `-m`
+   value) **or** the file basename (llama.cpp `b9245+` reports only the
+   basename as `id`). A *differing* full-path id is still rejected, preserving
+   the PID-reuse guard.
 
-A failed factor drops the entry from the running snapshot. Unmanaged `llama-server` processes the daemon doesn't own surface read-only in `status.external`.
+A failed factor drops the entry from the running snapshot. Unmanaged `llama-server` processes the daemon doesn't own surface read-only in `status.external` — kernel threads are de-duplicated, so a multi-threaded child counts once, not once per thread.
 
 ## Model identity
 

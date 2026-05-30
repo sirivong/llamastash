@@ -4,6 +4,17 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Fixed
+
+- **Orphan re-adoption works against current llama.cpp.** The daemon-restart
+  sweep matched the recorded model only against `/v1/models` `id ==` the full
+  path; `llama-server b9245+` reports just the basename, so every orphan was
+  marked stale and demoted to an unmanaged external. The identity check now
+  accepts the full path **or** the basename (a differing full path is still
+  rejected — PID-reuse guard intact). External-process discovery also
+  de-duplicates kernel threads, so a multi-threaded child surfaces as one
+  `status.external` row instead of one per thread.
+
 ### Added
 
 - **Windows GPU detection via DXGI.** Fills the Windows AMD / Intel

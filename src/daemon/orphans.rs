@@ -119,6 +119,14 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
       if adopted_pids.contains(&pid_u32) {
         return None;
       }
+      // Skip threads. `sysinfo` lists each kernel task (thread) under its
+      // own TID alongside the main process; without this filter a
+      // multi-threaded `llama-server` surfaces once per thread (e.g. 36
+      // identical rows for one process). Real processes have
+      // `thread_kind() == None`.
+      if proc.thread_kind().is_some() {
+        return None;
+      }
       let cmd: Vec<String> = proc
         .cmd()
         .iter()
@@ -202,29 +210,32 @@ async fn fetch_models_body(port: u16, timeout: Duration) -> std::io::Result<(u16
   Ok((status, body))
 }
 
-/// Strict match: parse the `/v1/models` body as JSON and accept
-/// adoption only when the documented `data[].id` field equals the
-/// expected path exactly. This is tighter than the previous
-/// substring-anywhere match, which would falsely adopt any local
-/// process whose response body happened to contain the basename
-/// (think `python -m http.server` serving a directory whose
-/// listing mentions `llama.gguf`). The strict match is the right
-/// boundary because llama-server emits the literal `-m <path>` it
-/// received and we recorded the same canonical path on launch.
+/// Strict-ish match: parse the `/v1/models` body as JSON and accept
+/// adoption only when a documented `data[].id` field identifies the
+/// expected model. We tolerate the two `llama-server` behaviours we
+/// have observed in the wild (see `id_matches`), but never fall back
+/// to a substring-anywhere scan — that would falsely adopt any local
+/// process whose response body happened to contain the filename
+/// (think `python -m http.server` serving a directory listing).
 fn body_mentions_path(body: &[u8], expected: &Path) -> bool {
   let Ok(text) = std::str::from_utf8(body) else {
     return false;
   };
-  // Fast reject: if the canonical path text isn't anywhere in the
-  // body, no JSON shape can match.
   let expected_str = expected.to_string_lossy();
-  if expected_str.is_empty() || !text.contains(expected_str.as_ref()) {
+  let expected_base = expected.file_name().and_then(|s| s.to_str());
+  // Fast reject: the basename is a substring of both a full-path id
+  // and a bare-basename id, so if it isn't anywhere in the body no
+  // documented shape can match.
+  let Some(base) = expected_base else {
+    return false;
+  };
+  if base.is_empty() || !text.contains(base) {
     return false;
   }
-  // Parse the body strictly. Only accept the documented OpenAI
-  // shape `{ "data": [ { "id": "<path>" }, ... ] }`. Any extra
-  // fields are allowed (forward-compatible); a substring-only hit
-  // outside `data[].id` is rejected as accidental.
+  // Parse the body strictly. Only accept the documented OpenAI shape
+  // `{ "data": [ { "id": "<id>" }, ... ] }`. Extra fields are allowed
+  // (forward-compatible); a substring-only hit outside `data[].id` is
+  // rejected as accidental.
   let parsed: serde_json::Value = match serde_json::from_str(text) {
     Ok(v) => v,
     Err(_) => return false,
@@ -236,9 +247,30 @@ fn body_mentions_path(body: &[u8], expected: &Path) -> bool {
     row
       .get("id")
       .and_then(|v| v.as_str())
-      .map(|id| id == expected_str.as_ref())
+      .map(|id| id_matches(id, expected_str.as_ref(), base))
       .unwrap_or(false)
   })
+}
+
+/// Match a `/v1/models` `id` against the recorded model path, tolerant
+/// of the two `llama-server` identity formats we've observed:
+///
+/// - **older builds** echo the literal `-m <path>` they were launched
+///   with (an absolute path). We match it exactly, which still rejects
+///   a same-basename-but-different-directory model — the PID-reuse
+///   guard the three-factor sweep relies on.
+/// - **b9245+** report only the file basename (e.g.
+///   `gemma-4-E2B-it-Q4_K_M.gguf`). When the advertised id is itself a
+///   bare basename (no path separator), we match the recorded path's
+///   basename. The relaxation is gated on the id being bare, so a full
+///   path that *differs* is still rejected, and the (pid, port) pair —
+///   already confirmed alive and listening — pins the process.
+fn id_matches(id: &str, expected_full: &str, expected_base: &str) -> bool {
+  if id == expected_full {
+    return true;
+  }
+  let id_is_bare = !id.contains('/') && !id.contains('\\');
+  id_is_bare && id == expected_base
 }
 
 /// Lift `-m <path>` out of a llama-server cmdline. Returns the
@@ -352,8 +384,20 @@ mod tests {
   fn body_mentions_path_requires_strict_id_match() {
     let body = br#"{"data":[{"id":"/m/a.gguf","object":"model"}]}"#;
     assert!(body_mentions_path(body, Path::new("/m/a.gguf")));
-    // Same basename in a different directory must NOT adopt. This is
-    // the PID-reuse / friendly-fire case the strict matcher rejects.
+    // b9245+ llama-server reports only the basename as `id`. A bare
+    // basename equal to the recorded file must adopt (the (pid, port)
+    // pair already pins the process).
+    let body_basename = br#"{"data":[{"id":"a.gguf","object":"model"}]}"#;
+    assert!(body_mentions_path(body_basename, Path::new("/m/a.gguf")));
+    // A bare basename that differs must NOT adopt.
+    let body_basename_other = br#"{"data":[{"id":"other.gguf"}]}"#;
+    assert!(!body_mentions_path(
+      body_basename_other,
+      Path::new("/m/a.gguf")
+    ));
+    // Same basename in a different directory, advertised as a *full
+    // path*, must NOT adopt. The id is a path that differs → reject
+    // (the PID-reuse / friendly-fire guard for the old id format).
     let body_renamed = br#"{"data":[{"id":"/different/dir/a.gguf"}]}"#;
     assert!(!body_mentions_path(body_renamed, Path::new("/m/a.gguf")));
     let body_other = br#"{"data":[{"id":"/m/other.gguf"}]}"#;
@@ -418,6 +462,36 @@ mod tests {
     })
     .await;
     assert_eq!(report.adopted.len(), 1, "matching probe must adopt");
+    assert!(report.stale.is_empty());
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn live_pid_with_basename_only_id_adopts() {
+    // Regression for the llama.cpp drift: b9245+ reports only the file
+    // basename as `/v1/models` `id` (not the full `-m` path the older
+    // builds echoed). The recorded path is absolute; the sweep must
+    // still adopt when the basenames line up.
+    let live = std::process::id() as i32;
+    let port = allocate_port();
+    let body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "match.gguf", "object": "model"}],
+    })
+    .to_string();
+    let _resp = spawn_one_shot(port, 200, body).await;
+
+    let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
+    let report = sweep(SweepInputs {
+      recorded_running: &recorded,
+      external_marker: "llamastash-sweep-marker-that-matches-nothing-9f3a",
+      probe_timeout: Duration::from_secs(1),
+    })
+    .await;
+    assert_eq!(
+      report.adopted.len(),
+      1,
+      "basename-only id (llama.cpp b9245+) must still adopt"
+    );
     assert!(report.stale.is_empty());
   }
 
