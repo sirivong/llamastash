@@ -177,6 +177,7 @@ Two release tracks:
   - [ ] **MCP server surface.** Tracked under R34 alongside LAN exposure. The CLI is already agent-friendly via `--json`; MCP would add a Model Context Protocol server endpoint for agents that prefer it.
   - [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
 - [ ] **Need brainstorm/plan**: MLX and vLLM if cheap to add.
+- [ ] **NPU support via Lemonade Server (Strix Halo / XDNA)**. llama.cpp has no XDNA backend; AMD's path is Lemonade Server (OpenAI-compatible, ONNX Runtime + VitisAI EP). Tier 1 (~300–500 LOC) is a `--upstream-url` passthrough: user runs Lemonade themselves, llamastash's proxy forwards to it and sources the model list from `/v1/models`. Tier 2 (~1.5–2.5 KLOC) promotes Lemonade to a first-class backend with autostart + supervision. Brainstorm: [`docs/brainstorms/2026-05-31-npu-backend-via-lemonade-requirements.md`](docs/brainstorms/2026-05-31-npu-backend-via-lemonade-requirements.md). Defer until a real user asks for it — Lemonade's ONNX-VitisAI model catalog is narrow and NPU quantization quality on Strix Halo is mixed enough to want measurement first.
 - [ ] **Need brainstorm/plan**: Docker-ready packaging.
 - [ ] More colors in CLI outs, including the --help.
 - [ ] Make custom UI components reusable and consistent.
