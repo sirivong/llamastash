@@ -49,7 +49,7 @@ Same shape for both runs.
   ```
 
   macOS uses `~/Library/Application Support/llamastash/`; Windows
-  uses `%LOCALAPPDATA%\llamastash\`.
+  uses `%APPDATA%\llamastash\data\`.
 
 3. Confirm at least two models are discovered so the dormant /
    running split has something to land on:

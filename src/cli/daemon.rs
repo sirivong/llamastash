@@ -238,11 +238,32 @@ pub(crate) fn build_options(
   cli: &Cli,
   config: &Config,
 ) -> Result<DaemonOptions> {
+  let env_paths = env_model_paths();
+  let env_no_scan_v = env_no_scan();
+  // Refuse to start with discovery completely off and no user-supplied
+  // paths. Without this the daemon would come up healthy, the catalog
+  // would stay empty forever, and the user would see "no models found"
+  // with no signal that it's a config dead-end. Errors propagate as
+  // CONFIG_ERROR exits via the CLI dispatcher.
+  crate::config::validate_scan_settings(
+    cli.no_scan || env_no_scan_v || config.disable_scan,
+    &cli.model_paths,
+    &env_paths,
+    &config.model_paths,
+  )
+  .map_err(anyhow::Error::from)?;
+
   let mut opts = DaemonOptions::from_defaults()?;
   if let Some(p) = state_dir {
     opts.state_dir = p;
   }
-  let scan_roots = resolve_scan_roots(cli, config, home_dir().as_deref());
+  let scan_roots = resolve_scan_roots(
+    cli,
+    config,
+    &env_paths,
+    env_no_scan_v,
+    home_dir().as_deref(),
+  );
   opts.discovery = DiscoveryOptions::new(scan_roots);
   // Best-effort `llama-server` resolution. A miss leaves
   // `opts.binary = None`; the daemon still starts and `start_model`
@@ -306,6 +327,31 @@ fn env_flag_truthy(name: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Parse `LLAMASTASH_MODEL_PATHS` into a path list, using the
+/// platform's path separator (`:` on POSIX, `;` on Windows) via
+/// `std::env::split_paths`. Unset / empty / all-empty-entries returns
+/// an empty vec. Empty entries (`""` between separators) are skipped
+/// rather than producing `PathBuf::new()` — a stray colon shouldn't
+/// register as "scan the empty path".
+fn env_model_paths() -> Vec<PathBuf> {
+  std::env::var_os("LLAMASTASH_MODEL_PATHS")
+    .map(|raw| {
+      std::env::split_paths(&raw)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// True when `LLAMASTASH_NO_SCAN` is set to a truthy value. Same
+/// truthy set as `env_flag_truthy` — matches the documented
+/// `LLAMASTASH_NO_SCAN=1` recipe in the README, and accepts
+/// `true`/`yes`/`on` (case-insensitive) for parity with other env
+/// flags in this binary.
+fn env_no_scan() -> bool {
+  env_flag_truthy("LLAMASTASH_NO_SCAN")
+}
+
 /// Collect the global CLI flags that the re-exec'd detached daemon
 /// must inherit so it resolves the same discovery / binary / config
 /// surface the parent would have. Without this, the child rebuilds
@@ -332,21 +378,35 @@ fn propagated_cli_args(cli: &Cli) -> Vec<std::ffi::OsString> {
   args
 }
 
-/// Merge CLI + config + default-cache enumeration into the canonical
-/// scan-root list the daemon should walk. Exposed as a pure function
-/// so unit tests can drive it without a daemon.
+/// Merge CLI + env + config + default-cache enumeration into the
+/// canonical scan-root list the daemon should walk. Exposed as a pure
+/// function so unit tests can drive it without touching process env.
+///
+/// Priority for `no_scan`: any of (`--no-scan`,
+/// `LLAMASTASH_NO_SCAN=1`, `disable_scan: true`) turns the default-
+/// cache walk off. Model paths from all three sources are merged and
+/// de-duplicated; merge order is `config > env > cli` (irrelevant for
+/// correctness since the list is order-insensitive at the scanner,
+/// but it keeps the daemon's `ps`-visible argv readable).
 pub(crate) fn resolve_scan_roots(
   cli: &Cli,
   config: &Config,
+  env_paths: &[PathBuf],
+  env_no_scan: bool,
   home: Option<&std::path::Path>,
 ) -> Vec<crate::discovery::scanner::ScanRoot> {
   let mut user_paths: Vec<PathBuf> = config.model_paths.clone();
+  for p in env_paths {
+    if !user_paths.iter().any(|x| x == p) {
+      user_paths.push(p.clone());
+    }
+  }
   for p in &cli.model_paths {
     if !user_paths.iter().any(|x| x == p) {
       user_paths.push(p.clone());
     }
   }
-  let no_scan = cli.no_scan || config.disable_scan;
+  let no_scan = cli.no_scan || env_no_scan || config.disable_scan;
   default_set(RootResolution {
     user_paths: &user_paths,
     disable: &config.disable_default_cache_paths,
@@ -495,7 +555,7 @@ mod tests {
       ..Config::default()
     };
     let home = PathBuf::from("/home/alice");
-    let roots = resolve_scan_roots(&cli, &config, Some(&home));
+    let roots = resolve_scan_roots(&cli, &config, &[], false, Some(&home));
     let user_paths: Vec<&Path> = roots
       .iter()
       .filter(|r| r.source == ModelSource::UserPath)
@@ -516,7 +576,7 @@ mod tests {
     let cli = parse_cli(&["--no-scan", "--model-path", "/work/keep", "daemon", "start"]);
     let config = Config::default();
     let home = PathBuf::from("/home/alice");
-    let roots = resolve_scan_roots(&cli, &config, Some(&home));
+    let roots = resolve_scan_roots(&cli, &config, &[], false, Some(&home));
     let cache_sources: Vec<_> = roots
       .iter()
       .filter(|r| r.source != ModelSource::UserPath)
@@ -537,7 +597,7 @@ mod tests {
       ..Config::default()
     };
     let home = PathBuf::from("/home/alice");
-    let roots = resolve_scan_roots(&cli, &config, Some(&home));
+    let roots = resolve_scan_roots(&cli, &config, &[], false, Some(&home));
     assert!(roots.is_empty(), "no user paths + disable_scan = empty");
   }
 
@@ -553,7 +613,7 @@ mod tests {
       ..Config::default()
     };
     let home = PathBuf::from("/home/alice");
-    let roots = resolve_scan_roots(&cli, &config, Some(&home));
+    let roots = resolve_scan_roots(&cli, &config, &[], false, Some(&home));
     let sources: std::collections::BTreeSet<_> = roots.iter().map(|r| r.source).collect();
     assert!(!sources.contains(&ModelSource::HuggingFace));
     assert!(!sources.contains(&ModelSource::Ollama));
@@ -569,7 +629,7 @@ mod tests {
       ..Config::default()
     };
     let home = PathBuf::from("/home/alice");
-    let roots = resolve_scan_roots(&cli, &config, Some(&home));
+    let roots = resolve_scan_roots(&cli, &config, &[], false, Some(&home));
     let matches: Vec<&Path> = roots
       .iter()
       .filter(|r| r.path == Path::new("/shared"))
@@ -814,5 +874,163 @@ mod tests {
     let opts_neither =
       build_options(None, None, false, false, &cli, &config_default).expect("build_options");
     assert!(opts_neither.proxy.fallback_enabled);
+  }
+
+  #[test]
+  fn resolve_uses_env_paths_when_supplied() {
+    // No CLI / config paths — env-only source must still populate
+    // UserPath roots so a `LLAMASTASH_MODEL_PATHS=/foo:/bar` recipe
+    // matches the documented contract in the README.
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config::default();
+    let home = PathBuf::from("/home/alice");
+    let env_paths = vec![PathBuf::from("/env/one"), PathBuf::from("/env/two")];
+    let roots = resolve_scan_roots(&cli, &config, &env_paths, false, Some(&home));
+    let user_paths: Vec<&Path> = roots
+      .iter()
+      .filter(|r| r.source == ModelSource::UserPath)
+      .map(|r| r.path.as_path())
+      .collect();
+    assert!(
+      user_paths.iter().any(|p| *p == Path::new("/env/one")),
+      "env path missing: {user_paths:?}"
+    );
+    assert!(
+      user_paths.iter().any(|p| *p == Path::new("/env/two")),
+      "env path missing: {user_paths:?}"
+    );
+  }
+
+  #[test]
+  fn resolve_dedupes_env_paths_against_cli_and_config() {
+    let cli = parse_cli(&["--model-path", "/shared", "daemon", "start"]);
+    let config = Config {
+      model_paths: vec![PathBuf::from("/shared")],
+      ..Config::default()
+    };
+    let env_paths = vec![PathBuf::from("/shared")];
+    let home = PathBuf::from("/home/alice");
+    let roots = resolve_scan_roots(&cli, &config, &env_paths, false, Some(&home));
+    let matches: Vec<&Path> = roots
+      .iter()
+      .filter(|r| r.path == Path::new("/shared"))
+      .map(|r| r.path.as_path())
+      .collect();
+    assert_eq!(
+      matches.len(),
+      1,
+      "config/env/cli duplicate must collapse, got {matches:?}"
+    );
+  }
+
+  #[test]
+  fn resolve_env_no_scan_suppresses_default_caches() {
+    let cli = parse_cli(&["--model-path", "/work/keep", "daemon", "start"]);
+    let config = Config::default();
+    let home = PathBuf::from("/home/alice");
+    // env_no_scan=true must drop the default-cache walk even when
+    // neither `--no-scan` nor `config.disable_scan` is set.
+    let roots = resolve_scan_roots(&cli, &config, &[], true, Some(&home));
+    let cache_sources: Vec<_> = roots
+      .iter()
+      .filter(|r| r.source != ModelSource::UserPath)
+      .map(|r| r.source)
+      .collect();
+    assert!(
+      cache_sources.is_empty(),
+      "LLAMASTASH_NO_SCAN must suppress default caches, got {cache_sources:?}"
+    );
+    assert_eq!(roots.len(), 1, "only --model-path remains");
+  }
+
+  #[test]
+  fn env_model_paths_splits_on_platform_separator() {
+    // Drive the production helper directly. Two paths joined with the
+    // platform separator must round-trip. `join_paths` is the inverse
+    // of `split_paths`, so this also documents the public contract
+    // shell users see (`:` on POSIX, `;` on Windows).
+    let joined = std::env::join_paths([PathBuf::from("/a"), PathBuf::from("/b")])
+      .expect("join_paths should succeed for two simple paths");
+    let prev = std::env::var_os("LLAMASTASH_MODEL_PATHS");
+    std::env::set_var("LLAMASTASH_MODEL_PATHS", &joined);
+    let parsed = env_model_paths();
+    match prev {
+      Some(v) => std::env::set_var("LLAMASTASH_MODEL_PATHS", v),
+      None => std::env::remove_var("LLAMASTASH_MODEL_PATHS"),
+    }
+    assert_eq!(parsed, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+  }
+
+  #[test]
+  fn env_model_paths_unset_returns_empty() {
+    let prev = std::env::var_os("LLAMASTASH_MODEL_PATHS");
+    std::env::remove_var("LLAMASTASH_MODEL_PATHS");
+    let parsed = env_model_paths();
+    if let Some(v) = prev {
+      std::env::set_var("LLAMASTASH_MODEL_PATHS", v);
+    }
+    assert!(parsed.is_empty());
+  }
+
+  #[test]
+  fn build_options_rejects_disable_scan_with_no_paths() {
+    // The dead-end combo: scanning off, zero user paths anywhere.
+    // Today this would leave the catalog empty forever — the
+    // validator must turn it into a startup error so the user sees
+    // *why* the daemon refused.
+    let cli = parse_cli(&["--no-scan", "daemon", "start"]);
+    let config = Config::default();
+    let err = build_options(None, None, false, false, &cli, &config)
+      .expect_err("--no-scan with zero paths must error");
+    let msg = format!("{err:#}");
+    assert!(
+      msg.contains("scanning is disabled"),
+      "error must name the failure mode, got: {msg}"
+    );
+  }
+
+  #[test]
+  fn build_options_accepts_disable_scan_when_cli_path_supplied() {
+    let cli = parse_cli(&["--no-scan", "--model-path", "/work/keep", "daemon", "start"]);
+    let config = Config::default();
+    assert!(
+      build_options(None, None, false, false, &cli, &config).is_ok(),
+      "--no-scan + --model-path must build cleanly"
+    );
+  }
+
+  #[test]
+  fn build_options_accepts_disable_scan_when_config_path_supplied() {
+    let cli = parse_cli(&["--no-scan", "daemon", "start"]);
+    let config = Config {
+      model_paths: vec![PathBuf::from("/work/cfg")],
+      ..Config::default()
+    };
+    assert!(
+      build_options(None, None, false, false, &cli, &config).is_ok(),
+      "--no-scan + config model_paths must build cleanly"
+    );
+  }
+
+  #[test]
+  fn env_no_scan_accepts_documented_truthy_values() {
+    // `1` is what the README documents; `true`/`yes`/`on` ride along
+    // because every other LLAMASTASH_* bool in this binary accepts
+    // them, and a script that already uses LLAMASTASH_OFFLINE=true
+    // shouldn't be surprised when LLAMASTASH_NO_SCAN=true is rejected.
+    let prev = std::env::var_os("LLAMASTASH_NO_SCAN");
+    for value in &["1", "true", "TRUE", "yes", "On"] {
+      std::env::set_var("LLAMASTASH_NO_SCAN", value);
+      assert!(env_no_scan(), "value {value:?} should disable scan");
+    }
+    for value in &["0", "false", "no", "off", ""] {
+      std::env::set_var("LLAMASTASH_NO_SCAN", value);
+      assert!(!env_no_scan(), "value {value:?} should leave scan on");
+    }
+    std::env::remove_var("LLAMASTASH_NO_SCAN");
+    assert!(!env_no_scan(), "unset should leave scan on");
+    if let Some(v) = prev {
+      std::env::set_var("LLAMASTASH_NO_SCAN", v);
+    }
   }
 }

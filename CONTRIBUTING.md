@@ -42,7 +42,7 @@ cargo run -- daemon status             # pid / uptime / connections
 cargo run -- daemon stop               # graceful shutdown
 ```
 
-The daemon binds two loopback HTTP listeners: the control plane (default `127.0.0.1:48134`) and the OpenAI-compat proxy (default `127.0.0.1:11434/11435`). Connection details — URL + bearer token — live in `runtime.json` under the state dir (`$XDG_STATE_HOME/llamastash` on Linux, `~/Library/Application Support/llamastash` on macOS, `%LOCALAPPDATA%\llamastash` on Windows). Clients read it to attach.
+The daemon binds two loopback HTTP listeners: the control plane (default `127.0.0.1:48134`) and the OpenAI-compat proxy (default `127.0.0.1:11434/11435`). Connection details — URL + bearer token — live in `runtime.json` under the state dir (`$XDG_STATE_HOME/llamastash` on Linux, `~/Library/Application Support/llamastash` on macOS, `%APPDATA%\llamastash\data` on Windows). Clients read it to attach.
 
 If you need two daemons side-by-side (e.g. testing migrations), give each its own state dir:
 

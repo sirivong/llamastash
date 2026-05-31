@@ -35,7 +35,7 @@ State-dir paths per platform:
 
 - Linux: `$XDG_STATE_HOME/llamastash` (default `~/.local/state/llamastash`)
 - macOS: `~/Library/Application Support/llamastash`
-- Windows: `%LOCALAPPDATA%\llamastash`
+- Windows: `%APPDATA%\llamastash\data` (i.e. `C:\Users\<you>\AppData\Roaming\llamastash\data`)
 
 ## Stale PID lockfile after a crash
 
@@ -47,7 +47,7 @@ State-dir paths per platform:
 rm -- "$XDG_STATE_HOME/llamastash/daemon.pid"
 ```
 
-The state directory defaults to `~/.local/state/llamastash/` on Linux and `~/Library/Application Support/llamastash/` on macOS.
+The state directory defaults to `~/.local/state/llamastash/` on Linux, `~/Library/Application Support/llamastash/` on macOS, and `%APPDATA%\llamastash\data\` on Windows.
 
 ## Port range exhausted
 

@@ -2,15 +2,28 @@
 #
 # Copy this file to one of the resolved locations and edit:
 #
-#   Linux   ~/.config/llamastash/config.yaml
-#   macOS   ~/Library/Application Support/llamastash/config.yaml
-#   Both    LLAMASTASH_CONFIG=/path/to/config.yaml
-#           llamastash --config /path/to/config.yaml ...
+#   Linux     $XDG_CONFIG_HOME/llamastash/config.yaml
+#             (fallback: ~/.config/llamastash/config.yaml)
+#   macOS     ~/Library/Application Support/llamastash/config.yaml
+#   Windows   %APPDATA%\llamastash\config\config.yaml
+#             (i.e. C:\Users\<you>\AppData\Roaming\llamastash\config\)
+#   Any OS    LLAMASTASH_CONFIG=/abs/path/to/config.yaml
+#             llamastash --config /abs/path/to/config.yaml ...
 #
 # Every field is optional — missing keys fall back to the defaults
 # documented inline. Unknown top-level keys are silently ignored so
 # old configs keep working when new options land; unknown values
 # within a known key (e.g. a misspelt theme name) error noisily.
+#
+# Each section below tags its override sources as:
+#   CLI: <flag>            (--foo on the command line; if scope is
+#                           narrower than "global", the subcommand is
+#                           named, e.g. "daemon start --proxy-port")
+#   Env: <NAME>            (environment variable read at startup)
+#   (none)                 (config-only — no CLI/env mirror)
+#
+# Config-file selection itself:
+#   CLI: --config PATH     Env: LLAMASTASH_CONFIG
 
 # ─── Theme ────────────────────────────────────────────────────────
 #
@@ -21,6 +34,8 @@
 # Set to `custom` to activate the `custom_theme:` block below; if
 # you set `custom` without supplying `custom_theme:`, LlamaStash logs
 # a warning and falls back to macchiato.
+#
+# Sources — CLI: (none) · Env: (none). Cycle live in the TUI with `t`.
 theme: macchiato
 
 # ─── Custom theme (optional) ──────────────────────────────────────
@@ -39,6 +54,8 @@ theme: macchiato
 #   - "reset" / "default" — fall through to terminal default
 #
 # Strings containing `#` must be quoted in YAML.
+#
+# Sources — CLI: (none) · Env: (none). Config-only.
 #
 # custom_theme:
 #   base: macchiato            # built-in palette to inherit from
@@ -63,10 +80,13 @@ theme: macchiato
 
 # ─── Model paths ──────────────────────────────────────────────────
 #
-# Extra directories to scan for .gguf files (recursive). Also
-# accepted via `-p / --model-path` on the CLI (repeatable) and the
-# `LLAMASTASH_MODEL_PATHS` env var (colon-separated). Paths from all
-# three sources are merged.
+# Extra directories to scan for .gguf files (recursive). Paths from
+# every active source are merged before the daemon discovery sweep.
+#
+# Sources — CLI: -p / --model-path DIR (repeatable, global) ·
+#           Env: LLAMASTASH_MODEL_PATHS — `:`-separated on POSIX,
+#                `;`-separated on Windows (std::env::split_paths
+#                semantics; empty entries are skipped).
 model_paths: []
 # - /opt/llms
 # - /mnt/data/gguf
@@ -76,8 +96,8 @@ model_paths: []
 # When `model_paths` is empty (and `--model-path` / env vars don't
 # add any), LlamaStash walks the well-known caches below. Flip a
 # bucket to `true` to disable scanning that cache without disabling
-# the others. Set `disable_scan: true` or pass `--no-scan` /
-# `LLAMASTASH_NO_SCAN=1` to drop the whole sweep.
+# the others. The whole sweep can be dropped via the `disable_scan`
+# key below.
 #
 # Cache locations:
 #   HuggingFace  ~/.cache/huggingface/hub
@@ -85,6 +105,10 @@ model_paths: []
 #   Ollama       ~/.ollama/models
 #   LM Studio    ~/.lmstudio/models, ~/.cache/lm-studio/models
 #                ~/Library/Caches/LMStudio/models (macOS)
+#
+# Sources — CLI: (none, per bucket) · Env: (none, per bucket). The
+# global `--no-scan` / `LLAMASTASH_NO_SCAN=1` toggle below skips all
+# three buckets at once.
 disable_default_cache_paths:
   huggingface: false
   ollama: false
@@ -94,6 +118,8 @@ disable_default_cache_paths:
 # `model_paths` and don't want the daemon walking caches in
 # parallel. Errors at startup if no `model_paths` and no `-p` flag
 # either — LlamaStash refuses to start with nothing to list.
+#
+# Sources — CLI: --no-scan (global) · Env: LLAMASTASH_NO_SCAN=1.
 disable_scan: false
 
 # ─── Daemon ───────────────────────────────────────────────────────
@@ -101,19 +127,25 @@ disable_scan: false
 # Inclusive TCP port range the supervisor picks from when launching
 # `llama-server`. Defaults: 41100..=41300. Tighten this if other
 # tooling on the box owns adjacent ports.
+#
+# Sources — CLI: (none) · Env: (none). Config-only.
 port_range:
   start: 41100
   end: 41300
 
-# Path to the `llama-server` binary. CLI flag `--llama-server` and
-# the `LLAMASTASH_LLAMA_SERVER` env var take precedence over this.
-# Leave commented out to fall back to `$PATH`.
+# Path to the `llama-server` binary. Leave commented out to fall
+# back to `$PATH`.
+#
+# Sources — CLI: --llama-server PATH (global) ·
+#           Env: LLAMASTASH_LLAMA_SERVER=PATH.
 # llama_server_path: /usr/local/bin/llama-server
 
 # Per-launch health-probe timeout in seconds. 120s suits a typical
 # 7B–13B model on local NVMe; raise to ~600 for 70B+ on slow disks
 # if you hit `health probe timeout (last status 503)` on legitimate
 # loads.
+#
+# Sources — CLI: (none) · Env: (none). Config-only.
 probe_timeout_secs: 120
 
 # ─── Mouse focus ──────────────────────────────────────────────────
@@ -128,13 +160,13 @@ probe_timeout_secs: 120
 #     modifier (Shift on iTerm2/Alacritty/foot/wezterm, Option on
 #     Apple Terminal) can still highlight text for native copy.
 # Off by default — capturing the mouse pre-empts the terminal's
-# native click-and-drag text selection, so users who copy paths or
-# logs out of the dashboard keep the cleaner default.
+# native click-and-drag text selection.
 #
-# The global `--mouse-focus` CLI flag flips this on for a single
-# run; the two sources are OR-ed. For an always-on setup without
-# editing this file, alias the binary in your shell:
-#   alias llamastash='llamastash --mouse-focus'
+# For an always-on setup without editing this file, alias the
+# binary: `alias llamastash='llamastash --mouse-focus'`.
+#
+# Sources — CLI: --mouse-focus (global, OR-ed with this field) ·
+#           Env: (none).
 mouse_focus: false
 
 # ─── Proxy (OpenAI-compatible listener) ───────────────────────────
@@ -150,29 +182,33 @@ mouse_focus: false
 # Auth posture: none. The listener binds 127.0.0.1 only and ignores
 # every authentication header — same-machine single-user threat
 # model. There is intentionally no `host`, `api_key`, `tls_*`, or
-# fallback-tuning knob in v1; LAN exposure, auth, TLS, and the rest
-# of R34 are deferred follow-ups.
+# auth knob in v1; LAN exposure, auth, and TLS are deferred (R34).
 #
 # Unknown keys inside this block are rejected loudly (no
 # silently-tolerated typos).
 proxy:
   # Toggle the listener. When false the daemon still runs but no
   # port is bound and `status.proxy.status` reports "disabled".
+  #
+  # Sources — CLI: (none) · Env: (none).
   enabled: true
+
   # Ollama drop-in mode. When true, `GET /` returns the byte-exact
-  # `"Ollama is running"` string the official `ollama` CLI checks for
-  # (and other Ollama-Go clients), and the default port shifts to
-  # 11434 (Ollama's well-known port). When false (the default), the
-  # identity is `"LlamaStash is running"` and the default port is
-  # 11435 so llamastash coexists with an installed Ollama daemon.
+  # `"Ollama is running"` string the official `ollama` CLI checks
+  # for, and the default port shifts to 11434 (Ollama's well-known
+  # port). When false (the default), the identity is `"LlamaStash is
+  # running"` and the default port is 11435 so llamastash coexists
+  # with an installed Ollama daemon.
   #
   # Enable when the goal is "this tool that natively speaks Ollama
   # just works against llamastash". Leave off when the goal is "run
-  # alongside Ollama on the same box". The three sources (this
-  # field, the `--ollama-compat` CLI flag, the
-  # `LLAMASTASH_OLLAMA_COMPAT` env var) are OR-ed; any one of them
-  # enables the mode.
+  # alongside Ollama on the same box".
+  #
+  # Sources — CLI: daemon start --ollama-compat ·
+  #           Env: LLAMASTASH_OLLAMA_COMPAT=1.
+  # (Three sources are OR-ed; any one of them enables the mode.)
   ollama_compat: false
+
   # TCP port on 127.0.0.1. Comment out to use the mode default
   # (11434 when `ollama_compat: true`, 11435 otherwise). Set to pin a
   # specific port regardless of mode. If the base port is taken the
@@ -182,17 +218,50 @@ proxy:
   # outside the scan window — that would break the "single stable
   # URL" promise). Edit `port` and restart to recover.
   #
-  # Override at startup with `llamastash daemon start --proxy-port N`
-  # (CLI flag beats this config value). Use `--proxy-port 0` to bind
-  # an ephemeral port — `llamastash status --json | jq .proxy.listen`
-  # reports the actual bound address.
+  # Sources — CLI: daemon start --proxy-port N (beats this field;
+  #           use `--proxy-port 0` to bind an ephemeral port — read
+  #           the actual address from `llamastash status --json |
+  #           jq .proxy.listen`) · Env: (none).
   # port: 11435
+
+  # Family-MRU fallback behaviour when a requested model fails to
+  # auto-start. Default `true`: the proxy serves the request from
+  # another Ready supervisor (same arch first, then any) and stamps
+  # `x-llamastash-fallback-reason` on the response. Set to `false`
+  # to return a 503 `launch_failed` envelope instead — useful when a
+  # client must not silently receive a response from a different
+  # model (e.g. an embedding client that would mis-interpret a
+  # chat-completion payload).
+  #
+  # Sources — CLI: daemon start --no-proxy-fallback (disable only,
+  #           cannot re-enable from the CLI) ·
+  #           Env: LLAMASTASH_NO_PROXY_FALLBACK=1 (disable only).
+  # (Any of the three "disable" signals turns it off — re-enabling
+  # requires unsetting all of them and `fallback_enabled: true`.)
+  fallback_enabled: true
+
   # Seconds hyper waits for a client to finish sending request
   # headers before dropping the connection. Bounds the impact of
   # partial-request clients (crashed agents leaving sockets
   # half-open, slow-loris-style mistakes). Raise to 120 if a client
   # legitimately streams headers across a slow link.
+  #
+  # Sources — CLI: (none) · Env: (none).
   header_read_timeout_secs: 30
+
+  # Idle-TTL eviction for proxy-auto-started supervisors. After
+  # `idle_ttl_secs` of no inbound request *and* no in-flight stream,
+  # the daemon's eviction sweeper calls `model.stop(5s grace)` so a
+  # long-running daemon doesn't pin VRAM on models nobody is using.
+  # `0` disables eviction entirely; supervisors stay resident until
+  # an explicit `stop_model`. Only auto-start supervisors are
+  # evictable — explicit `llamastash start` / TUI launches are
+  # treated as durable user intent and stay resident regardless.
+  #
+  # Default: 1800 (30 min).
+  #
+  # Sources — CLI: (none) · Env: (none).
+  idle_ttl_secs: 1800
 
 # ─── Keybindings ──────────────────────────────────────────────────
 #
@@ -218,6 +287,8 @@ proxy:
 # Each line below is the action's *default* binding. Uncomment and
 # edit the right-hand side to rebind. Actions with more than one
 # default chord show the secondary key in a trailing comment.
+#
+# Sources — CLI: (none) · Env: (none). Config-only.
 keybindings: {}
 #  # ── Global / always-on ─────────────────────────────────────
 #  quit: q                            # also: ctrl+c
@@ -280,22 +351,48 @@ keybindings: {}
 #  # ── Chat-only chord ───────────────────────────────────────
 #  toggle_think_collapse: ctrl+r      # chat input
 
-# arch_defaults: user escape hatch over the built-in `(architecture,
-#   gpu_backend) → TypedKnobs` table that ships in the binary. Keys
-#   are GGUF `general.architecture` strings (e.g. `qwen2`, `llama3`,
-#   `gemma3`). Each value is a `TypedKnobs` partial — only the fields
-#   you want to override need to be specified. At launch time the
-#   daemon walks `preset > last_params > arch_defaults > built-in
-#   table > llama-server` and picks the first non-null per field.
+# ─── arch_defaults ────────────────────────────────────────────────
 #
-#   Field names match llama-server's flag names (snake_case): each
-#   is grep-able directly from the binary's log output.
+# User escape hatch over the built-in `(architecture, gpu_backend)
+# → TypedKnobs` table that ships in the binary. Keys are GGUF
+# `general.architecture` strings (e.g. `qwen2`, `llama`, `llama3`,
+# `gemma`, `gemma3`, `phi`, `qwen3`). Each value is a TypedKnobs
+# partial — only the fields you want to override need to be
+# specified. At launch time the daemon walks
+# `preset > last_params > arch_defaults > built-in table >
+# llama-server` and picks the first non-null per field.
+#
+# Field names match llama-server's flag names (snake_case): each is
+# grep-able directly from the binary's log output. The full set of
+# 14 supported knobs is enumerated below for one example arch; copy
+# only the lines you intend to override.
+#
+# Sources — CLI: (none) · Env: (none). Config-only. (The per-launch
+# `llamastash start --ctx N` flag and the in-TUI Settings tab feed
+# the `last_params` and `preset` layers above this one, not this map.)
+#
 # arch_defaults:
 #   qwen2:
-#     n_gpu_layers: 99
-#     flash_attn: true
-#     cache_type_k: q8_0
-#     cache_type_v: q8_0
+#     # ── Context & scheduling ──────────────────────────────
+#     ctx: 8192                      # → -c / --ctx-size
+#     parallel: 4                    # → --parallel (request slots)
+#     batch_size: 2048               # → --batch-size
+#     ubatch_size: 512               # → --ubatch-size (physical)
+#     keep: 0                        # → --keep (context shift)
+#     rope_freq_scale: 1.0           # → --rope-freq-scale
+#     # ── Compute placement ─────────────────────────────────
+#     n_gpu_layers: 99               # → --n-gpu-layers (99 = all)
+#     threads: 8                     # → --threads (CPU)
+#     flash_attn: true               # → --flash-attn
+#     # ── KV cache quantisation ─────────────────────────────
+#     cache_type_k: q8_0             # → --cache-type-k
+#     cache_type_v: q8_0             # → --cache-type-v
+#     # ── Memory residency ──────────────────────────────────
+#     mlock: false                   # → --mlock (lock in RAM)
+#     no_mmap: false                 # → --no-mmap (full RAM load)
+#     # ── Chat template ─────────────────────────────────────
+#     reasoning: false               # true bundles --jinja
+#                                    #   --reasoning-format deepseek
 #   llama:
 #     threads: 8
 #     parallel: 4

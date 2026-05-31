@@ -257,6 +257,12 @@ rm -rf "~/Library/Application Support/llamastash" \
        "~/Library/Caches/llamastash"
 ```
 
-This removes your config, presets, favorites, logs, and the init snapshot. It does **not** remove downloaded GGUFs from the HuggingFace cache (`~/.cache/huggingface/hub` on Linux, `~/Library/Caches/huggingface/hub` on macOS) — those are shared with other HF-aware tools. Remove them manually if you want the disk space back.
+```powershell
+# Windows (PowerShell)
+Remove-Item -Recurse -Force "$env:APPDATA\llamastash", "$env:LOCALAPPDATA\llamastash"
+# Roaming hosts config + state; Local hosts the cache (logs).
+```
+
+This removes your config, presets, favorites, logs, and the init snapshot. It does **not** remove downloaded GGUFs from the HuggingFace cache (`~/.cache/huggingface/hub` on Linux, `~/Library/Caches/huggingface/hub` on macOS, `%USERPROFILE%\.cache\huggingface\hub` on Windows) — those are shared with other HF-aware tools. Remove them manually if you want the disk space back.
 
 LlamaStash never installs anything outside its XDG dirs (and `llama-server` if you let `init` install it, which goes to `$XDG_DATA_HOME/llamastash/llama-cpp/<version>/` for the GitHub Releases path, or wherever Homebrew puts it).
