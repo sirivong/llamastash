@@ -353,11 +353,11 @@ jobs:
 
       - name: package archive
         # Windows ships .zip (ecosystem convention; install.ps1 expects
-        # it). Linux/macOS keep .tar.gz. shasum on Windows is provided
-        # by Git for Windows' Perl shim; `tar` is available too but
-        # we use PowerShell's `Compress-Archive` semantics via bash's
-        # `zip` (preinstalled on windows-latest as part of the MSYS
-        # toolchain).
+        # it). Linux/macOS keep .tar.gz. Windows uses `sha256sum` from
+        # Git for Windows' bundled msys2 coreutils because `shasum`
+        # (the Perl shim) is no longer present on the windows-latest
+        # image; Linux/macOS keep `shasum -a 256` since `sha256sum`
+        # isn't installed on macOS by default.
         shell: bash
         run: |
           set -euo pipefail
@@ -371,7 +371,7 @@ jobs:
           cp LICENSE README.md CHANGELOG.md "dist/${stage}/"
           if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
             (cd dist && 7z a -tzip "${stage}.zip" "${stage}" \
-              && shasum -a 256 "${stage}.zip" >"${stage}.zip.sha256")
+              && sha256sum "${stage}.zip" >"${stage}.zip.sha256")
           else
             (cd dist && tar -czf "${stage}.tar.gz" "${stage}" \
               && shasum -a 256 "${stage}.tar.gz" >"${stage}.tar.gz.sha256")
