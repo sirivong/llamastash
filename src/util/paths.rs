@@ -62,6 +62,46 @@ pub fn home_dir() -> Option<PathBuf> {
   BaseDirs::new().map(|b| b.home_dir().to_path_buf())
 }
 
+/// Canonicalize `path`, stripping the Windows verbatim (`\\?\`) prefix
+/// that `std::fs::canonicalize` prepends. User-facing surfaces (status
+/// `server_path`, model paths, favorites, `--render`, the written
+/// `config.yaml`) then show `C:\Users\…` instead of `\\?\C:\Users\…`.
+/// On non-Windows this is a thin wrapper around `std::fs::canonicalize`.
+///
+/// The verbatim and stripped forms refer to the same file, and model
+/// identity is anchored on the header hash (not the path), so stripping
+/// keeps path matching consistent while cleaning up display.
+pub fn canonicalize<P: AsRef<Path>>(path: P) -> std::io::Result<PathBuf> {
+  std::fs::canonicalize(path).map(strip_verbatim_prefix)
+}
+
+/// Strip the Windows extended-length / verbatim prefix from a path:
+/// `\\?\C:\x` → `C:\x`, `\\?\UNC\server\share` → `\\server\share`.
+/// No-op on non-Windows, on paths without the prefix, and on paths
+/// whose stripped form would exceed the legacy `MAX_PATH` (260) limit —
+/// those genuinely need the verbatim form for filesystem access.
+pub fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+  #[cfg(windows)]
+  {
+    if let Some(s) = path.to_str() {
+      if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        if rest.len() + 2 < 260 {
+          return PathBuf::from(format!(r"\\{rest}"));
+        }
+      } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        // Only strip a normal drive path (`\\?\X:\…`); leave device
+        // namespaces and other verbatim forms untouched.
+        let b = rest.as_bytes();
+        let is_drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+        if is_drive && rest.len() < 260 {
+          return PathBuf::from(rest);
+        }
+      }
+    }
+  }
+  path
+}
+
 pub fn state_dir() -> Option<PathBuf> {
   if let Some(p) = env_path_override("LLAMASTASH_STATE_DIR") {
     return Some(p);
@@ -386,6 +426,29 @@ mod tests {
     let _guard = env_mutex().lock().unwrap_or_else(|e| e.into_inner());
     let path = init_snapshot_file().unwrap();
     assert_eq!(path, state_dir().unwrap().join("init_snapshot.json"));
+  }
+
+  #[test]
+  fn strip_verbatim_prefix_is_noop_without_prefix() {
+    // A plain path is returned unchanged on every platform.
+    let p = PathBuf::from("/home/u/models/x.gguf");
+    assert_eq!(strip_verbatim_prefix(p.clone()), p);
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn strip_verbatim_prefix_strips_drive_and_unc_on_windows() {
+    assert_eq!(
+      strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\d\m.gguf")),
+      PathBuf::from(r"C:\Users\d\m.gguf")
+    );
+    assert_eq!(
+      strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\m.gguf")),
+      PathBuf::from(r"\\server\share\m.gguf")
+    );
+    // Non-drive verbatim forms are left untouched.
+    let dev = PathBuf::from(r"\\?\Volume{abc}\m.gguf");
+    assert_eq!(strip_verbatim_prefix(dev.clone()), dev);
   }
 
   #[test]

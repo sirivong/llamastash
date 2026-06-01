@@ -96,7 +96,7 @@ impl ModelId {
 /// detection contract.
 pub fn compute<P: AsRef<Path>>(path: P, header_bytes: &[u8]) -> ModelId {
   let supplied = path.as_ref().to_path_buf();
-  let canonical = std::fs::canonicalize(&supplied).unwrap_or_else(|_| supplied.clone());
+  let canonical = crate::util::paths::canonicalize(&supplied).unwrap_or_else(|_| supplied.clone());
   let resolved = if canonical.extension().and_then(|s| s.to_str()) == Some("gguf") {
     canonical
   } else {

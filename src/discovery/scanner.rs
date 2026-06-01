@@ -199,7 +199,7 @@ fn collect_gguf_paths(root: &Path, excludes: &[String]) -> Vec<PathBuf> {
           // if canonicalisation fails (broken symlink, permission
           // denied) keeps the row visible — the user can investigate.
           let raw = p.to_path_buf();
-          let canonical = std::fs::canonicalize(p).unwrap_or_else(|_| raw.clone());
+          let canonical = crate::util::paths::canonicalize(p).unwrap_or_else(|_| raw.clone());
           if seen.insert(canonical.clone()) {
             // For most files we emit the canonical path so user-managed
             // aliases (e.g. `ln -s /big-disk/m.gguf ~/models/`) display

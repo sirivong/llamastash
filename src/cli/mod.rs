@@ -115,7 +115,7 @@ fn persist_llama_server_override(cli: &Cli, config: &crate::config::Config) {
   // back to the raw value when canonicalization fails so a missing
   // file still gets persisted — the daemon's own locator will surface
   // the path error later.
-  let resolved = std::fs::canonicalize(raw).unwrap_or_else(|_| raw.clone());
+  let resolved = crate::util::paths::canonicalize(raw).unwrap_or_else(|_| raw.clone());
   if config
     .llama_server_path
     .as_ref()

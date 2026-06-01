@@ -80,7 +80,7 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
   let model_dir = unique_temp("chat-models");
   let model_path = model_dir.join("m.gguf");
   std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
-  let model_path_canon = std::fs::canonicalize(&model_path).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
   let opts = DaemonOptions {
     binary: Some(fake_binary()),
     port_range: allocate_port_range(),

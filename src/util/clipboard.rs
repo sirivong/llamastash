@@ -198,10 +198,17 @@ mod tests {
   /// Exercise the shell-out path directly via a tool we know is on
   /// $PATH on every dev box. Bypasses the arboard probe (which
   /// returns success on headed systems and would shadow the
-  /// fallback we want to test).
+  /// fallback we want to test). Both `cat` (Unix) and `sort`
+  /// (Windows System32) read stdin and exit 0; picking per-OS keeps
+  /// the test green on a bare Windows shell whose PATH lacks the
+  /// Git/MSYS unix tools.
   #[test]
   fn write_via_succeeds_with_a_real_binary() {
-    write_via("cat", "hello").expect("cat should accept stdin and exit 0");
+    #[cfg(unix)]
+    let backend = "cat";
+    #[cfg(windows)]
+    let backend = "sort";
+    write_via(backend, "hello").expect("backend should accept stdin and exit 0");
   }
 
   #[test]

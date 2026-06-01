@@ -254,11 +254,21 @@ fn running_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a
 }
 
 /// Backend → human-readable flavor tag used in the `server` row.
+///
+/// The tag reflects the llama.cpp backend the auto-installer picks for
+/// this host (see `init::install::gh_releases::pick_asset_suffix`). AMD
+/// is OS-dependent: Linux installs the ROCm build, but Windows installs
+/// the **Vulkan** build (ROCm's Windows support is too narrow to pick
+/// blindly), so labeling a Windows AMD server `rocm` is wrong.
 fn flavor_label(app: &App) -> Option<&'static str> {
   use crate::daemon::host_metrics::GpuFlavor;
   match app.host_metrics.flavor() {
     GpuFlavor::Nvidia => Some("cuda"),
-    GpuFlavor::Amd => Some("rocm"),
+    GpuFlavor::Amd => Some(if cfg!(target_os = "windows") {
+      "vulkan"
+    } else {
+      "rocm"
+    }),
     GpuFlavor::AppleMetal => Some("metal"),
     GpuFlavor::CpuOnly => Some("cpu"),
     GpuFlavor::Unknown | GpuFlavor::Unsampled => None,
@@ -597,7 +607,7 @@ mod tests {
   }
 
   #[test]
-  fn server_row_picks_rocm_flavor_for_amd_backend() {
+  fn server_row_picks_install_flavor_for_amd_backend() {
     let mut app = App::new(AppOptions::default());
     app.daemon_info = DaemonInfo {
       server_path: Some("/usr/bin/llama-server".into()),
@@ -609,7 +619,13 @@ mod tests {
     };
     let rows = render_lines(&app);
     let server_row = rows.iter().find(|r| r.contains("server")).unwrap();
-    assert!(server_row.contains("(rocm)"), "{server_row:?}");
+    // Windows AMD installs the Vulkan build, not ROCm (see flavor_label).
+    let expected = if cfg!(target_os = "windows") {
+      "(vulkan)"
+    } else {
+      "(rocm)"
+    };
+    assert!(server_row.contains(expected), "{server_row:?}");
   }
 
   #[test]

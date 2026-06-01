@@ -228,7 +228,12 @@ pub struct FailedTool {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct HardwareSummary {
   pub gpu_backend: String,
+  // Serialize with the same key names `status --json .host` uses so the
+  // two hardware surfaces share one contract (values are already
+  // identical — both come from `init::detect_hardware`).
+  #[serde(rename = "gpu_mem_total_bytes")]
   pub vram_bytes: Option<u64>,
+  #[serde(rename = "ram_total_bytes")]
   pub ram_bytes: u64,
   pub os: String,
   pub arch: String,

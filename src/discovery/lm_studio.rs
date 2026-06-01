@@ -38,7 +38,7 @@ pub fn resolve_models_dirs(home: &Path) -> Vec<PathBuf> {
     if !c.exists() {
       continue;
     }
-    let key = std::fs::canonicalize(&c).unwrap_or_else(|_| c.clone());
+    let key = crate::util::paths::canonicalize(&c).unwrap_or_else(|_| c.clone());
     if seen.insert(key) {
       out.push(c);
     }

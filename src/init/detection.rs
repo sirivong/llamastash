@@ -283,11 +283,8 @@ fn common_locations() -> Vec<PathBuf> {
   // llamastash-managed install dir from Unit 8 — Vec keeps order stable
   // for tests.
   if let Some(data) = directories::BaseDirs::new().and_then(|b| {
-    b.data_dir()
-      .join("llamastash/llama-cpp")
-      .canonicalize()
-      .ok()
-      .or_else(|| Some(b.data_dir().join("llamastash/llama-cpp")))
+    let p = b.data_dir().join("llamastash/llama-cpp");
+    crate::util::paths::canonicalize(&p).ok().or(Some(p))
   }) {
     // The actual binary lives under `<data>/<version>/llama-server`;
     // we don't enumerate versions here, but expose the root so a

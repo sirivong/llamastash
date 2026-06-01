@@ -62,7 +62,7 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
   let model_dir = unique_temp("happy-models");
   let model_path = model_dir.join("m.gguf");
   std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
-  let model_path_canon = std::fs::canonicalize(&model_path).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
 
   let opts = DaemonOptions {
     binary: Some(fake_binary()),
@@ -304,7 +304,7 @@ async fn prefer_port_falls_back_to_range_allocator_when_busy() {
   let model_dir = unique_temp("prefer-port-models");
   let model_path = model_dir.join("m.gguf");
   std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
-  let model_path_canon = std::fs::canonicalize(&model_path).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
 
   // Two-port range so the fallback has somewhere to land.
   let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
@@ -424,7 +424,7 @@ async fn start_model_refuses_forbidden_extras_without_leaking_secret_values() {
   let model_dir = unique_temp("forbidden-redact-models");
   let model_path = model_dir.join("m.gguf");
   std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
-  let model_path_canon = std::fs::canonicalize(&model_path).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
 
   let opts = DaemonOptions {
     binary: Some(fake_binary()),
@@ -489,7 +489,7 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
   let model_dir = unique_temp("last-params-delta-models");
   let model_path = model_dir.join("m.gguf");
   std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
-  let model_path_canon = std::fs::canonicalize(&model_path).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
 
   // Two-port range so the second start has somewhere to land after
   // the first call's socket releases.

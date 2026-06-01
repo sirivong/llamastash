@@ -640,6 +640,14 @@ mod tests {
     assert_eq!(report.stale.len(), 1);
   }
 
+  // Unix-only: spawns a real `sleep` binary and relies on POSIX
+  // process-naming semantics. The sweep's matching *logic* is covered
+  // cross-platform by the non-spawn unit tests above (`id_matches`,
+  // basename adoption, stale classification). Windows has no portable
+  // long-lived binary that also tolerates an arbitrary marker-bearing
+  // argv (test 2), and Windows orphan re-adoption is N/A anyway — the
+  // daemon's children share a kill-on-close job object.
+  #[cfg(unix)]
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn sweep_finds_unmanaged_processes_via_cmdline_marker() {
     // Spawn a long-lived dummy process whose program name matches
@@ -671,6 +679,7 @@ mod tests {
     );
   }
 
+  #[cfg(unix)]
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn marker_match_ignores_argv_values() {
     // Regression: the matcher must consider the executable basename

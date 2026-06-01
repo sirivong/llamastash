@@ -120,7 +120,7 @@ pub fn default_set(res: RootResolution<'_>) -> Vec<ScanRoot> {
 }
 
 fn canonical_or_raw(p: &Path) -> PathBuf {
-  std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+  crate::util::paths::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 fn push_unique(

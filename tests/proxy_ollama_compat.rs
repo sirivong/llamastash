@@ -541,7 +541,7 @@ fn fast_probe() -> ProbeOptions {
 fn write_gguf(dir: &Path, name: &str, arch: &str) -> PathBuf {
   let path = dir.join(name);
   std::fs::write(&path, build_minimal_gguf(arch)).expect("write gguf");
-  std::fs::canonicalize(&path).expect("canonicalize")
+  llamastash::util::paths::canonicalize(&path).expect("canonicalize")
 }
 
 async fn wait_for_ready(model: &ManagedModel) {

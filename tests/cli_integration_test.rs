@@ -329,7 +329,9 @@ async fn run_dispatch_at(state_dir: Option<&Path>, model_dir: &Path, command: Co
 async fn agent_script_round_trip_list_start_status_logs_stop() {
   let h = spawn_daemon_with_model("happy", "m.gguf", "llama").await;
   let model_path = h.model_dir.join("m.gguf");
-  let model_path_canon = std::fs::canonicalize(&model_path).unwrap();
+  // Match the daemon's canonicalization (strips the Windows `\\?\`
+  // verbatim prefix) so the path comparison holds on every platform.
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
 
   // 1. `list` succeeds (catalog has the seeded model).
   let code = run_dispatch_at(

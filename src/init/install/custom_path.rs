@@ -12,7 +12,7 @@ use crate::init::snapshot::InstallMethod;
 /// (e.g. via a dialoguer prompt).
 pub fn install_from_custom_path(path: &Path) -> Result<BinaryInstall, InstallError> {
   preflight_integrity(path)?;
-  let canonical = std::fs::canonicalize(path).map_err(|e| {
+  let canonical = crate::util::paths::canonicalize(path).map_err(|e| {
     InstallError::Integrity(format!("could not canonicalise `{}`: {e}", path.display()))
   })?;
   let digest = sha256_file(&canonical)?;

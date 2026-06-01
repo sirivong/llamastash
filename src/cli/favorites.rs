@@ -24,6 +24,20 @@ pub async fn handle(args: FavoritesArgs, cli: &Cli, config: &Config) -> CliResul
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+      // Drop stale favorites whose backing file is no longer in the
+      // catalog (deleted / moved out of a watched dir). Matches the
+      // TUI's `info_pane::counts_row`, so `favorites list` never
+      // surfaces a dangling path the user can't act on.
+      let rows = fetch_catalog(&mut client).await?;
+      let catalog: std::collections::HashSet<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+      let arr: Vec<Value> = arr
+        .into_iter()
+        .filter(|fav| {
+          crate::cli::output::row_path(fav)
+            .map(|p| catalog.contains(p))
+            .unwrap_or(false)
+        })
+        .collect();
       if as_json {
         // Project through `favorites_json` instead of dumping the
         // daemon body verbatim — without this every future daemon

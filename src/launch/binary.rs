@@ -85,7 +85,7 @@ pub fn locate(inputs: LocateInputs) -> Result<PathBuf, LocateError> {
 }
 
 fn canonicalise_or_err(p: PathBuf) -> Result<PathBuf, LocateError> {
-  match std::fs::canonicalize(&p) {
+  match crate::util::paths::canonicalize(&p) {
     Ok(c) if c.is_file() => {
       if !is_executable(&c) {
         return Err(LocateError::ExplicitPathNotExecutable(p));
@@ -150,7 +150,7 @@ mod tests {
       config_path: None,
     })
     .expect("locate");
-    assert_eq!(out, fs::canonicalize(&cli_target).unwrap());
+    assert_eq!(out, crate::util::paths::canonicalize(&cli_target).unwrap());
     fs::remove_dir_all(&dir).ok();
   }
 
@@ -181,7 +181,7 @@ mod tests {
       config_path: Some(cfg.clone()),
     })
     .expect("locate");
-    assert_eq!(out, fs::canonicalize(&cfg).unwrap());
+    assert_eq!(out, crate::util::paths::canonicalize(&cfg).unwrap());
     fs::remove_dir_all(&dir).ok();
   }
 
