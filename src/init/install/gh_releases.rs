@@ -87,11 +87,17 @@ pub fn pick_asset_suffix(hw: &HardwareSnapshot) -> Option<String> {
     }
     (GpuInfo::CpuOnly, OsFamily::Linux) => Some(format!("ubuntu-{arch_suffix}.tar.gz")),
     // Windows asset naming: `llama-bXXXX-bin-win-<accel>-x64.zip`.
-    // AMD Windows GPU detection is out of 0.0.2 scope, so AMD-on-Windows
-    // falls through to Vulkan (the universal fallback for discrete GPUs
-    // without explicit detection). CUDA wants a `-X.Y` version suffix
-    // which the existing `*` glob handles.
-    (GpuInfo::Amd { .. }, OsFamily::Windows) => Some(format!("win-hip-radeon-{arch_suffix}.zip")),
+    // AMD on Windows is detected via DXGI (no `rocm-smi.exe` ships), so
+    // we can't tell whether the card is in ROCm's narrow Windows-support
+    // set (RDNA2/3 only). The HIP build (`win-hip-radeon`) faults during
+    // runtime init on unsupported GPUs — RDNA1 (RX 5700 XT, gfx1010) and
+    // older — crashing `llama-server` with 0xC0000005 before it prints a
+    // line. Vulkan runs on every AMD GPU llama.cpp targets, so it's the
+    // correct universal pick here. (Linux AMD keeps ROCm above: there
+    // `rocm-smi` only succeeds when a supported ROCm stack is actually
+    // installed, so the build matches the hardware.) CUDA wants a `-X.Y`
+    // version suffix which the existing `*` glob handles.
+    (GpuInfo::Amd { .. }, OsFamily::Windows) => Some(format!("win-vulkan-{arch_suffix}.zip")),
     (GpuInfo::Nvidia { .. }, OsFamily::Windows) => Some(format!("win-cuda-*-{arch_suffix}.zip")),
     (GpuInfo::Unknown { .. }, OsFamily::Windows) => Some(format!("win-vulkan-{arch_suffix}.zip")),
     (GpuInfo::CpuOnly, OsFamily::Windows) => Some(format!("win-cpu-{arch_suffix}.zip")),
@@ -318,6 +324,24 @@ mod tests {
 
   #[test]
   fn linux_amd_x64_picks_rocm_suffix_with_glob() {
+    let s = pick_asset_suffix(&hw(amd(), OsFamily::Linux, CpuArch::X86_64)).unwrap();
+    assert_eq!(s, "ubuntu-rocm-*-x64.tar.gz");
+  }
+
+  #[test]
+  fn windows_amd_picks_vulkan_not_hip() {
+    // Regression: AMD on Windows is DXGI-detected, so we can't confirm
+    // the GPU is in ROCm's narrow Windows-support set. The HIP build
+    // crashes on init for unsupported cards (RDNA1 / RX 5700 XT); Vulkan
+    // runs everywhere. Must NOT route to `win-hip-radeon`.
+    let s = pick_asset_suffix(&hw(amd(), OsFamily::Windows, CpuArch::X86_64)).unwrap();
+    assert_eq!(s, "win-vulkan-x64.zip");
+  }
+
+  #[test]
+  fn linux_amd_still_picks_rocm_after_windows_fix() {
+    // Guard: the Windows-AMD→Vulkan fix must not touch the Linux AMD
+    // path, where `rocm-smi` detection implies a working ROCm stack.
     let s = pick_asset_suffix(&hw(amd(), OsFamily::Linux, CpuArch::X86_64)).unwrap();
     assert_eq!(s, "ubuntu-rocm-*-x64.tar.gz");
   }
