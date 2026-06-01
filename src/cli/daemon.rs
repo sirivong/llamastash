@@ -952,6 +952,11 @@ mod tests {
 
   #[test]
   fn env_model_paths_splits_on_platform_separator() {
+    // Serialize against the other `LLAMASTASH_MODEL_PATHS` /
+    // `LLAMASTASH_NO_SCAN` tests: process-global env vars race across
+    // parallel test threads (one test's set_var landing between
+    // another's remove_var and read), which flaked CI on Windows.
+    let _env = crate::cli::test_lock::serialize();
     // Drive the production helper directly. Two paths joined with the
     // platform separator must round-trip. `join_paths` is the inverse
     // of `split_paths`, so this also documents the public contract
@@ -970,6 +975,7 @@ mod tests {
 
   #[test]
   fn env_model_paths_unset_returns_empty() {
+    let _env = crate::cli::test_lock::serialize();
     let prev = std::env::var_os("LLAMASTASH_MODEL_PATHS");
     std::env::remove_var("LLAMASTASH_MODEL_PATHS");
     let parsed = env_model_paths();
@@ -1021,6 +1027,7 @@ mod tests {
 
   #[test]
   fn env_no_scan_accepts_documented_truthy_values() {
+    let _env = crate::cli::test_lock::serialize();
     // `1` is what the README documents; `true`/`yes`/`on` ride along
     // because every other LLAMASTASH_* bool in this binary accepts
     // them, and a script that already uses LLAMASTASH_OFFLINE=true
