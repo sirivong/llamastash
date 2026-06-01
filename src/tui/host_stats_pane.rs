@@ -96,28 +96,25 @@ fn cpu_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
 }
 
 fn ram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palette) -> Line<'a> {
-  // Subtract the UMA-shared portion (AMD GTT on Strix Halo etc.)
-  // before computing the gauge — those bytes also surface in the VRAM
-  // row, and counting them on both sides made the RAM gauge double-
-  // count the GPU's allocation on kernel 7.0+ APUs.
-  let uma_total = host.uma_shared_total_bytes.unwrap_or(0);
-  let uma_used = host.uma_shared_used_bytes.unwrap_or(0);
-  let ram_total = host.ram_total_bytes.saturating_sub(uma_total);
-  let ram_used = host.ram_used_bytes.saturating_sub(uma_used);
-  let (pct, value) = if ram_total == 0 {
+  // Always show the true system RAM total (the same number `init`
+  // reports). On unified-memory machines the GPU's allocation lives in
+  // this pool, but `sysinfo`'s used/total already account for it — the
+  // earlier subtraction of `uma_shared_*` produced a wrong RAM value
+  // (and, when DXGI mis-flagged discrete cards, a spurious `*`). The
+  // `unified` flag below is what tells the user the pool is shared.
+  let (pct, value) = if host.ram_total_bytes == 0 {
     (0.0_f32, "—/—".to_string())
   } else {
-    let pct = (ram_used as f64 / ram_total as f64) as f32 * 100.0;
+    let pct = (host.ram_used_bytes as f64 / host.ram_total_bytes as f64) as f32 * 100.0;
     (
       pct.clamp(0.0, 100.0),
-      format_bytes_pair(ram_used, ram_total),
+      format_bytes_pair(host.ram_used_bytes, host.ram_total_bytes),
     )
   };
-  // Apple Metal uses `RAM*` to flag unified memory. AMD UMA APUs land
-  // here too — same physical pool shared with VRAM — so they pick up
-  // the same star.
-  let unified = host.gpu_backend == HostMetricsSnapshot::BACKEND_APPLE_METAL || uma_total > 0;
-  let label = if unified { "RAM* " } else { "RAM  " };
+  // `RAM*` flags unified memory (Apple Silicon + AMD/Intel UMA APUs).
+  // Sourced from the one `GpuInfo::is_unified` helper init shares, so
+  // the marker can't drift between the two render paths.
+  let label = if host.unified { "RAM* " } else { "RAM  " };
   let bar = bar(pct, bar_width, gauge_color(pct, palette));
   Line::from(vec![
     Span::styled(label, palette.label_style()),
@@ -497,11 +494,13 @@ mod tests {
   }
 
   #[test]
-  fn ram_row_subtracts_uma_shared_so_gtt_isnt_double_counted() {
-    // Strix Halo on kernel 7.0+: sysinfo sees the full 128 GiB pool,
-    // but ~61 GiB of it is the GTT cap (system RAM the GPU can claim).
-    // The RAM row must show CPU's real share — sysinfo total minus
-    // GTT total — and label `RAM*` to flag the unified pool.
+  fn ram_row_shows_full_total_and_star_on_unified_memory() {
+    // Strix Halo / UMA APU: sysinfo sees the full 121 GiB pool. The RAM
+    // row must show that true total (the same number `init` reports) —
+    // NOT the total minus the shared/GTT portion. `sysinfo` already
+    // counts the GPU's pool usage in `used`, so subtracting produced a
+    // wrong value. The `RAM*` marker (from the `unified` flag) is what
+    // tells the user the pool is shared with the GPU.
     const GIB: u64 = 1024 * 1024 * 1024;
     let snap = HostMetricsSnapshot {
       cpu_pct: 5.0,
@@ -514,14 +513,14 @@ mod tests {
       gpu_device_count: 1,
       uma_shared_total_bytes: Some(61 * GIB),
       uma_shared_used_bytes: Some(43 * GIB),
+      unified: true,
       ..Default::default()
     };
     let rows = render_lines(snap);
     let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
-    // CPU-side: 71 - 43 used = 28, 121 - 61 total = 60.
     assert!(
-      ram_row.contains("28/60G"),
-      "RAM row must subtract UMA-shared (GTT) bytes, got: {ram_row:?}"
+      ram_row.contains("71/121G"),
+      "RAM row must show the full sysinfo total, not minus UMA-shared, got: {ram_row:?}"
     );
     assert!(
       ram_row.contains("RAM*"),

@@ -8,8 +8,12 @@
 //! `IDXGIAdapter1::GetDesc1`. Reports per-adapter:
 //!  - Adapter name (`Description`, UTF-16 → `String`)
 //!  - Dedicated VRAM (`DedicatedVideoMemory`)
-//!  - Shared system memory (`SharedSystemMemory`) — populated for
-//!    UMA APUs (Strix Halo, Phoenix, integrated Intel/AMD)
+//!  - Unified vs discrete via the D3D12 `UMA` architecture flag (see
+//!    `adapter_is_uma`). Only genuine UMA adapters fold their shared
+//!    system-RAM pool into the VRAM total and mark it as
+//!    `uma_shared_total_bytes`. `SharedSystemMemory` from the DXGI
+//!    desc is NOT a UMA signal — it's ~half system RAM on every
+//!    adapter, discrete cards included.
 //!  - Vendor classification by `VendorId` (0x1002 AMD, 0x10DE NVIDIA,
 //!    0x8086 Intel)
 //!
@@ -30,6 +34,10 @@
 //! The host pane renders `—` for util/temp on a DXGI-sourced backend,
 //! matching how Apple Metal currently degrades.
 
+use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+use windows::Win32::Graphics::Direct3D12::{
+  D3D12CreateDevice, ID3D12Device, D3D12_FEATURE_ARCHITECTURE, D3D12_FEATURE_DATA_ARCHITECTURE,
+};
 use windows::Win32::Graphics::Dxgi::{
   CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
@@ -124,21 +132,30 @@ pub fn probe() -> Option<GpuInfo> {
     let vendor = vendor_from_id(desc.VendorId);
     let dedicated = desc.DedicatedVideoMemory as u64;
     let shared = desc.SharedSystemMemory as u64;
-    // UMA APUs (Strix Halo / Phoenix / integrated Intel) have a small
-    // BIOS-carved dedicated VRAM heap and a much larger shared system
-    // pool that holds the actual model weights. Mirror the Linux GTT
-    // handling so the host pane can subtract the shared bytes from
-    // the RAM gauge instead of double-counting.
-    let uma_shared_total = if dedicated < shared {
-      Some(shared)
+    // Genuine unified-memory APUs (Strix Halo / Phoenix / integrated
+    // Intel/AMD) vs discrete cards can only be told apart by the D3D12
+    // `UMA` architecture flag — `SharedSystemMemory` is ~half system
+    // RAM on *every* adapter, so it can't carry the signal (the old
+    // `dedicated < shared` heuristic mis-flagged discrete cards and
+    // made the host pane subtract bogus bytes from the RAM gauge).
+    let (total_memory_bytes, uma_shared_total) = if adapter_is_uma(&adapter) {
+      // The usable GPU pool is the small BIOS-carved dedicated heap
+      // plus the shareable system-RAM pool that holds the actual model
+      // weights. Fold them into one total (mirrors the Linux rocm-smi
+      // VRAM+GTT path) and mark the shared portion so init / the host
+      // pane flag it as unified.
+      (dedicated.saturating_add(shared), Some(shared))
     } else {
-      None
+      // Discrete card: dedicated VRAM is the real number; the shared
+      // pool is just the driver's GART aperture and must not inflate
+      // VRAM or be mistaken for unified memory.
+      (dedicated, None)
     };
     adapters.push((
       vendor,
       GpuDevice {
         name: description_to_string(&desc.Description),
-        total_memory_bytes: dedicated,
+        total_memory_bytes,
         used_memory_bytes: 0,
         utilization_pct: None,
         temperature_c: None,
@@ -148,6 +165,40 @@ pub fn probe() -> Option<GpuInfo> {
     ));
   }
   classify(adapters)
+}
+
+/// Query the authoritative D3D12 `UMA` architecture flag for an
+/// adapter. `true` means the GPU shares one physical memory pool with
+/// the CPU (integrated / APU); `false` is a discrete card with its own
+/// VRAM. Best-effort: any failure (no D3D12 runtime, device creation
+/// refused, feature query unsupported) returns `false` — the safe
+/// default, since mis-flagging a discrete card as unified is exactly
+/// the bug this replaced.
+fn adapter_is_uma(adapter: &IDXGIAdapter1) -> bool {
+  // SAFETY: `D3D12CreateDevice` is a documented entry point; we pass a
+  // live COM adapter and an out-pointer it fills with `Some(device)`
+  // on success. We treat any `Err` as "not UMA" rather than probing
+  // further.
+  let mut device: Option<ID3D12Device> = None;
+  if unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, &mut device) }.is_err() {
+    return false;
+  }
+  let Some(device) = device else {
+    return false;
+  };
+  let mut arch = D3D12_FEATURE_DATA_ARCHITECTURE::default();
+  // SAFETY: `CheckFeatureSupport` writes the feature struct in place;
+  // the pointer/size pair must describe `D3D12_FEATURE_DATA_ARCHITECTURE`
+  // for `D3D12_FEATURE_ARCHITECTURE`. `NodeIndex` defaults to 0 (the
+  // first/only node on single-GPU machines), which is what we want.
+  let queried = unsafe {
+    device.CheckFeatureSupport(
+      D3D12_FEATURE_ARCHITECTURE,
+      &mut arch as *mut _ as *mut core::ffi::c_void,
+      std::mem::size_of::<D3D12_FEATURE_DATA_ARCHITECTURE>() as u32,
+    )
+  };
+  queried.is_ok() && arch.UMA.as_bool()
 }
 
 /// Roll up the per-adapter list into a single `GpuInfo`. Mixed-vendor

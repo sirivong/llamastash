@@ -135,6 +135,27 @@ impl GpuInfo {
   pub fn is_gpu(&self) -> bool {
     !matches!(self, Self::CpuOnly)
   }
+
+  /// Single source of truth for "is this backend unified memory?" —
+  /// the GPU shares one physical pool with the CPU rather than owning
+  /// dedicated VRAM. Both the init banner and the TUI host pane render
+  /// from this so the two never disagree (the `*`/"unified" marker).
+  ///
+  /// - Apple Silicon (Metal) is unified by construction.
+  /// - AMD / Nvidia / Unknown are unified when a device carries a
+  ///   `uma_shared_total_bytes` portion — set by `rocm-smi`'s GTT pool
+  ///   on Linux APUs and by the D3D12 `UMA` architecture flag on
+  ///   Windows. Discrete cards never populate it.
+  /// - CpuOnly has no GPU memory at all.
+  pub fn is_unified(&self) -> bool {
+    match self {
+      Self::AppleMetal { .. } => true,
+      Self::Nvidia { devices } | Self::Amd { devices } | Self::Unknown { devices } => {
+        devices.iter().any(|d| d.uma_shared_total_bytes.is_some())
+      }
+      Self::CpuOnly => false,
+    }
+  }
 }
 
 /// Run the full detection chain. Best-effort — every probe failure

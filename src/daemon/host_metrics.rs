@@ -50,15 +50,25 @@ pub struct HostMetricsSnapshot {
   /// (unified memory); typically 1 on most NVIDIA/AMD systems.
   pub gpu_device_count: u32,
   /// Portion of GPU memory that physically lives in the system RAM
-  /// pool (AMD GTT on UMA APUs like Strix Halo). The host pane
-  /// subtracts this from the RAM gauge so the same bytes aren't
-  /// double-counted as both system RAM and VRAM. `None` on discrete
-  /// cards and other backends.
+  /// pool (AMD GTT on UMA APUs like Strix Halo, the shared pool on
+  /// Windows UMA adapters). Informational — surfaced for clients that
+  /// want the split. The RAM gauge does NOT subtract it: those bytes
+  /// are real system RAM and `sysinfo`'s used/total already account
+  /// for them; the `unified` flag is what flags the shared pool to the
+  /// user. `None` on discrete cards and other backends.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub uma_shared_total_bytes: Option<u64>,
   /// Currently-allocated portion of `uma_shared_total_bytes`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub uma_shared_used_bytes: Option<u64>,
+  /// Whether the GPU shares one physical memory pool with the CPU
+  /// (Apple Silicon, or an AMD/Intel UMA APU). Derived from
+  /// [`crate::gpu::GpuInfo::is_unified`] — the same helper the init
+  /// banner uses — so the TUI host pane and init never disagree on the
+  /// `RAM*` / "unified" marker. The pane reads this directly instead
+  /// of re-deriving it from the backend string + UMA fields.
+  #[serde(default)]
+  pub unified: bool,
 }
 
 impl HostMetricsSnapshot {
@@ -271,6 +281,7 @@ fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostM
     gpu_device_count: agg.device_count,
     uma_shared_total_bytes: agg.uma_shared_total,
     uma_shared_used_bytes: agg.uma_shared_used,
+    unified: info.is_unified(),
   }
 }
 

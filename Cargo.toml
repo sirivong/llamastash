@@ -239,6 +239,13 @@ windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
+  # D3D12's architecture feature query exposes the authoritative `UMA`
+  # flag — the only reliable way on Windows to tell a genuine
+  # unified-memory APU (Strix Halo / Phoenix / iGPU) from a discrete
+  # card. `SharedSystemMemory` in the DXGI desc is ~half system RAM on
+  # *every* adapter, so it can't carry that signal.
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D12",
 ] }
 
 [lib]
