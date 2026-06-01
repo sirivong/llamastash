@@ -148,8 +148,14 @@ fn pane_chip_labels(bindings: &[Binding]) -> Vec<String> {
   if acc.is_empty() {
     // Fallback: Tab pair isn't bound — surface first binding per
     // action so the user still sees what their keymap exposes.
+    // Skip display-only entries (`KeyCode::Null`, used by the gt/gT
+    // help rows) since they're not real single-press chords the chip
+    // could advertise.
     for action in [Action::NextFocus, Action::PrevFocus] {
-      if let Some(b) = bindings.iter().find(|b| b.action == action) {
+      if let Some(b) = bindings
+        .iter()
+        .find(|b| b.action == action && b.key != KeyCode::Null)
+      {
         push_label(&mut acc, b);
       }
     }

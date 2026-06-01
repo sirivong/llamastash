@@ -534,13 +534,16 @@ fn build_default_bindings() -> Vec<Binding> {
     hint: "down", description: Some("down/next"),
     chords: [(KeyCode::Char('j'), KeyModifiers::NONE, "j", CAT_GLOBAL)],
   });
-  // PageDown / PageUp — PgDn/PgUp canonical, Ctrl+F/B/U vim aliases.
+  // PageDown / PageUp — PgDn/PgUp canonical, Ctrl+F/B/U vim aliases
+  // grouped under Models so the help row renders as `PgDn,Ctrl+F →
+  // page down` (and similarly for up). They share the same action +
+  // description, so `build_sections` merges them into one row.
   v.extend_from_slice(&binds! {
     action: Action::PageDown, scopes: FocusSet::LIST,
     hint: "page down", description: None,
     chords: [
       (KeyCode::PageDown, KeyModifiers::NONE, "PgDn", CAT_MODELS),
-      (KeyCode::Char('f'), KeyModifiers::CONTROL, crate::ctrl_label!("f"), NO_CAT),
+      (KeyCode::Char('f'), KeyModifiers::CONTROL, crate::ctrl_label!("f"), CAT_MODELS),
     ],
   });
   v.extend_from_slice(&binds! {
@@ -548,18 +551,20 @@ fn build_default_bindings() -> Vec<Binding> {
     hint: "page up", description: None,
     chords: [
       (KeyCode::PageUp, KeyModifiers::NONE, "PgUp", CAT_MODELS),
-      (KeyCode::Char('b'), KeyModifiers::CONTROL, crate::ctrl_label!("b"), NO_CAT),
+      (KeyCode::Char('b'), KeyModifiers::CONTROL, crate::ctrl_label!("b"), CAT_MODELS),
       (KeyCode::Char('u'), KeyModifiers::CONTROL, crate::ctrl_label!("u"), NO_CAT),
     ],
   });
-  // GoTop / GoBottom — `g`/`Home` and `G`/`End` co-primary; `0`/`$` hidden.
+  // GoTop / GoBottom — `g`/`Home` and `G`/`End` co-primary; `0`/`$`
+  // vim aliases share the Models row via the (action, description)
+  // merge.
   v.extend_from_slice(&binds! {
     action: Action::GoTop, scopes: FocusSet::LIST,
     hint: "top", description: Some("top of list"),
     chords: [
       (KeyCode::Char('g'), KeyModifiers::NONE, "g", CAT_MODELS),
       (KeyCode::Home, KeyModifiers::NONE, "Home", CAT_MODELS),
-      (KeyCode::Char('0'), KeyModifiers::NONE, "0", NO_CAT),
+      (KeyCode::Char('0'), KeyModifiers::NONE, "0", CAT_MODELS),
     ],
   });
   v.extend_from_slice(&binds! {
@@ -568,7 +573,7 @@ fn build_default_bindings() -> Vec<Binding> {
     chords: [
       (KeyCode::Char('G'), KeyModifiers::SHIFT, "G", CAT_MODELS),
       (KeyCode::End, KeyModifiers::NONE, "End", CAT_MODELS),
-      (KeyCode::Char('$'), KeyModifiers::NONE, "$", NO_CAT),
+      (KeyCode::Char('$'), KeyModifiers::NONE, "$", CAT_MODELS),
     ],
   });
   // ─── Pane navigation. Tab/Shift+Tab fire in every TUI focus;
@@ -592,6 +597,24 @@ fn build_default_bindings() -> Vec<Binding> {
     action: Action::PrevFocus, scopes: FocusSet::NAV,
     hint: "prev pane", description: None,
     chords: [(KeyCode::Char('h'), KeyModifiers::NONE, "h", CAT_GLOBAL)],
+  });
+  // gt / gT — vim "tab next/prev" aliases for NextFocus/PrevFocus.
+  // Dispatch lives in `events::handle_key`'s `pending_g_prefix` state
+  // machine, not here, because they're a two-key sequence and this
+  // table is single-chord. We surface them as display-only rows using
+  // `KeyCode::Null` (which terminals never emit) so the help overlay's
+  // `(action, description)` merge folds them into the existing
+  // `Tab,l,gt → next pane` and `Shift+Tab,h,gT → prev pane` rows.
+  // Same NAV scope as h/l so the row lands in the same focus group.
+  v.extend_from_slice(&binds! {
+    action: Action::NextFocus, scopes: FocusSet::NAV,
+    hint: "next pane", description: None,
+    chords: [(KeyCode::Null, KeyModifiers::NONE, "gt", CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::PrevFocus, scopes: FocusSet::NAV,
+    hint: "prev pane", description: None,
+    chords: [(KeyCode::Null, KeyModifiers::NONE, "gT", CAT_GLOBAL)],
   });
   // ─── Shift-letter quick-jumps (navigation policy: Shift = navigate)
   v.extend_from_slice(&binds! {
@@ -661,7 +684,10 @@ fn build_default_bindings() -> Vec<Binding> {
     hint: "edit", description: Some("enter edit mode"),
     chords: [
       (KeyCode::Char('e'), KeyModifiers::NONE, "e", CAT_GLOBAL),
-      (KeyCode::Char('i'), KeyModifiers::NONE, "i", NO_CAT),
+      // `i` is the vim alias for `e`; merges into the same General
+      // row via the (action, description) grouping in the help
+      // overlay so it reads `e,i → enter edit mode`.
+      (KeyCode::Char('i'), KeyModifiers::NONE, "i", CAT_GLOBAL),
     ],
   });
   v.extend_from_slice(&binds! {

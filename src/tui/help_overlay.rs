@@ -464,6 +464,37 @@ mod tests {
   }
 
   #[test]
+  fn overlay_merges_vim_aliases_into_their_semantic_rows() {
+    // Vim aliases sit on the same row as the canonical chord they
+    // alias, never in a separate "Vim" section. Tab/l/gt share the
+    // NextFocus row in General; PgDn/Ctrl+F share the page-down row
+    // in Models list; g/Home/0 share the GoTop row; G/End/$ share
+    // the GoBottom row. The merge keeps muscle-memory users covered
+    // without bloating the layout with a redundant section.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 60, &app);
+    // Ctrl-letter labels are lower-cased by `ctrl_label!` (matches
+    // the binary's chip + log convention on Linux/Windows; macOS
+    // renders `⌃f`/`⌃b`). `e,i` covers the vim `i` alias for
+    // `EnterEdit` — must appear as a merged row, not a separate one.
+    // `Ctrl+u` is intentionally NOT asserted here. Vim's Ctrl+U is
+    // half-page-up, but llamastash collapses it to full PgUp (same
+    // as Ctrl+B), so listing both in help next to PgUp would just
+    // duplicate the row. It stays dispatchable (muscle memory keeps
+    // working) but hidden via NO_CAT in `keybindings.rs`.
+    for needle in ["Ctrl+f", "Ctrl+b", "0", "$", "gt", "gT", "e,i"] {
+      assert!(
+        frame.contains(needle),
+        "vim chord {needle:?} missing from help overlay:\n{frame}"
+      );
+    }
+    assert!(
+      !frame.contains("Vim aliases"),
+      "vim chords must NOT live in a dedicated section — they belong on their semantic row:\n{frame}"
+    );
+  }
+
+  #[test]
   fn overlay_scrolls_when_help_scroll_advanced() {
     // A short terminal can't fit every section. Advancing `help_scroll`
     // should slide the content up so later rows appear and earlier
