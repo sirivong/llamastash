@@ -103,12 +103,12 @@ Two release tracks:
 
 - [x] **IP**: **R1 launch promotion** — telling the world about v0.0.1.
   - [x] Release blog.
-  - [ ] Bench blog
+  - [x] Bench blog
   - [ ] Social promotion — research an approach for max reach.
 - [x] **IP**: Agent run UAT
   - [x] Linux
   - [x] Windows
-  - [ ] macOS
+  - [x] macOS
 - [x] ~~**Windows AMD GPU detection.**~~ — DXGI-based probe (`src/gpu/dxgi.rs`) added in the GPU chain between AMD-rocm and Metal. Surfaces adapter name + dedicated VRAM + shared-system memory for AMD / Intel / NVIDIA-without-nvidia-smi.exe on Windows. Static data only — no live util%/temp/per-PID VRAM (DXGI API doesn't expose them). See [`docs/architecture.md §GPU detection`](docs/architecture.md#gpu-detection) for full coverage matrix. ADLX / NVML / IGCL for live metrics is the remaining gap, tracked below.
 - [ ] Verify in WIndows
   - `llamastash daemon start` (the `actual start_detached_with_exe` path, not `cargo test`) on Win11. Confirm supervisor pumps reach Ready when the daemon was launched via
@@ -117,7 +117,7 @@ Two release tracks:
   - `install.ps1` against a tagged release end-to-end: download → SHA256SUMS verify → extract → PATH update.
   - Scoop install from the live bucket: `scoop bucket add llamastash https://github.com/llamastash/scoop-llamastash; scoop install llamastash`.
   - [ ] UI is slow and glitchy and random crashes as well sometimes. (needs more testing and hardening)
-  - [ ] Shift + / (?) doesn't work
+  - [x] Shift + / (?) doesn't work
   - [x] Wrong ram and unified indicator '*' in Host panel. Init shows correct values. Both values should be derived via the same codepath. DRY.
   - [x] **deferred**: VRAM load doesn't show up in Host panel on Windows AMD GPU. Check if the DXGI probe is correctly identifying the GPU and if the metrics sampler is correctly parsing the output.
   - [x] llamastash.exe fails to start from `init` (retest with an install, maybe due to cargo run)

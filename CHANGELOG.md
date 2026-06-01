@@ -4,6 +4,8 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+## 0.0.2 — 2026-06-01
+
 ### Added
 
 - Windows 11 x64 as a first-class platform — same binary, TUI, and CLI. Install via `install.ps1` or the release `.zip`; supervision uses Job Objects, the lockfile uses `LockFileEx`, and `runtime.json` / `state.json` get owner-only DACLs. (Windows AMD GPU detection and `aarch64` deferred.)
@@ -50,7 +52,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - `make snapshot` warns when `HF_TOKEN` is unset and records a `regen_environment` manifest — surfacing the usual cause of local-vs-CI snapshot drift (anonymous-tier HF rate limits).
 - Benchmark snapshot releases publish with `--prerelease` so they don't headline the Releases page; asset URLs unchanged.
 
-## [0.0.1] — 2026-05-28
+## 0.0.1 — 2026-05-28
 
 First publicly-installable release. A single `llamastash` binary acts as TUI, CLI, and on-demand daemon for running local LLMs via [llama.cpp](https://github.com/ggml-org/llama.cpp). Distributed via Cargo, a Homebrew tap, and a GitHub-hosted install script, with a marketing site at [llamastash.dev](https://llamastash.dev).
 
