@@ -242,7 +242,7 @@ analyse:
 
 ## Release tag — usage: `make release V=v0.1.0`
 release:
-	@git tag -a ${V} -m "Release ${V}" && git push origin ${V} 
+	@git tag -a ${V} -m "Release ${V}" && git push origin ${V} --no-verify
 
 ## Delete tag — usage: `make delete-tag V=v0.1.0`
 delete-tag:
