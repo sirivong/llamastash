@@ -706,6 +706,19 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
     .stderr(Stdio::null())
     .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 
+  // Stop the detached daemon from inheriting the launcher's own stdio
+  // handles. Even with the child's std handles set to NUL above, Windows
+  // spawns with `bInheritHandles=TRUE` (std needs it to hand the NUL
+  // handles over), which also leaks every *other* inheritable handle the
+  // launcher holds — including its stdout/stderr pipe when invoked as
+  // `llamastash <cmd> | consumer`. The long-lived daemon would then keep
+  // that pipe's write end open for its whole life, so the consumer never
+  // sees EOF and hangs (e.g. `llamastash start --json | jq`, or the UAT
+  // harness's `wait_with_output`). Clearing the inherit flag on our own
+  // std handles right before the spawn closes the leak; we print + exit
+  // immediately after, so no later child needs them inheritable.
+  clear_std_handle_inheritance();
+
   let mut child = cmd.spawn().context("spawning detached daemon")?;
 
   let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -731,6 +744,32 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
       ));
     }
     std::thread::sleep(Duration::from_millis(50));
+  }
+}
+
+/// Clear `HANDLE_FLAG_INHERIT` on this process's std handles so a
+/// detached daemon spawned immediately after does not inherit them.
+/// See the call site in [`start_detached_with_exe`] for the full
+/// rationale (Windows `bInheritHandles` pipe-leak → consumer hangs).
+#[cfg(windows)]
+fn clear_std_handle_inheritance() {
+  use std::os::windows::io::AsRawHandle;
+  use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+  for h in [
+    std::io::stdin().as_raw_handle(),
+    std::io::stdout().as_raw_handle(),
+    std::io::stderr().as_raw_handle(),
+  ] {
+    if h.is_null() {
+      continue;
+    }
+    // SAFETY: `h` is a live std handle owned by this process. Clearing
+    // the inherit flag is a documented metadata-only op — it affects
+    // only whether *future* child processes inherit the handle, never
+    // this process's own use of it.
+    unsafe {
+      SetHandleInformation(h as HANDLE, HANDLE_FLAG_INHERIT, 0);
+    }
   }
 }
 
