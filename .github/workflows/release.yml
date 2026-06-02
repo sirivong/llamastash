@@ -696,7 +696,7 @@ jobs:
           exit 1
 
   publish-site:
-    name: publish site install.sh mirror
+    name: publish site install script mirror
     needs: [create-release, publish-shasums]
     runs-on: ubuntu-latest
     if: needs.create-release.outputs.is_prerelease == 'false'
@@ -708,7 +708,7 @@ jobs:
         with:
           ref: ${{ needs.create-release.outputs.tag }}
 
-      - name: download install.sh + sidecar from the release (with retry)
+      - name: download install scripts + sidecars from the release (with retry)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -721,6 +721,8 @@ jobs:
                  --repo "${{ github.repository }}" \
                  --pattern install.sh \
                  --pattern install.sh.sha256 \
+                 --pattern install.ps1 \
+                 --pattern install.ps1.sha256 \
                  --dir stage \
                  --clobber; then
               break
@@ -728,7 +730,7 @@ jobs:
             echo "download attempt ${attempt} failed; sleeping ${attempt}s"
             sleep "$attempt"
           done
-          (cd stage && sha256sum -c install.sh.sha256)
+          (cd stage && sha256sum -c install.sh.sha256 && sha256sum -c install.ps1.sha256)
 
       - name: clone + push site (token via GIT_ASKPASS, retry on non-fast-forward)
         env:
@@ -757,11 +759,12 @@ jobs:
 
           git clone "https://x-access-token@github.com/llamastash/llamastash.github.io.git" --branch main site
 
-          # Prepend a provenance header to install.sh, then RECOMPUTE the
-          # sidecar so `curl .../install.sh.sha256 | sha256sum -c` against the
-          # served file matches. The previous version copied the original
-          # sidecar, which was computed before the header — a real verification
-          # break for users.
+          # Prepend a provenance header to install.sh / install.ps1, then
+          # RECOMPUTE each sidecar so `curl .../install.sh.sha256 | sha256sum
+          # -c` against the served file matches. The previous version copied
+          # the original sidecar, which was computed before the header — a
+          # real verification break for users. PowerShell uses `#` for line
+          # comments, so the same prefix shape works for install.ps1.
           {
             printf '# Source: github.com/llamastash/llamastash@%s/scripts/install.sh\n' "$RELEASE_TAG"
             printf '# SHA-256 verified by .github/workflows/release.yml on %s.\n' "$released_at"
@@ -769,6 +772,13 @@ jobs:
           } >site/public/install.sh
           chmod +x site/public/install.sh
           (cd site/public && shasum -a 256 install.sh >install.sh.sha256)
+
+          {
+            printf '# Source: github.com/llamastash/llamastash@%s/scripts/install.ps1\n' "$RELEASE_TAG"
+            printf '# SHA-256 verified by .github/workflows/release.yml on %s.\n' "$released_at"
+            cat stage/install.ps1
+          } >site/public/install.ps1
+          (cd site/public && shasum -a 256 install.ps1 >install.ps1.sha256)
 
           # Generate version.ts via a quoted heredoc + sed substitution so
           # tag/version values cannot expand inside the heredoc. The upstream
@@ -792,12 +802,15 @@ jobs:
             site/src/data/version.ts
 
           cd site
-          git add public/install.sh public/install.sh.sha256 src/data/version.ts
+          git add \
+            public/install.sh public/install.sh.sha256 \
+            public/install.ps1 public/install.ps1.sha256 \
+            src/data/version.ts
           if git diff-index --quiet HEAD; then
             echo "site already up to date for ${RELEASE_TAG}; nothing to commit"
             exit 0
           fi
-          git commit -m "chore(release): mirror install.sh for ${RELEASE_TAG}"
+          git commit -m "chore(release): mirror install scripts for ${RELEASE_TAG}"
 
           for attempt in 1 2 3; do
             if git push origin main; then
