@@ -73,16 +73,43 @@ If you'd rather inspect the tarball first, grab the matching asset from <https:/
 irm https://llamastash.dev/install.ps1 | iex
 ```
 
-The PowerShell installer mirrors `install.sh`: pulls the latest `x86_64-pc-windows-msvc.zip` from the GitHub Release, verifies the SHA-256 against the `SHA256SUMS` file, expands into `%LOCALAPPDATA%\Programs\llamastash`, and is purely user-scope (no admin elevation, no `Set-ExecutionPolicy` rituals). Add `-AddToPath` to append the install dir to your user PATH idempotently:
+The PowerShell installer mirrors `install.sh`: pulls the latest `x86_64-pc-windows-msvc.zip` from the GitHub Release, verifies the SHA-256 against the `SHA256SUMS` file, expands into `%LOCALAPPDATA%\Programs\llamastash`, and is purely user-scope (no admin elevation, no `Set-ExecutionPolicy` rituals).
+
+#### Available parameters
+
+| Parameter      | Env-var equivalent        | Description                                                                              |
+| -------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
+| `-Version`     | `LLAMASTASH_VERSION`      | Install a specific tag (e.g. `v0.0.2`) instead of the latest release.                    |
+| `-InstallDir`  | `LLAMASTASH_INSTALL_DIR`  | Install into a custom path instead of `%LOCALAPPDATA%\Programs\llamastash`.              |
+| `-Quiet`       | `LLAMASTASH_QUIET=1`      | Suppress progress chatter; errors still print.                                           |
+| `-AddToPath`   | _(none)_                  | Append `InstallDir` to your user `PATH` idempotently.                                    |
+
+#### Passing parameters
+
+`irm | iex` evaluates the script's text directly, so the `param()` block has no argv to bind to — meaning you can't pass `-AddToPath` (or any switch) through the bare one-liner. Use one of these instead:
+
+**Script-block invoke (works for every parameter, including switches).** Wrap the downloaded text in a script block and call it with `&`, so PowerShell binds your arguments normally:
 
 ```powershell
 & ([scriptblock]::Create((irm https://llamastash.dev/install.ps1))) -AddToPath
+& ([scriptblock]::Create((irm https://llamastash.dev/install.ps1))) -Version v0.0.2 -AddToPath
+& ([scriptblock]::Create((irm https://llamastash.dev/install.ps1))) -InstallDir 'C:\Tools\llamastash' -AddToPath
 ```
 
-Or pin a specific release:
+**Environment variables + `irm | iex` (works for the three params that have env-var equivalents).** Keep the one-liner shape; set the env vars first:
 
 ```powershell
-& ([scriptblock]::Create((irm https://llamastash.dev/install.ps1))) -Version v0.0.2 -AddToPath
+$env:LLAMASTASH_VERSION='v0.0.2'; $env:LLAMASTASH_INSTALL_DIR='C:\Tools\llamastash'
+irm https://llamastash.dev/install.ps1 | iex
+```
+
+`-AddToPath` has no env-var equivalent today, so use the script-block form if you need it together with `irm | iex` ergonomics.
+
+**Download then run (cleanest when combining several flags).**
+
+```powershell
+irm https://llamastash.dev/install.ps1 -OutFile "$env:TEMP\llamastash-install.ps1"
+& "$env:TEMP\llamastash-install.ps1" -Version v0.0.2 -AddToPath
 ```
 
 ### Option 8 — Scoop (Windows)
