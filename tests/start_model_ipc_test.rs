@@ -101,8 +101,11 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
     "log_path present and ends in .log: {start_body:?}"
   );
 
-  // 2) status reports the supervised model. Wait briefly for Ready.
-  let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+  // 2) status reports the supervised model. Wait for Ready. Budget is
+  // generous: under cargo test parallel load on GH-hosted runners the
+  // fake_llama_server fork+exec+listen sequence has been observed past
+  // 5 s on macOS (matches the same-file precedent for last_params).
+  let ready_deadline = std::time::Instant::now() + Duration::from_secs(30);
   loop {
     let body = client.call("status", None).await.expect("status");
     let models = body["models"].as_array().expect("models");
