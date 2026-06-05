@@ -95,6 +95,13 @@ const SPECS: &[KnobSpec] = &[
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
+    field: KnobField::Device,
+    canonical: "--device",
+    aliases: &["-d"],
+    kind: ValueKind::Str,
+    fallback_label: LayerLabel::ServerDefault,
+  },
+  KnobSpec {
     field: KnobField::Threads,
     canonical: "--threads",
     aliases: &["-t"],
@@ -169,13 +176,6 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--keep",
     aliases: &[],
     kind: ValueKind::U32,
-    fallback_label: LayerLabel::ServerDefault,
-  },
-  KnobSpec {
-    field: KnobField::Device,
-    canonical: "--device",
-    aliases: &["-d"],
-    kind: ValueKind::Str,
     fallback_label: LayerLabel::ServerDefault,
   },
 ];
@@ -299,6 +299,7 @@ mod tests {
         "--ctx-size",
         "--reasoning",
         "--n-gpu-layers",
+        "--device",
         "--threads",
         "--cache-type-k",
         "--cache-type-v",
@@ -310,7 +311,6 @@ mod tests {
         "--ubatch-size",
         "--rope-freq-scale",
         "--keep",
-        "--device",
       ]
     );
   }

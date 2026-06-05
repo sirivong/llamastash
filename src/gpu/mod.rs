@@ -36,7 +36,7 @@ pub mod vulkan;
 use std::process::{Command, Output};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Wall-clock budget for a single vendor probe. A wedged GPU driver
 /// (nvidia-smi hang, ROCm reset, locked Vulkan loader) would otherwise
@@ -145,11 +145,9 @@ pub enum GpuInfo {
   /// `backend  unknown` rather than mislabelling the card.
   Unknown { devices: Vec<GpuDevice> },
   /// Multiple backends each found one or more GPUs. Carries a
-  /// per-device `backend` tag so the host-stats pane can render one
-  /// row per GPU (deduped against the Vulkan fallback). Note: the
-  /// launch device list does NOT come from here — it is sourced from
-  /// each `llama-server` binary's own `--list-devices` (see
-  /// [`crate::launch::list_devices`]).
+  /// per-device `backend` tag so callers can group / label them
+  /// independently. The `cards()` helper builds a card-first view
+  /// from these devices for the TUI picker.
   Multi { devices: Vec<GpuDevice> },
 }
 
@@ -196,6 +194,42 @@ pub struct GpuDevice {
   /// Currently-allocated portion of `uma_shared_total_bytes`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub uma_shared_used_bytes: Option<u64>,
+}
+
+/// A physical GPU card discovered across one or more drivers. Each
+/// card carries its available drivers so the TUI picker can present
+/// card-first (pick the card, then pick the driver for it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Card {
+  /// Stable physical identifier (PCI bus address on Linux/Windows,
+  /// IOKit serial on macOS).
+  pub id: String,
+  /// Human-readable card name (e.g. "NVIDIA GeForce RTX 3080").
+  pub name: String,
+  /// Total memory bytes across all drivers (same value per card).
+  pub total_memory_bytes: u64,
+  /// Available drivers for this card, ordered by preference.
+  #[serde(default)]
+  pub drivers: Vec<Driver>,
+}
+
+/// One driver backend for a physical card.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Driver {
+  /// Backend label: "nvidia", "amd", "vulkan", "apple_metal".
+  pub backend: String,
+  /// Display label for the picker (e.g. "CUDA", "ROCm", "Vulkan").
+  pub label: String,
+  /// Device index within this backend.
+  pub index: u32,
+  /// Selector string to pass as --device (e.g. "Nvidia0", "Vulkan0").
+  pub selector: String,
+  /// Live utilization % when the backend probe had readings.
+  pub utilization_pct: Option<f32>,
+  /// Live temperature °C when the backend probe had readings.
+  pub temperature_c: Option<f32>,
+  /// Used memory bytes when the backend probe had readings.
+  pub used_memory_bytes: Option<u64>,
 }
 
 impl GpuInfo {
@@ -257,6 +291,128 @@ impl GpuInfo {
       Self::Unknown { .. } => vec!["unknown".into()],
     }
   }
+
+  /// Build a card-first view from the devices. Returns a list of
+  /// physical cards with their available drivers, deduplicated by
+  /// PCI address (on Linux) or device name (elsewhere).
+  ///
+  /// For single-backend hits (Nvidia, Amd, AppleMetal, Unknown),
+  /// returns a single card with one driver. For CpuOnly, returns
+  /// an empty list.
+  pub fn cards(&self) -> Vec<Card> {
+    match self {
+      Self::CpuOnly => vec![],
+      Self::AppleMetal { total_memory_bytes } => {
+        vec![Card {
+          id: "apple-metal".into(),
+          name: "Apple Silicon (unified)".into(),
+          total_memory_bytes: *total_memory_bytes,
+          drivers: vec![Driver {
+            backend: "apple_metal".into(),
+            label: "Metal".into(),
+            index: 0,
+            selector: "Metal0".into(),
+            utilization_pct: None,
+            temperature_c: None,
+            used_memory_bytes: None,
+          }],
+        }]
+      }
+      Self::Nvidia { devices } | Self::Amd { devices } | Self::Unknown { devices } => {
+        let mut cards: Vec<Card> = Vec::new();
+        for (i, d) in devices.iter().enumerate() {
+          let id = d.device_id.clone().unwrap_or_else(|| d.name.clone());
+          let label = match d.backend.as_str() {
+            "nvidia" => "CUDA".to_string(),
+            "amd" => "ROCm".to_string(),
+            "unknown" => "Vulkan".to_string(),
+            "apple_metal" => "Metal".to_string(),
+            _ => d.backend.clone(),
+          };
+          let selector = match d.backend.as_str() {
+            "nvidia" => format!("Nvidia{}", i),
+            "amd" => format!("Amd{}", i),
+            "unknown" => format!("Vulkan{}", i),
+            "apple_metal" => format!("Metal{}", i),
+            _ => d.backend.clone(),
+          };
+          // Find or create the card for this device_id
+          let card_pos = cards.iter().position(|c| c.id == id);
+          if card_pos.is_none() {
+            cards.push(Card {
+              id: id.clone(),
+              name: d.name.clone(),
+              total_memory_bytes: d.total_memory_bytes,
+              drivers: vec![],
+            });
+          }
+          if let Some(pos) = cards.iter().position(|c| c.id == id) {
+            let c = &mut cards[pos];
+            if d.total_memory_bytes > c.total_memory_bytes {
+              c.total_memory_bytes = d.total_memory_bytes;
+              c.name = d.name.clone();
+            }
+            c.drivers.push(Driver {
+              backend: d.backend.clone(),
+              label,
+              index: i as u32,
+              selector,
+              utilization_pct: d.utilization_pct,
+              temperature_c: d.temperature_c,
+              used_memory_bytes: Some(d.used_memory_bytes),
+            });
+          }
+        }
+        cards
+      }
+      Self::Multi { devices } => {
+        let mut cards_by_id: std::collections::BTreeMap<String, Card> =
+          std::collections::BTreeMap::new();
+        for (i, d) in devices.iter().enumerate() {
+          let id = d.device_id.clone().unwrap_or_else(|| d.name.clone());
+          let label = match d.backend.as_str() {
+            "nvidia" => "CUDA".to_string(),
+            "amd" => "ROCm".to_string(),
+            "unknown" => "Vulkan".to_string(),
+            "apple_metal" => "Metal".to_string(),
+            _ => d.backend.clone(),
+          };
+          let selector = match d.backend.as_str() {
+            "nvidia" => format!("Nvidia{}", i),
+            "amd" => format!("Amd{}", i),
+            "unknown" => format!("Vulkan{}", i),
+            "apple_metal" => format!("Metal{}", i),
+            _ => d.backend.clone(),
+          };
+          let card = cards_by_id.entry(id).or_insert_with(|| Card {
+            id: d.device_id.clone().unwrap_or_else(|| d.name.clone()),
+            name: d.name.clone(),
+            total_memory_bytes: d.total_memory_bytes,
+            drivers: vec![],
+          });
+          // Update card metadata if this device has more VRAM.
+          if d.total_memory_bytes > card.total_memory_bytes {
+            card.total_memory_bytes = d.total_memory_bytes;
+            card.name = d.name.clone();
+          }
+          card.drivers.push(Driver {
+            backend: d.backend.clone(),
+            label,
+            index: i as u32,
+            selector,
+            utilization_pct: d.utilization_pct,
+            temperature_c: d.temperature_c,
+            used_memory_bytes: if d.used_memory_bytes > 0 {
+              Some(d.used_memory_bytes)
+            } else {
+              None
+            },
+          });
+        }
+        cards_by_id.values().cloned().collect()
+      }
+    }
+  }
 }
 
 /// Queried once per probe cycle: maps GPU names to PCI bus addresses
@@ -266,7 +422,12 @@ impl GpuInfo {
 ///
 /// Returns `None` on non-Linux or when lspci is unavailable.
 #[cfg(target_os = "linux")]
-fn query_lspci() -> Option<(std::collections::BTreeMap<String, String>, Vec<String>)> {
+#[allow(clippy::type_complexity)]
+fn query_lspci() -> Option<(
+  std::collections::BTreeMap<String, String>,
+  std::collections::BTreeMap<String, String>,
+  Vec<String>,
+)> {
   let cmd = std::process::Command::new("lspci");
   let output = run_with_timeout(cmd)?;
   if !output.status.success() {
@@ -275,6 +436,10 @@ fn query_lspci() -> Option<(std::collections::BTreeMap<String, String>, Vec<Stri
   let stdout = String::from_utf8(output.stdout).ok()?;
   let mut name_map = std::collections::BTreeMap::new();
   let mut index_order = Vec::new();
+  // Also build a PCI-ID map: "10de:2216" (vendor:device, lowercase hex,
+  // no "0x" prefix) → canonical PCI address. Used to resolve
+  // vulkaninfo's vendor:device IDs when pciBusLocation is empty.
+  let mut pci_id_map = std::collections::BTreeMap::new();
   for line in stdout.lines() {
     let trimmed = line.trim();
     // Only VGA/Display/3D controllers.
@@ -306,6 +471,13 @@ fn query_lspci() -> Option<(std::collections::BTreeMap<String, String>, Vec<Stri
               if !name.is_empty() {
                 name_map.insert(name, addr.clone());
               }
+              // PCI-ID key: lowercase vendor:device (no "0x" prefix)
+              let pci_key = format!(
+                "{:x}:{:x}",
+                u32::from_str_radix(vendor, 16).ok()?,
+                u32::from_str_radix(&pci_id[colon1 + 1..colon2], 16).ok()?
+              );
+              pci_id_map.insert(pci_key, addr.clone());
               index_order.push(addr);
             }
           }
@@ -316,7 +488,7 @@ fn query_lspci() -> Option<(std::collections::BTreeMap<String, String>, Vec<Stri
   if index_order.is_empty() {
     None
   } else {
-    Some((name_map, index_order))
+    Some((name_map, pci_id_map, index_order))
   }
 }
 
@@ -324,10 +496,16 @@ fn query_lspci() -> Option<(std::collections::BTreeMap<String, String>, Vec<Stri
 ///
 /// Uses the device's own `device_id` (already normalized to canonical
 /// `00000000:bb:dd.f` by the backend probe) as the primary source.
-/// Falls back to lspci name lookup when device_id is absent.
+/// Falls back to lspci name lookup when device_id is absent or
+/// looks like a vendor:device ID (e.g. "0x1002:0x7551").
+#[allow(clippy::type_complexity)]
 fn resolve_device_id(
   device: &GpuDevice,
-  pci_map: &Option<(std::collections::BTreeMap<String, String>, Vec<String>)>,
+  lspci: &Option<(
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    Vec<String>,
+  )>,
 ) -> String {
   if let Some(pci) = &device.device_id {
     // PCI bus addresses: "00000002:00.0" — contains ':' but doesn't
@@ -337,12 +515,64 @@ fn resolve_device_id(
       return pci.clone();
     }
   }
-  // Fall back to lspci name lookup (already existing fallback).
-  pci_map
+  // Fall back to lspci lookups (name map and PCI-ID map).
+  lspci
     .as_ref()
-    .and_then(|(m, _)| m.get(&device.name))
-    .cloned()
+    .and_then(|(name_map, pci_id_map, _)| {
+      name_map
+        .get(&device.name)
+        .or_else(|| {
+          // Try resolving vendor:device IDs (e.g. "0x1002:0x7551")
+          // from vulkaninfo by stripping the "0x" prefix and lowercasing.
+          if let Some(pci) = &device.device_id {
+            if pci.starts_with("0x") && pci.contains(':') {
+              let stripped: String = pci
+                .trim_start_matches("0x")
+                .split(':')
+                .map(|part| {
+                  let hex = part.trim_start_matches('0');
+                  if hex.is_empty() {
+                    "0".to_string()
+                  } else {
+                    hex.to_lowercase()
+                  }
+                })
+                .collect::<Vec<_>>()
+                .join(":");
+              return pci_id_map.get(&stripped);
+            }
+          }
+          None
+        })
+        .cloned()
+    })
     .unwrap_or_else(|| device.name.clone())
+}
+
+/// Enrich a list of devices with lspci PCI address lookups.
+///
+/// For devices whose `device_id` is missing or looks like a
+/// vendor:device ID (e.g. "0x1002:0x7551" from vulkaninfo),
+/// resolve the canonical PCI address using the lspci name map.
+#[allow(clippy::type_complexity)]
+fn enrich_with_lspci(
+  devices: &mut [GpuDevice],
+  lspci: &Option<(
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    Vec<String>,
+  )>,
+) {
+  for d in devices.iter_mut() {
+    if let Some(pci) = &d.device_id {
+      // Already has a canonical PCI address — skip.
+      if pci.contains(':') && !pci.starts_with("0x") {
+        continue;
+      }
+    }
+    // Resolve using lspci.
+    d.device_id = Some(resolve_device_id(d, lspci));
+  }
 }
 
 /// Run the full detection chain. Best-effort — every probe failure
@@ -430,12 +660,113 @@ pub fn probe() -> GpuInfo {
     };
   }
 
-  // Two or more backends — merge into a single device list,
-  // deduplicating the Vulkan fallback against cards a native backend
-  // already reported (by PCI address on Linux, by name elsewhere) so
-  // the host-stats pane doesn't double-count one physical card.
-  let pci_map = query_lspci();
+  // Two or more backends — build cards from all devices.
+  // Group by physical card (PCI address on Linux, name elsewhere)
+  // and attach available drivers per card.
+  let lspci = query_lspci();
 
+  // Enrich devices with lspci PCI lookups so vendor:device IDs
+  // from vulkaninfo resolve to canonical PCI addresses. This is
+  // the key to cross-backend dedup (rocm-smi "AMD Radeon…" vs
+  // vulkaninfo "AMD Radeon… (RADV…)").
+  enrich_with_lspci(&mut nvidia_devices, &lspci);
+  enrich_with_lspci(&mut amd_devices, &lspci);
+  enrich_with_lspci(&mut metal_devices, &lspci);
+  enrich_with_lspci(&mut unknown_devices, &lspci);
+
+  // Build a map: device_id → Card (with driver list)
+  let mut cards_by_id: std::collections::BTreeMap<String, Card> = std::collections::BTreeMap::new();
+
+  // Helper: add a driver to an existing card or create a new card.
+  let add_driver = |cards: &mut std::collections::BTreeMap<String, Card>,
+                    device_id: String,
+                    dev_name: String,
+                    total_mem: u64,
+                    backend: String,
+                    label: String,
+                    index: u32,
+                    selector: String,
+                    util: Option<f32>,
+                    temp: Option<f32>,
+                    used: Option<u64>| {
+    let card = cards.entry(device_id.clone()).or_insert_with(|| Card {
+      id: device_id.clone(),
+      name: dev_name.clone(),
+      total_memory_bytes: total_mem,
+      drivers: Vec::new(),
+    });
+    // Only update card metadata if the new device has more memory.
+    if total_mem > card.total_memory_bytes {
+      card.total_memory_bytes = total_mem;
+      card.name = dev_name;
+    }
+    card.drivers.push(Driver {
+      backend,
+      label,
+      index,
+      selector,
+      utilization_pct: util,
+      temperature_c: temp,
+      used_memory_bytes: used,
+    });
+  };
+
+  // NVIDIA devices
+  for (i, d) in nvidia_devices.iter().enumerate() {
+    let device_id = resolve_device_id(d, &lspci);
+    add_driver(
+      &mut cards_by_id,
+      device_id,
+      d.name.clone(),
+      d.total_memory_bytes,
+      "nvidia".into(),
+      "CUDA".into(),
+      i as u32,
+      format!("Nvidia{}", i),
+      d.utilization_pct,
+      d.temperature_c,
+      Some(d.used_memory_bytes),
+    );
+  }
+
+  // AMD devices
+  for (i, d) in amd_devices.iter().enumerate() {
+    let device_id = resolve_device_id(d, &lspci);
+    add_driver(
+      &mut cards_by_id,
+      device_id,
+      d.name.clone(),
+      d.total_memory_bytes,
+      "amd".into(),
+      "ROCm".into(),
+      i as u32,
+      format!("Amd{}", i),
+      d.utilization_pct,
+      d.temperature_c,
+      Some(d.used_memory_bytes),
+    );
+  }
+
+  // Metal devices
+  for (i, d) in metal_devices.iter().enumerate() {
+    let device_id = resolve_device_id(d, &lspci);
+    add_driver(
+      &mut cards_by_id,
+      device_id,
+      d.name.clone(),
+      d.total_memory_bytes,
+      "apple_metal".into(),
+      "Metal".into(),
+      i as u32,
+      format!("Metal{}", i),
+      d.utilization_pct,
+      d.temperature_c,
+      Some(d.used_memory_bytes),
+    );
+  }
+
+  // Vulkan devices — only add if not already covered by CUDA/ROCm
+  // on the same physical card (dedup by PCI address or name).
   let mut all_devices = Vec::new();
   for d in nvidia_devices {
     all_devices.push(d);
@@ -450,10 +781,10 @@ pub fn probe() -> GpuInfo {
     // Skip Vulkan devices that match an already-seen card by PCI
     // address (via lspci on Linux) or by name (fallback on
     // macOS/Windows).
-    let seen_id = resolve_device_id(&d, &pci_map);
+    let seen_id = resolve_device_id(&d, &lspci);
     if all_devices
       .iter()
-      .any(|seen| resolve_device_id(seen, &pci_map) == seen_id)
+      .any(|seen| resolve_device_id(seen, &lspci) == seen_id)
     {
       continue;
     }

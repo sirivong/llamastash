@@ -1226,6 +1226,15 @@ pub(crate) async fn start_model_inner(
   launch_params.ctx = resolved.knobs.ctx;
   launch_params.reasoning = resolved.knobs.reasoning.unwrap_or(false);
   launch_params.knobs = resolved.knobs;
+  // When no layer set a device (user left it on "default"), resolve
+  // to the first selector in the device catalog so the running
+  // launch view always shows a concrete device, not a blank.
+  if launch_params.knobs.device.is_none() {
+    let catalog = env.device_catalog.read().await;
+    if let Some(first) = catalog.first() {
+      launch_params.knobs.device = Some(first.selector.clone());
+    }
+  }
 
   // VRAM-aware ctx auto-fit. When every resolver layer left ctx
   // unset, the spawn would otherwise rely on llama.cpp's `--fit`,
@@ -1374,12 +1383,13 @@ pub(crate) async fn start_model_inner(
   // Loading → Ready transition). We poll because ManagedModel
   // doesn't expose a transition channel yet.
   //
-  // Persist the *user-supplied* knob deltas, not the resolved set —
-  // so source chips in the picker stay meaningful (a knob the user
+  // Persist the *user-supplied* knob deltas, not the full resolved set
+  // — so source chips in the picker stay meaningful (a knob the user
   // never touched keeps re-resolving from yaml / built-in / model
   // default instead of being frozen as `(last used)`).
   let mut persist_params = launch_params.clone();
   persist_params.knobs = user_knobs;
+  persist_params.knobs.device = launch_params.knobs.device.clone();
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
