@@ -16,3 +16,5 @@ __pycache__/
 *.egg-info/
 .venv/
 *.profraw
+# vulkaninfo profile dumps written into cwd by the Vulkan probe
+VP_VULKANINFO_*.json

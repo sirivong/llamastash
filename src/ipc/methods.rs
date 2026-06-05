@@ -172,6 +172,21 @@ pub struct LaunchEnv {
   /// on the `LayerLabel::ArchDefault` layer of the resolver, between
   /// `LastUsed` and `BuiltIn`. Empty map = no escape-hatch layer.
   pub arch_defaults: std::collections::BTreeMap<String, crate::config::TypedKnobs>,
+  /// Launch device catalog: the union of every configured binary's
+  /// `--list-devices` output, deduped by selector (see
+  /// [`crate::launch::list_devices`]). `start_model` looks the chosen
+  /// `knobs.device` selector up here to decide *which* binary to spawn;
+  /// `status` projects it so the TUI device picker offers exactly the
+  /// selectors `--device` will accept.
+  ///
+  /// Behind a shared `RwLock` because it is populated by a background
+  /// task *after* the daemon binds its listeners — probing each binary
+  /// with `--list-devices` is best-effort I/O we never want on the
+  /// startup critical path (the detached-start parent only waits a few
+  /// seconds for `runtime.json`). Reads start empty and flip to the
+  /// full set once the probe completes; a launch in that brief window
+  /// finds no selector match and falls back to the default `binary`.
+  pub device_catalog: Arc<RwLock<Vec<crate::launch::list_devices::LaunchDevice>>>,
 }
 
 impl MethodContext {
@@ -494,11 +509,24 @@ async fn status_response(ctx: &MethodContext) -> Value {
   // }
   // ```
   let proxy = ctx.proxy_status.as_ref().map(project_proxy_status);
+  // Launch device catalog — the exact `--device` selectors the TUI
+  // picker may offer, each tagged with the binary that owns it.
+  // Sourced from every configured binary's `--list-devices` (not from
+  // vendor tools), so what the picker shows is precisely what
+  // `llama-server` will accept. Empty when no binary is configured.
+  let device_catalog = match ctx.launch.as_ref() {
+    Some(env) => {
+      let catalog_snap = env.device_catalog.read().await;
+      serde_json::to_value(&*catalog_snap).unwrap_or(Value::Null)
+    }
+    None => Value::Null,
+  };
   let mut body = json!({
     "models": models,
     "external": external,
     "gpu": gpu,
     "host": host,
+    "device_catalog": device_catalog,
     "daemon": {
       "pid": std::process::id(),
       "uptime_seconds": ctx.started_at.elapsed().as_secs(),
@@ -1263,9 +1291,33 @@ pub(crate) async fn start_model_inner(
   let total_weight_bytes = launch_total_bytes(ctx, &launch_params.model_path).await;
   let scaled_probe = env.probe.scale_for_model(total_weight_bytes);
 
+  // Pick the binary that owns the chosen `--device` selector. The
+  // selector (`Vulkan0`, `CUDA0`, …) came from a specific binary's
+  // `--list-devices`, so we must spawn *that* binary or the selector
+  // is invalid. Unset / empty device, or a selector not in the catalog
+  // (stale persisted value, catalog probe failed), falls back to the
+  // default binary with the selector left as-is for compose to emit.
+  let launch_binary = match launch_params.knobs.device.as_deref() {
+    Some(sel) if !sel.is_empty() => {
+      let catalog = env.device_catalog.read().await;
+      catalog
+        .iter()
+        .find(|d| d.selector == sel)
+        .map(|d| d.binary.clone())
+        .unwrap_or_else(|| {
+          log::warn!(
+            "device selector {sel:?} not in launch catalog; spawning default binary {}",
+            env.binary.display()
+          );
+          env.binary.clone()
+        })
+    }
+    _ => env.binary.clone(),
+  };
+
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
-    binary: env.binary.clone(),
+    binary: launch_binary,
     params: launch_params.clone(),
     port,
     mode,

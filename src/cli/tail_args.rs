@@ -124,6 +124,9 @@ fn apply_knob(
     (KnobField::FlashAttn, ValueKind::Bool) => knobs.flash_attn = Some(parse_bool(flag, value)?),
     (KnobField::Mlock, ValueKind::Bool) => knobs.mlock = Some(parse_bool(flag, value)?),
     (KnobField::NoMmap, ValueKind::Bool) => knobs.no_mmap = Some(parse_bool(flag, value)?),
+    (KnobField::Device, ValueKind::Str) => {
+      knobs.device = value.map(str::to_string);
+    }
     _ => {
       // Drift guard: the spec/field tables disagreed. The
       // `apply_knob_handles_every_spec_in_the_alias_table` test
@@ -360,6 +363,7 @@ mod tests {
         ValueKind::F32 => Some("1.0"),
         ValueKind::KvCacheType => Some(KV_CACHE_TYPES[0]),
         ValueKind::Bool => None,
+        ValueKind::Str => Some("0"),
       };
       let mut knobs = TypedKnobs::default();
       apply_knob(&mut knobs, spec.field, spec.kind, value, spec.canonical).unwrap_or_else(|err| {

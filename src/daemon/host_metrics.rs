@@ -17,7 +17,34 @@ use sysinfo::{Components, CpuRefreshKind, MemoryRefreshKind, RefreshKind, System
 use tokio::sync::RwLock;
 
 use super::shutdown::ShutdownToken;
-use crate::gpu::{self, GpuInfo};
+use crate::gpu::{self, GpuDevice, GpuInfo};
+
+/// One detected GPU device — name + total VRAM + util + temp.
+/// Carried in the IPC status response so the TUI device picker can
+/// list cards by name and the host stats pane can render per-GPU rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceRow {
+  /// Backend-prefixed selector: `Nvidia0`, `Amd0`, `Vulkan0`,
+  /// `Metal0`. This is what the TUI passes as the `device` knob
+  /// (which becomes `--device` in the llama-server argv).
+  pub selector: String,
+  /// Backend the probe used to detect this device: `"nvidia"`,
+  /// `"amd"`, `"apple_metal"`, or `"unknown"` (Vulkan fallback).
+  pub backend: String,
+  /// Human-readable device name (e.g. `"NVIDIA GeForce RTX 3080"`).
+  pub name: String,
+  /// Total memory bytes for this device.
+  pub total_memory_bytes: u64,
+  /// Currently-used memory bytes for this device.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub used_memory_bytes: Option<u64>,
+  /// Current utilization %, when the vendor tool surfaces it.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub utilization_pct: Option<f32>,
+  /// Current temperature °C, when the vendor tool surfaces it.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub temperature_c: Option<f32>,
+}
 
 /// Aggregated host snapshot. All GPU fields are `Option` because not
 /// every backend exposes them — Vulkan and CpuOnly don't have GPU
@@ -49,6 +76,14 @@ pub struct HostMetricsSnapshot {
   /// Number of GPUs the backend reports. 0 on CpuOnly; 1 on Metal
   /// (unified memory); typically 1 on most NVIDIA/AMD systems.
   pub gpu_device_count: u32,
+  /// Per-device rows from all backends. Each entry carries a
+  /// backend-prefixed selector (`Nvidia0`, `Amd0`, `Vulkan0`,
+  /// `Metal0`), device name, VRAM (used/total), utilization%, and
+  /// temperature when the vendor tool surfaces them. Used by the
+  /// TUI host stats pane to render one row per GPU instead of a
+  /// single aggregate row.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub gpu_devices: Option<Vec<DeviceRow>>,
   /// Portion of GPU memory that physically lives in the system RAM
   /// pool (AMD GTT on UMA APUs like Strix Halo, the shared pool on
   /// Windows UMA adapters). Informational — surfaced for clients that
@@ -91,6 +126,9 @@ impl HostMetricsSnapshot {
   /// `gpu_backend` value emitted when vulkaninfo found a device but
   /// neither NVIDIA nor ROCm probes succeeded. The vendor is unknown.
   pub const BACKEND_UNKNOWN: &'static str = "unknown";
+  /// `gpu_backend` value emitted when two or more backends each
+  /// found one or more GPUs.
+  pub const BACKEND_MULTI: &'static str = "multi";
 
   /// Classify the raw `gpu_backend` string into a typed variant.
   /// Render layers should branch on this enum instead of comparing
@@ -114,6 +152,8 @@ pub enum GpuFlavor {
   AppleMetal,
   /// Vulkan saw a device but vendor classification didn't resolve.
   Unknown,
+  /// Two or more backends each found one or more GPUs.
+  Multi,
 }
 
 impl GpuFlavor {
@@ -124,6 +164,7 @@ impl GpuFlavor {
       HostMetricsSnapshot::BACKEND_NVIDIA => GpuFlavor::Nvidia,
       HostMetricsSnapshot::BACKEND_AMD => GpuFlavor::Amd,
       HostMetricsSnapshot::BACKEND_APPLE_METAL => GpuFlavor::AppleMetal,
+      HostMetricsSnapshot::BACKEND_MULTI => GpuFlavor::Multi,
       _ => GpuFlavor::Unknown,
     }
   }
@@ -268,6 +309,7 @@ fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostM
   let cpu_pct = host_cpu_pct(sys);
   let cpu_temp_c = host_cpu_temp_c(components);
   let agg = aggregate_gpu(&info);
+  let gpu_devices = build_device_rows(&info);
   HostMetricsSnapshot {
     cpu_pct,
     cpu_temp_c,
@@ -279,6 +321,7 @@ fn build_snapshot(sys: &System, components: &Components, info: GpuInfo) -> HostM
     gpu_temp_c: agg.temp,
     gpu_backend: info.label().to_string(),
     gpu_device_count: agg.device_count,
+    gpu_devices,
     uma_shared_total_bytes: agg.uma_shared_total,
     uma_shared_used_bytes: agg.uma_shared_used,
     unified: info.is_unified(),
@@ -340,70 +383,148 @@ struct GpuAggregate {
 
 /// Per the plan's multi-GPU strategy: mean util%, summed VRAM, max temp.
 fn aggregate_gpu(info: &GpuInfo) -> GpuAggregate {
-  match info {
-    GpuInfo::CpuOnly => GpuAggregate::default(),
+  let all_devices: &[GpuDevice] = match info {
+    GpuInfo::CpuOnly => return GpuAggregate::default(),
     GpuInfo::AppleMetal { total_memory_bytes } => {
       // Apple Silicon unified memory: no per-card "used" attribution
       // available via system_profiler. Surface total only so the UI
       // can render a `RAM (unified)` row.
-      GpuAggregate {
+      return GpuAggregate {
         mem_total: Some(*total_memory_bytes),
         device_count: 1,
         ..GpuAggregate::default()
-      }
+      };
     }
-    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } | GpuInfo::Unknown { devices } => {
-      if devices.is_empty() {
-        return GpuAggregate::default();
-      }
-      let count = devices.len() as u32;
-      let total: u64 = devices.iter().map(|d| d.total_memory_bytes).sum();
-      let used: u64 = devices.iter().map(|d| d.used_memory_bytes).sum();
-      // Treat all-zero totals as "no VRAM data" — the Vulkan fallback
-      // emits this and the host pane should show `—/—` instead of a
-      // bar pinned to 0%.
-      let (used_opt, total_opt) = if total == 0 {
-        (None, None)
-      } else {
-        (Some(used), Some(total))
-      };
-      let util_readings: Vec<f32> = devices.iter().filter_map(|d| d.utilization_pct).collect();
-      let util = if util_readings.is_empty() {
-        None
-      } else {
-        Some(util_readings.iter().sum::<f32>() / util_readings.len() as f32)
-      };
-      let temp = devices.iter().filter_map(|d| d.temperature_c).fold(
-        None,
-        |acc: Option<f32>, t| match acc {
-          None => Some(t),
-          Some(prev) => Some(prev.max(t)),
-        },
-      );
-      // Sum UMA-shared (GTT-on-AMD-APU) memory across devices so the
-      // host pane can subtract it from the RAM gauge. `None` when no
-      // device flagged a shared portion (discrete cards / non-UMA).
-      let uma_shared_total: u64 = devices
-        .iter()
-        .filter_map(|d| d.uma_shared_total_bytes)
-        .sum();
-      let uma_shared_used: u64 = devices.iter().filter_map(|d| d.uma_shared_used_bytes).sum();
-      let (uma_shared_total_opt, uma_shared_used_opt) = if uma_shared_total == 0 {
-        (None, None)
-      } else {
-        (Some(uma_shared_total), Some(uma_shared_used))
-      };
-      GpuAggregate {
-        util,
-        mem_used: used_opt,
-        mem_total: total_opt,
-        temp,
-        device_count: count,
-        uma_shared_total: uma_shared_total_opt,
-        uma_shared_used: uma_shared_used_opt,
-      }
-    }
+    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } => devices,
+    GpuInfo::Unknown { devices } | GpuInfo::Multi { devices } => devices,
+  };
+  if all_devices.is_empty() {
+    return GpuAggregate::default();
   }
+  let count = all_devices.len() as u32;
+  let total: u64 = all_devices.iter().map(|d| d.total_memory_bytes).sum();
+  let used: u64 = all_devices.iter().map(|d| d.used_memory_bytes).sum();
+  // Treat all-zero totals as "no VRAM data" — the Vulkan fallback
+  // emits this and the host pane should show `—/—` instead of a
+  // bar pinned to 0%.
+  let (used_opt, total_opt) = if total == 0 {
+    (None, None)
+  } else {
+    (Some(used), Some(total))
+  };
+  let util_readings: Vec<f32> = all_devices
+    .iter()
+    .filter_map(|d| d.utilization_pct)
+    .collect();
+  let util = if util_readings.is_empty() {
+    None
+  } else {
+    Some(util_readings.iter().sum::<f32>() / util_readings.len() as f32)
+  };
+  let temp = all_devices.iter().filter_map(|d| d.temperature_c).fold(
+    None,
+    |acc: Option<f32>, t| match acc {
+      None => Some(t),
+      Some(prev) => Some(prev.max(t)),
+    },
+  );
+  // Sum UMA-shared (GTT-on-AMD-APU) memory across devices so the
+  // host pane can subtract it from the RAM gauge. `None` when no
+  // device flagged a shared portion (discrete cards / non-UMA).
+  let uma_shared_total: u64 = all_devices
+    .iter()
+    .filter_map(|d| d.uma_shared_total_bytes)
+    .sum();
+  let uma_shared_used: u64 = all_devices
+    .iter()
+    .filter_map(|d| d.uma_shared_used_bytes)
+    .sum();
+  let (uma_shared_total_opt, uma_shared_used_opt) = if uma_shared_total == 0 {
+    (None, None)
+  } else {
+    (Some(uma_shared_total), Some(uma_shared_used))
+  };
+  GpuAggregate {
+    util,
+    mem_used: used_opt,
+    mem_total: total_opt,
+    temp,
+    device_count: count,
+    uma_shared_total: uma_shared_total_opt,
+    uma_shared_used: uma_shared_used_opt,
+  }
+}
+
+/// Build per-device rows from the probe result for the host-stats
+/// pane. Each row carries the device name, VRAM (used/total),
+/// utilization, and temperature when the vendor tool surfaces them.
+/// The `selector` field is a display label only — the launch device
+/// list comes from [`crate::launch::list_devices`], not from here.
+pub fn build_device_rows(info: &GpuInfo) -> Option<Vec<DeviceRow>> {
+  let all: &[GpuDevice] = match info {
+    GpuInfo::CpuOnly => return None,
+    GpuInfo::AppleMetal { total_memory_bytes } => {
+      return Some(vec![DeviceRow {
+        selector: "Metal0".into(),
+        backend: "apple_metal".into(),
+        name: "Apple Silicon (unified)".into(),
+        total_memory_bytes: *total_memory_bytes,
+        used_memory_bytes: None,
+        utilization_pct: None,
+        temperature_c: None,
+      }]);
+    }
+    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } => devices,
+    GpuInfo::Unknown { devices } | GpuInfo::Multi { devices } => devices,
+  };
+  if all.is_empty() {
+    return None;
+  }
+
+  // Deduplicate by device name, preferring native backends (nvidia /
+  // amd / apple_metal) over Vulkan fallback (unknown). Since native
+  // probes run before Vulkan, the first occurrence of each name is
+  // from a native backend — keep it, skip later Vulkan matches.
+  let native_names: Vec<String> = all
+    .iter()
+    .filter(|d| matches!(d.backend.as_str(), "nvidia" | "amd" | "apple_metal"))
+    .map(|d| d.name.clone())
+    .collect();
+  let deduped: Vec<&GpuDevice> = all
+    .iter()
+    .filter(|d| {
+      let is_native = matches!(d.backend.as_str(), "nvidia" | "amd" | "apple_metal");
+      is_native || !native_names.contains(&d.name)
+    })
+    .collect();
+  let picker: Vec<DeviceRow> = deduped
+    .iter()
+    .enumerate()
+    .map(|(i, d)| {
+      let dev_prefix = match d.backend.as_str() {
+        "nvidia" => "Nvidia",
+        "amd" => "Amd",
+        "unknown" => "Vulkan",
+        "apple_metal" => "Metal",
+        _ => "GPU",
+      };
+      DeviceRow {
+        selector: format!("{}{}", dev_prefix, i),
+        backend: d.backend.clone(),
+        name: d.name.clone(),
+        total_memory_bytes: d.total_memory_bytes,
+        used_memory_bytes: if d.used_memory_bytes > 0 {
+          Some(d.used_memory_bytes)
+        } else {
+          None
+        },
+        utilization_pct: d.utilization_pct,
+        temperature_c: d.temperature_c,
+      }
+    })
+    .collect();
+
+  Some(picker)
 }
 
 #[cfg(test)]

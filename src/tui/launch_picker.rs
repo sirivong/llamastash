@@ -75,7 +75,8 @@ impl PickerField {
         | KnobField::Keep
         | KnobField::RopeFreqScale
         | KnobField::CacheTypeK
-        | KnobField::CacheTypeV => true,
+        | KnobField::CacheTypeV
+        | KnobField::Device => true,
       },
     }
   }
@@ -163,6 +164,13 @@ pub struct LaunchPickerState {
   pub field: PickerField,
   pub active_instances: usize,
   pub prefer_port: Option<u16>,
+  /// Launch device catalog from `status.device_catalog` — the exact
+  /// `--device` selectors the daemon's configured binaries will accept,
+  /// each tagged with its owning binary. The Device row cycles through
+  /// this flat list (one entry per backend-view of a card, e.g. the
+  /// same physical card may appear as both `ROCm0` and `Vulkan0`).
+  /// `user_knobs.device` stores the chosen selector verbatim.
+  pub device_catalog: Vec<crate::launch::list_devices::LaunchDevice>,
   /// Row offset clipped from the top of the rendered line list so the
   /// focused row stays visible on small viewports. Recomputed on each
   /// render using the actual area height — the `Cell` lets the
@@ -184,6 +192,7 @@ impl LaunchPickerState {
       field: PickerField::Knob(KnobField::Ctx),
       active_instances: 0,
       prefer_port: None,
+      device_catalog: Vec::new(),
       scroll_offset: Cell::new(0),
     }
   }
@@ -227,6 +236,7 @@ impl LaunchPickerState {
       KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
         self.cycle_bool(field, forward)
       }
+      KnobField::Device => self.cycle_device(field, forward),
     }
   }
 
@@ -272,6 +282,47 @@ impl LaunchPickerState {
       }
     };
     self.set_user_bool(field, next);
+  }
+
+  /// Cycle the Device row through the flat catalog. The cycle space is
+  /// `[default] + catalog selectors`: stepping off either end wraps
+  /// back to `None` (default → auto-select). `user_knobs.device` holds
+  /// the chosen selector verbatim (`"Vulkan1"`), or `None` for default.
+  fn cycle_device(&mut self, field: KnobField, forward: bool) {
+    if self.device_catalog.is_empty() {
+      // No catalog (CPU-only / no binary enumerated) — only the
+      // default exists, so any cycle resets to it.
+      self.set_user_str(field, None);
+      return;
+    }
+    let selectors: Vec<&str> = self
+      .device_catalog
+      .iter()
+      .map(|d| d.selector.as_str())
+      .collect();
+    let current = self.user_value_str(field).filter(|s| !s.is_empty());
+    // Current position in the cycle: None = default (index "0"),
+    // Some(sel) = its catalog index + 1.
+    let cur_pos: usize = match current {
+      None => 0,
+      Some(sel) => selectors
+        .iter()
+        .position(|s| *s == sel)
+        .map(|i| i + 1)
+        .unwrap_or(0),
+    };
+    let len = selectors.len() + 1; // +1 for the default slot
+    let next_pos = if forward {
+      (cur_pos + 1) % len
+    } else {
+      (cur_pos + len - 1) % len
+    };
+    let next = if next_pos == 0 {
+      None
+    } else {
+      Some(selectors[next_pos - 1].to_string())
+    };
+    self.set_user_str(field, next);
   }
 
   /// Backspace on a focused row: clear the user override and re-
@@ -361,6 +412,7 @@ impl LaunchPickerState {
       KnobField::UbatchSize => self.user_knobs.ubatch_size.is_some(),
       KnobField::RopeFreqScale => self.user_knobs.rope_freq_scale.is_some(),
       KnobField::Keep => self.user_knobs.keep.is_some(),
+      KnobField::Device => self.user_knobs.device.is_some(),
     }
   }
 
@@ -388,6 +440,7 @@ impl LaunchPickerState {
     match field {
       KnobField::CacheTypeK => self.user_knobs.cache_type_k.as_deref(),
       KnobField::CacheTypeV => self.user_knobs.cache_type_v.as_deref(),
+      KnobField::Device => self.user_knobs.device.as_deref(),
       _ => None,
     }
   }
@@ -426,6 +479,7 @@ impl LaunchPickerState {
     match field {
       KnobField::CacheTypeK => self.resolved.cache_type_k.as_deref(),
       KnobField::CacheTypeV => self.resolved.cache_type_v.as_deref(),
+      KnobField::Device => self.resolved.device.as_deref(),
       _ => None,
     }
   }
@@ -463,6 +517,7 @@ impl LaunchPickerState {
     match field {
       KnobField::CacheTypeK => self.user_knobs.cache_type_k = value,
       KnobField::CacheTypeV => self.user_knobs.cache_type_v = value,
+      KnobField::Device => self.user_knobs.device = value,
       _ => {}
     }
   }
@@ -482,6 +537,25 @@ impl LaunchPickerState {
     self.set_user_f32(field, None);
     self.set_user_str(field, None);
     self.set_user_bool(field, None);
+  }
+
+  /// Display label for the Device row. Resolves the selector against
+  /// the catalog to show `"<name> (<backend>)"` (e.g.
+  /// `"NVIDIA GeForce RTX 3080 (Vulkan)"`). Falls back to the raw
+  /// selector when it isn't in the catalog (stale persisted value).
+  /// Returns `"default"` when no device is selected.
+  pub fn device_value_display(&self) -> String {
+    let sel = self
+      .effective_str(KnobField::Device)
+      .filter(|v| !v.is_empty());
+    sel
+      .map(
+        |s| match self.device_catalog.iter().find(|d| d.selector == s) {
+          Some(d) => format!("{} ({})", d.name, d.backend),
+          None => s.to_string(),
+        },
+      )
+      .unwrap_or_else(|| "default".into())
   }
 }
 
@@ -555,6 +629,7 @@ fn cycle_through<T: PartialEq + PartialOrd + Copy>(
 
 #[cfg(test)]
 mod tests {
+  #![allow(clippy::useless_conversion)]
   use super::*;
 
   #[test]
@@ -685,5 +760,121 @@ mod tests {
     // Forward from above presets[last] has nothing greater → fall back
     // to last preset.
     assert_eq!(cycle_through(Some(99_u32), presets, true), Some(30));
+  }
+
+  // ---- Flat device-catalog picker tests ----
+
+  use crate::launch::list_devices::LaunchDevice;
+
+  /// Build a `LaunchDevice` for tests. Memory fields don't affect the
+  /// picker logic, so they're left `None`.
+  fn dev(selector: &str, backend: &str, name: &str, binary: &str) -> LaunchDevice {
+    LaunchDevice {
+      selector: selector.into(),
+      backend: backend.into(),
+      name: name.into(),
+      binary: std::path::PathBuf::from(binary),
+      total_mib: None,
+      free_mib: None,
+    }
+  }
+
+  fn catalog_two_vendors() -> Vec<LaunchDevice> {
+    vec![
+      dev(
+        "Vulkan0",
+        "Vulkan",
+        "AMD Radeon AI PRO R9700",
+        "/vk/llama-server",
+      ),
+      dev(
+        "Vulkan1",
+        "Vulkan",
+        "NVIDIA GeForce RTX 3080",
+        "/vk/llama-server",
+      ),
+      dev(
+        "ROCm0",
+        "ROCm",
+        "AMD Radeon AI PRO R9700",
+        "/rocm/llama-server",
+      ),
+    ]
+  }
+
+  #[test]
+  fn device_value_display_resolves_selector_to_name_and_backend() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.device_catalog = catalog_two_vendors();
+    // No selection → default.
+    assert_eq!(s.device_value_display(), "default");
+    s.set_user_str(KnobField::Device, Some("Vulkan1".into()));
+    assert_eq!(s.device_value_display(), "NVIDIA GeForce RTX 3080 (Vulkan)");
+    s.set_user_str(KnobField::Device, Some("ROCm0".into()));
+    assert_eq!(s.device_value_display(), "AMD Radeon AI PRO R9700 (ROCm)");
+  }
+
+  #[test]
+  fn device_value_display_unknown_selector_falls_back_to_raw() {
+    // A persisted selector no longer in the catalog still renders
+    // something useful rather than "default".
+    let mut s = LaunchPickerState::for_model("test");
+    s.device_catalog = catalog_two_vendors();
+    s.set_user_str(KnobField::Device, Some("CUDA9".into()));
+    assert_eq!(s.device_value_display(), "CUDA9");
+  }
+
+  #[test]
+  fn cycle_device_walks_default_then_each_selector_and_wraps() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.device_catalog = catalog_two_vendors();
+    // Start at default (no override).
+    assert_eq!(s.user_value_str(KnobField::Device), None);
+    // Forward through every catalog selector in order.
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan0".into()));
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan1".into()));
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("ROCm0".into()));
+    // One more wraps back to default.
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), None);
+  }
+
+  #[test]
+  fn cycle_device_backward_from_default_wraps_to_last() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.device_catalog = catalog_two_vendors();
+    s.cycle_device(KnobField::Device, false);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("ROCm0".into()));
+    s.cycle_device(KnobField::Device, false);
+    assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan1".into()));
+  }
+
+  #[test]
+  fn cycle_device_stored_value_is_a_real_selector() {
+    // Regression: the stored value must be a llama-server selector
+    // (`Vulkan0`), never the old `card:driver` coordinate (`0:0`) that
+    // made llama-server bail with `invalid device`.
+    let mut s = LaunchPickerState::for_model("test");
+    s.device_catalog = catalog_two_vendors();
+    s.cycle_device(KnobField::Device, true);
+    let stored = s.user_value_str(KnobField::Device).unwrap().to_string();
+    assert!(
+      !stored.contains(':'),
+      "selector must not be a coordinate: {stored}"
+    );
+    assert!(s.device_catalog.iter().any(|d| d.selector == stored));
+  }
+
+  #[test]
+  fn cycle_device_with_empty_catalog_stays_default() {
+    let mut s = LaunchPickerState::for_model("test");
+    // Empty catalog (CPU-only / no binary) — cycling resets to default.
+    s.cycle_device(KnobField::Device, true);
+    assert_eq!(s.user_value_str(KnobField::Device), None);
+    s.cycle_device(KnobField::Device, false);
+    assert_eq!(s.user_value_str(KnobField::Device), None);
   }
 }

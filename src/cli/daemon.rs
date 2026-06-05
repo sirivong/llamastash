@@ -287,6 +287,28 @@ pub(crate) fn build_options(
       None
     }
   };
+  // Extra `llama-server` binaries (multi-backend installs). Each is
+  // canonicalised and existence/exec-checked the same way as the
+  // primary binary; a bad entry is logged and skipped rather than
+  // failing daemon startup — the device catalog just won't include its
+  // devices.
+  opts.extra_binaries = config
+    .llama_server_paths
+    .iter()
+    .filter_map(|p| {
+      match locate_binary(LocateInputs {
+        cli_flag: Some(p.clone()),
+        env_var: None,
+        config_path: None,
+      }) {
+        Ok(resolved) => Some(resolved),
+        Err(e) => {
+          log::warn!("extra llama-server path {} skipped: {e}", p.display());
+          None
+        }
+      }
+    })
+    .collect();
   opts.port_range = config.port_range;
   opts.probe_timeout_secs = Some(config.probe_timeout_secs);
   opts.arch_defaults = config.arch_defaults.clone();

@@ -263,7 +263,7 @@ fn running_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a
 fn flavor_label(app: &App) -> Option<&'static str> {
   use crate::daemon::host_metrics::GpuFlavor;
   match app.host_metrics.flavor() {
-    GpuFlavor::Nvidia => Some("cuda"),
+    GpuFlavor::Nvidia | GpuFlavor::Multi => Some("cuda"),
     GpuFlavor::Amd => Some(if cfg!(target_os = "windows") {
       "vulkan"
     } else {

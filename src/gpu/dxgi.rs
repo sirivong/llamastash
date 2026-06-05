@@ -42,7 +42,7 @@ use windows::Win32::Graphics::Dxgi::{
   CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
 };
 
-use super::{GpuDevice, GpuInfo};
+use super::GpuDevice;
 
 const VENDOR_AMD: u32 = 0x1002;
 const VENDOR_NVIDIA: u32 = 0x10DE;
@@ -85,13 +85,12 @@ pub(crate) fn description_to_string(desc: &[u16; 128]) -> String {
   String::from_utf16_lossy(&desc[..end]).trim().to_string()
 }
 
-/// Run the DXGI enumeration and return a `GpuInfo` snapshot. Returns
-/// `None` if `CreateDXGIFactory1` fails (no DXGI runtime — exotic
-/// Windows configurations) or if every enumerated adapter is software
-/// / Microsoft Basic Render. The probe chain in `gpu::mod` falls
-/// through to `vulkan::probe` in that case, matching the Linux fallback
-/// shape.
-pub fn probe() -> Option<GpuInfo> {
+/// Run the DXGI enumeration and return discovered devices.
+/// Returns `None` if `CreateDXGIFactory1` fails (no DXGI runtime —
+/// exotic Windows configurations) or if every enumerated adapter is
+/// software / Microsoft Basic Render. The probe chain in `gpu::mod`
+/// falls through to `vulkan::probe` in that case.
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   // SAFETY: `CreateDXGIFactory1` is a documented stdcall entry point
   // available since Windows 7. Returning `Err` is the documented
   // failure mode for missing DXGI runtime; we propagate via `ok()?`.
@@ -151,10 +150,21 @@ pub fn probe() -> Option<GpuInfo> {
       // VRAM or be mistaken for unified memory.
       (dedicated, None)
     };
+    // Tag the device with the backend based on vendor. Windows DXGI
+    // can't distinguish GPU vendors reliably, so we use the VendorId
+    // to set the backend tag (matches how Linux backends label their
+    // devices for the multi-backend probe).
+    let backend = match vendor {
+      Vendor::Nvidia => "nvidia",
+      Vendor::Amd => "amd",
+      Vendor::Intel => "unknown",
+      Vendor::Other => "unknown",
+    };
     adapters.push((
       vendor,
       GpuDevice {
         name: description_to_string(&desc.Description),
+        backend: backend.into(),
         total_memory_bytes,
         used_memory_bytes: 0,
         utilization_pct: None,
@@ -164,7 +174,7 @@ pub fn probe() -> Option<GpuInfo> {
       },
     ));
   }
-  classify(adapters)
+  classify_devices(adapters)
 }
 
 /// Query the authoritative D3D12 `UMA` architecture flag for an
@@ -201,11 +211,12 @@ fn adapter_is_uma(adapter: &IDXGIAdapter1) -> bool {
   queried.is_ok() && arch.UMA.as_bool()
 }
 
-/// Roll up the per-adapter list into a single `GpuInfo`. Mixed-vendor
-/// laptops (discrete NVIDIA + integrated Intel; AMD APU + discrete
-/// AMD dGPU) prefer the discrete-class vendor: NVIDIA > AMD > Intel.
+/// Roll up the per-adapter list into a single `GpuInfo` for the
+/// pre-multi-backend probe chain. Mixed-vendor laptops prefer the
+/// discrete-class vendor: NVIDIA > AMD > Intel.
 /// Returns `None` when no adapter remained after filtering — the
 /// probe chain falls through to the Vulkan fallback.
+#[cfg(test)]
 pub(crate) fn classify(adapters: Vec<(Vendor, GpuDevice)>) -> Option<GpuInfo> {
   if adapters.is_empty() {
     return None;
@@ -233,6 +244,14 @@ pub(crate) fn classify(adapters: Vec<(Vendor, GpuDevice)>) -> Option<GpuInfo> {
   // card. The supervisor's `-ngl > 0` hint still applies.
   let devices = adapters.into_iter().map(|(_, d)| d).collect();
   Some(GpuInfo::Unknown { devices })
+}
+
+/// Return the raw device list (now that `probe_devices` collects all
+/// backends in `gpu::mod`, this is only used by tests that pin the
+/// old classify behavior). The devices retain their per-vendor backend
+/// tags set by `probe_devices`.
+pub(crate) fn classify_devices(adapters: Vec<(Vendor, GpuDevice)>) -> Vec<GpuDevice> {
+  adapters.into_iter().map(|(_, d)| d).collect()
 }
 
 #[cfg(test)]

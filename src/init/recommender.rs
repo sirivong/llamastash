@@ -341,6 +341,19 @@ fn activation_bytes(params: u64, ctx: u32) -> f64 {
 fn effective_vram_ceiling(hw: &HardwareSnapshot, snap: &BenchmarkSnapshot) -> u64 {
   let backend_key = match &hw.gpu {
     GpuInfo::Nvidia { .. } => "cuda",
+    GpuInfo::Multi { devices } => {
+      // Multi has devices from multiple backends — pick the best
+      // available backend. Prefer CUDA > ROCm > Vulkan.
+      let has_nvidia = devices.iter().any(|d| d.backend == "nvidia");
+      let has_amd = devices.iter().any(|d| d.backend == "amd");
+      if has_nvidia {
+        "cuda"
+      } else if has_amd {
+        "hip"
+      } else {
+        "vulkan"
+      }
+    }
     GpuInfo::Amd { .. } => "hip",
     GpuInfo::AppleMetal { .. } => "metal",
     GpuInfo::Unknown { .. } => "vulkan",

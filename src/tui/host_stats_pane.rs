@@ -61,7 +61,17 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, host: &HostMetricsSnapshot, pal
       ]));
     }
     _ => {
-      lines.push(gpu_util_row(host, bar_width, palette));
+      // Two or more GPUs: render one row per device so the user
+      // sees each card's utilization and temperature.
+      // One GPU: keep the current single-row layout.
+      let n_devices = host.gpu_devices.as_ref().map_or(1, |ds| ds.len());
+      if n_devices > 1 {
+        for gpu_line in gpu_device_rows(host, bar_width, palette) {
+          lines.push(gpu_line);
+        }
+      } else {
+        lines.push(gpu_util_row(host, bar_width, palette));
+      }
       lines.push(vram_row(host, bar_width, palette));
     }
   }
@@ -148,6 +158,41 @@ fn gpu_util_row<'a>(
   Line::from(spans)
 }
 
+/// Render one GPU row per device (for multi-GPU machines).
+fn gpu_device_rows<'a>(
+  host: &HostMetricsSnapshot,
+  bar_width: usize,
+  palette: &'a Palette,
+) -> Vec<Line<'a>> {
+  let mut lines: Vec<Line<'a>> = Vec::new();
+  if let Some(devices) = &host.gpu_devices {
+    for (i, dev) in devices.iter().enumerate() {
+      let pct = dev.utilization_pct.unwrap_or(0.0).clamp(0.0, 100.0);
+      let bar = bar(pct, bar_width, gauge_color(pct, palette));
+      let label = if devices.len() == 1 {
+        "GPU  ".into()
+      } else {
+        format!("GPU{} ", i)
+      };
+      let value = dev
+        .utilization_pct
+        .map(|p| format!(" {:.0}%", p))
+        .unwrap_or_else(|| " —".into());
+      let mut spans = vec![
+        Span::styled(label, palette.label_style()),
+        bar,
+        Span::styled(value, palette.text_style()),
+      ];
+      if let Some(temp) = dev.temperature_c {
+        spans.push(Span::raw(" "));
+        spans.extend(temp_spans(temp, palette));
+      }
+      lines.push(Line::from(spans));
+    }
+  }
+  lines
+}
+
 fn vram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palette) -> Line<'a> {
   let (pct, value) = match (host.gpu_mem_used_bytes, host.gpu_mem_total_bytes) {
     (Some(used), Some(total)) if total > 0 => {
@@ -172,6 +217,50 @@ fn backend_row<'a>(host: &HostMetricsSnapshot, palette: &'a Palette) -> Line<'a>
     GpuFlavor::AppleMetal => "apple metal".into(),
     GpuFlavor::CpuOnly => "cpu only".into(),
     GpuFlavor::Unsampled => "unsampled".into(),
+    GpuFlavor::Multi => {
+      // Two+ backends found GPUs — show combined count.
+      let mut nvidia_count = 0u32;
+      let mut amd_count = 0u32;
+      let mut unknown_count = 0u32;
+      let mut metal_count = 0u32;
+      if let Some(devices) = &host.gpu_devices {
+        for dev in devices {
+          match dev.selector.chars().next() {
+            Some('N') => nvidia_count += 1,
+            Some('A') => amd_count += 1,
+            Some('V') => unknown_count += 1,
+            Some('M') => metal_count += 1,
+            _ => unknown_count += 1,
+          }
+        }
+      }
+      let parts: Vec<String> = vec![
+        if nvidia_count > 0 {
+          Some(format!("NVML · {}", pluralize_gpu(nvidia_count)))
+        } else {
+          None
+        },
+        if amd_count > 0 {
+          Some(format!("ROCm · {}", pluralize_gpu(amd_count)))
+        } else {
+          None
+        },
+        if metal_count > 0 {
+          Some("metal · 1 GPU".into())
+        } else {
+          None
+        },
+        if unknown_count > 0 {
+          Some("unknown · {} GPUs".into())
+        } else {
+          None
+        },
+      ]
+      .into_iter()
+      .flatten()
+      .collect();
+      parts.join(" + ")
+    }
     // Pass the raw label through so a future backend label not yet
     // classified by `GpuFlavor` still surfaces a debuggable string
     // (rather than a generic "unknown") in the Host pane.

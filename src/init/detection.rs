@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sysinfo::{Disks, System};
 
-use crate::gpu::{self, GpuInfo};
+use crate::gpu::{self, GpuDevice, GpuInfo};
 use crate::launch::binary::{locate, LocateInputs};
 
 /// VRAM aggregation rule pinned in Key Decisions:
@@ -28,13 +28,18 @@ use crate::launch::binary::{locate, LocateInputs};
 ///   memory; the ratio leaves headroom for the OS + apps).
 /// - CpuOnly / Unknown: `None`.
 pub fn aggregate_vram_bytes(info: &GpuInfo) -> Option<u64> {
-  match info {
-    GpuInfo::CpuOnly | GpuInfo::Unknown { .. } => None,
-    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } => {
-      devices.iter().map(|d| d.total_memory_bytes).min()
+  let all_devices: &[GpuDevice] = match info {
+    GpuInfo::CpuOnly | GpuInfo::Unknown { .. } => return None,
+    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } => devices,
+    GpuInfo::AppleMetal { total_memory_bytes } => {
+      return Some((*total_memory_bytes as f64 * 0.75) as u64);
     }
-    GpuInfo::AppleMetal { total_memory_bytes } => Some((*total_memory_bytes as f64 * 0.75) as u64),
+    GpuInfo::Multi { devices } => devices,
+  };
+  if all_devices.is_empty() {
+    return None;
   }
+  all_devices.iter().map(|d| d.total_memory_bytes).min()
 }
 
 /// What the recommender + wizard need to know about the host.
@@ -128,6 +133,7 @@ pub fn detect_hardware() -> HardwareSnapshot {
       devices.len() as u32
     }
     GpuInfo::AppleMetal { .. } => 1,
+    GpuInfo::Multi { devices } => devices.len() as u32,
   };
   let mut sys = System::new();
   sys.refresh_memory();

@@ -271,6 +271,12 @@ pub struct App {
   /// emits. Populated by [`Self::ingest_status`]; consumed by the
   /// Host info-row pane.
   pub host_metrics: HostMetricsSnapshot,
+  /// Launch device catalog from the daemon's `status.device_catalog` —
+  /// the exact `--device` selectors the picker may offer, each tagged
+  /// with the owning binary. Sourced from every configured binary's
+  /// `--list-devices`. Populated by [`Self::ingest_status`]; consumed
+  /// by the launch picker's Device row.
+  pub device_catalog: Vec<crate::launch::list_devices::LaunchDevice>,
   /// Set when the user presses `q` so the event loop can exit.
   pub should_exit: bool,
   /// Whether the modal help overlay is visible. Bound to `?`.
@@ -407,6 +413,7 @@ impl App {
       daemon_connected: false,
       daemon_info: DaemonInfo::default(),
       host_metrics: HostMetricsSnapshot::default(),
+      device_catalog: Vec::new(),
       should_exit: false,
       show_help: false,
       help_scroll: 0,
@@ -786,6 +793,15 @@ impl App {
       if !host.is_null() {
         if let Ok(snap) = serde_json::from_value::<HostMetricsSnapshot>(host.clone()) {
           self.host_metrics = snap;
+        }
+      }
+    }
+    if let Some(catalog) = body.get("device_catalog") {
+      if !catalog.is_null() {
+        if let Ok(devices) =
+          serde_json::from_value::<Vec<crate::launch::list_devices::LaunchDevice>>(catalog.clone())
+        {
+          self.device_catalog = devices;
         }
       }
     }
@@ -1196,6 +1212,11 @@ impl App {
       }
     }
     state.active_instances = active_count;
+    // Populate the Device row from the launch device catalog — the
+    // exact `--device` selectors the daemon's configured binaries
+    // accept (sourced from their `--list-devices`). The picker cycles
+    // this flat list and stores the chosen selector verbatim.
+    state.device_catalog = self.device_catalog.clone();
     Some(state)
   }
 

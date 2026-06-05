@@ -408,6 +408,64 @@ fn gpu_label(gpu: &Value) -> Option<String> {
       "Unknown GPU vendor (Vulkan-only): {} device(s)",
       count()
     )),
+    GpuFlavor::Multi => {
+      let devs = obj
+        .get("gpu_devices")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(count());
+      // Count per-backend by examining selector prefixes
+      let nvidia = obj
+        .get("gpu_devices")
+        .and_then(Value::as_array)
+        .map(|a| {
+          a.iter()
+            .filter(|v| {
+              v.get("selector")
+                .and_then(Value::as_str)
+                .map(|s| s.starts_with('N'))
+                .unwrap_or(false)
+            })
+            .count()
+        })
+        .unwrap_or(0);
+      let amd = obj
+        .get("gpu_devices")
+        .and_then(Value::as_array)
+        .map(|a| {
+          a.iter()
+            .filter(|v| {
+              v.get("selector")
+                .and_then(Value::as_str)
+                .map(|s| s.starts_with('A'))
+                .unwrap_or(false)
+            })
+            .count()
+        })
+        .unwrap_or(0);
+      let other = devs.saturating_sub(nvidia).saturating_sub(amd);
+      let parts: Vec<String> = vec![
+        if nvidia > 0 {
+          Some(format!("NVIDIA GPU(s): {}", nvidia))
+        } else {
+          None
+        },
+        if amd > 0 {
+          Some(format!("AMD GPU(s): {}", amd))
+        } else {
+          None
+        },
+        if other > 0 {
+          Some(format!("Unknown GPU(s): {}", other))
+        } else {
+          None
+        },
+      ]
+      .into_iter()
+      .flatten()
+      .collect();
+      Some(parts.join(" + "))
+    }
     GpuFlavor::Unsampled => Some(serde_json::to_string(gpu).unwrap_or_else(|_| "?".to_string())),
   }
 }
