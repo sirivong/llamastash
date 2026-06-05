@@ -7,17 +7,18 @@
 │backend  NVML · 1 GPU  ││running 1 (qwen-7b :41100)                                                       ││  ▀████▀  │
 └───────────────────────┘└─────────────────────────────────────────────────────────────────────────────────┘└──────────┘
 ┌ Models [3] · /:filter · ⏎:launch · Ctrl+s:stop · f:fav · p:path · u:url ───┐┌ Settings │ Logs │ Chat ────────────────┐
-│   Name                                      Arch     Quant   Ctx     Size  ││                                        │
+│   Name                                     Device    Quant   Ctx     Size  ││                                        │
 │▶ Running                                                                   ││ qwen-7b                                │
-│ ● qwen-7b                                   qwen3    Q4_K    32k     4.2G  ││ /m/x/qwen-7b.gguf                      │
+│ ● qwen-7b                                  —         Q4_K    32k     4.2G  ││ /m/x/qwen-7b.gguf                      │
 │★ Favorites                                                                 ││                                        │
-│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ ID:L1  :41100  ● ready  4.2G RAM · 312 │
+│ ★ mistral-7b                               —         Q4_K    8.0k    4.0G  ││ ID:L1  :41100  ● ready  4.2G RAM · 312 │
 │────────────────────────────────────────────────────────────────────────────││ ────────────────────────────────────── │
 │m/x                                                                         ││ Running launch                         │
-│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││   launch          L1                   │
+│ ★ mistral-7b                               —         Q4_K    8.0k    4.0G  ││   launch          L1                   │
 │m/y                                                                         ││   ctx             default              │
-│   phi-3                                     phi      Q4_K    8.0k    3.9G  ││   reasoning       default              │
+│   phi-3                                    —         Q4_K    8.0k    3.9G  ││   reasoning       default              │
 │                                                                            ││   n_gpu_layers    default              │
+│                                                                            ││   device          default              │
 │                                                                            ││   threads         default              │
 │                                                                            ││   cache_type_k    default              │
 │                                                                            ││   cache_type_v    default              │
@@ -26,5 +27,4 @@
 │                                                                            ││   mlock           default              │
 │                                                                            ││   no_mmap         default              │
 │                                                                            ││   batch_size      default              │
-│                                                                            ││   ubatch_size     default              │
 └ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ e:edit for launch · s:stop · ↑↓:scroll ┘
