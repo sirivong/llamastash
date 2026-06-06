@@ -292,6 +292,14 @@ Snapshot of daemon health, managed launches, external (unmanaged) `llama-server`
 
 The `proxy` block is documented in detail under [Proxy → Is the proxy up?](#is-the-proxy-up).
 
+On a host where more than one GPU backend reports a device (e.g. an
+NVIDIA card seen via CUDA plus an AMD card via ROCm), `gpu` serialises
+as a `multi` snapshot (`{"backend":"multi","devices":[…]}`) and the
+`host` block carries a `gpu_devices` array with one per-device row
+(name, backend, utilisation, temperature, memory) so dashboards can
+render each card separately. Single-backend hosts keep the existing
+per-vendor shape.
+
 ### `LlamaStash logs <target>`
 
 Tail (or follow) a launch's log file. `<target>` is a `<launch_id>` (e.g. `L3`), a port, or a case-insensitive substring of the running model's file name / parent dir (e.g. `logs qwen`). An ambiguous name exits `66` with the matching launch ids.
@@ -708,11 +716,21 @@ default)`, `(built-in)`, `(model default)`).
 
 Knob set: `n_gpu_layers`, `threads`, `cache_type_k`, `cache_type_v`,
 `flash_attn`, `mlock`, `no_mmap`, `parallel`, `batch_size`,
-`ubatch_size`, `rope_freq_scale`, `keep`. Booleans cycle
+`ubatch_size`, `rope_freq_scale`, `keep`, `device`. Booleans cycle
 `default ↔ on ↔ off`; enums cycle their allowed set (`f16` / `q8_0`
 / `q4_0` for cache types). `e` enters free-form numeric / enum edit
 mode for any row whose preset list doesn't cover the value the user
-wants. The bottom `extras` row holds the free-form argv tail for
+wants.
+
+The `device` row (`--device` / `-d`) pins a model to one GPU instead of
+letting `llama-server` split it across every visible card. It cycles
+the device list that the configured `llama-server` binary reports via
+`--list-devices` (selectors such as `CUDA0`, `ROCm0`, `Vulkan0`),
+plus a `default` slot that emits no `--device` flag (auto-select).
+Backspace resets to `default`. The selector is passed through to
+`llama-server` verbatim, so only devices that binary actually exposes
+are offered — on a multi-vendor box, run a Vulkan-capable build to see
+every card. The bottom `extras` row holds the free-form argv tail for
 flags the typed editor doesn't model; forbidden flags
 (`--host`, `--listen`, `--bind`, `--api-key`, `--ssl-*`) surface a
 red inline warning with secret values redacted.
