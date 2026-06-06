@@ -8,10 +8,11 @@
 //! starve the runtime when the user has hundreds of GGUFs on disk.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures::stream::{self, StreamExt};
 use ignore::WalkBuilder;
+use regex::Regex;
 use tokio::sync::mpsc;
 
 use crate::discovery::metadata_cache::{self, CachedParse, MetadataCache};
@@ -125,38 +126,139 @@ fn is_projector_companion(path: &Path) -> bool {
   path
     .file_name()
     .and_then(|n| n.to_str())
-    .map(|n| n.starts_with("mmproj-") || n.starts_with("mmproj_"))
+    .map(|n| {
+      let n = n.to_lowercase();
+      n.starts_with("mmproj-")
+        || n.starts_with("mmproj_")
+        || n.contains(".mmproj.")
+        || n.ends_with(".mmproj.gguf")
+        || n.ends_with("-mmproj.gguf")
+        || n.ends_with("_mmproj.gguf")
+        || n == "mmproj.gguf"
+    })
     .unwrap_or(false)
+}
+
+const QUANT_PATTERN: &str = r"\b(bf16|f16|f32|mxfp4_moe|iq[1-4](_?s|_?xs|_?xxs|_?m|_?nl|_?nl_xl)?|q[2-8](_?[01])?(_?k)?(_?[sml]|_?xl)?)\b";
+
+/// Strip all quantization tokens and separators from a name to derive
+/// a canonical base name for matching.
+fn canonical_base(s: &str) -> String {
+  static RE_QUANT: OnceLock<Regex> = OnceLock::new();
+  let re = RE_QUANT.get_or_init(|| Regex::new(QUANT_PATTERN).unwrap());
+
+  let mut s = s.to_lowercase();
+
+  // Strip all quantization tokens. We loop because multiple tokens
+  // might exist (rare but possible).
+  while let Some(m) = re.find(&s) {
+    let start = m.start();
+    let end = m.end();
+    s.replace_range(start..end, "");
+  }
+
+  // Clean up separators and common "UD" (Up/Down) markers
+  s.trim_matches(|c| c == '.' || c == '-' || c == '_')
+    .replace("-ud", "")
+    .replace(".ud", "")
+    .replace("_ud", "")
+    .trim_matches(|c| c == '.' || c == '-' || c == '_')
+    .to_string()
+}
+
+/// Strip mmproj-related prefixes and suffixes to find the base model
+/// name part.
+fn strip_mmproj_markers(name: &str) -> String {
+  let name = name.strip_suffix(".gguf").unwrap_or(name);
+  let mut s = name.to_lowercase();
+
+  if s.starts_with("mmproj-") {
+    s = s["mmproj-".len()..].to_string();
+  } else if s.starts_with("mmproj_") {
+    s = s["mmproj_".len()..].to_string();
+  }
+
+  if s.ends_with("-mmproj") {
+    s = s[..s.len() - "-mmproj".len()].to_string();
+  } else if s.ends_with("_mmproj") {
+    s = s[..s.len() - "_mmproj".len()].to_string();
+  } else if s.contains(".mmproj.") {
+    s = s.replace(".mmproj.", ".");
+  } else if s.ends_with(".mmproj") {
+    s = s[..s.len() - ".mmproj".len()].to_string();
+  }
+
+  if s == "mmproj" {
+    return "".to_string();
+  }
+
+  s
 }
 
 /// Find the multimodal projector (mmproj) companion file for a given
 /// model path. The projector file is expected to be in the same
-/// directory with a `mmproj-<stem>.gguf` or `mmproj_<stem>.gguf`
-/// naming pattern, where `<stem>` is the model's file name without the
-/// `.gguf` extension. Returns `None` if no companion is found.
+/// directory.
+///
+/// Matching ignores quantization labels in both filenames. A projector
+/// is matched if:
+/// 1. Its base name matches the model's base name.
+/// 2. It is an "anonymous" projector (e.g., `mmproj-f16.gguf` or
+///    `mmproj.gguf`), which serves as a fallback for any model in the
+///    same directory.
 pub fn find_mmproj(model_path: &Path) -> Option<PathBuf> {
   let parent = model_path.parent()?;
-  let stem = model_path.file_stem()?.to_str()?;
+  let model_filename = model_path.file_name()?.to_str()?;
+  let model_stem = model_path.file_stem()?.to_str()?;
+
+  let model_base = canonical_base(model_stem);
+
+  let mut candidates = Vec::new();
+  let mut anonymous_found = Vec::new();
+
   for entry in std::fs::read_dir(parent).ok()? {
-    let entry = entry.ok()?;
-    let name = entry.file_name();
-    let name_str = name.to_str()?;
-    let is_mmproj = name_str.starts_with("mmproj-") || name_str.starts_with("mmproj_");
-    if !is_mmproj {
+    let Ok(entry) = entry else {
+      continue;
+    };
+    let path = entry.path();
+    if !path.is_file() {
       continue;
     }
-    if let Some(rest) = name_str.strip_prefix("mmproj-") {
-      if rest == format!("{stem}.gguf") || rest == stem {
-        return Some(entry.path());
-      }
+
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+      continue;
+    };
+    if name == model_filename || !is_projector_companion(&path) {
+      continue;
     }
-    if let Some(rest) = name_str.strip_prefix("mmproj_") {
-      if rest == format!("{stem}.gguf") || rest == stem {
-        return Some(entry.path());
-      }
+
+    let stripped_name = strip_mmproj_markers(name);
+    let proj_base = canonical_base(&stripped_name);
+
+    if !proj_base.is_empty() && proj_base == model_base {
+      // 1. Direct base-name match
+      candidates.push((100, path));
+    } else if proj_base.is_empty() {
+      // 2. Anonymous/Generic fallback
+      anonymous_found.push(path.clone());
+      candidates.push((10, path));
     }
   }
-  None
+
+  if anonymous_found.len() > 1 {
+    log::warn!(
+      "multiple anonymous mmproj files found in {}; ignoring fallbacks for {} to avoid ambiguity: {:?}",
+      parent.display(),
+      model_filename,
+      anonymous_found
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy())
+        .collect::<Vec<_>>()
+    );
+    candidates.retain(|(score, _)| *score >= 100);
+  }
+
+  candidates.sort_by(|a, b| b.0.cmp(&a.0));
+  candidates.into_iter().next().map(|(_, p)| p)
 }
 
 /// Concurrency cap for [`walk_root`]'s per-file parse. Default to
@@ -417,6 +519,16 @@ mod tests {
     .unwrap();
     fs::write(
       dir.join("mmproj_model_v2.gguf"),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+    fs::write(
+      dir.join("model.mmproj.gguf"),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+    fs::write(
+      dir.join("mmproj-BF16.gguf"),
       build_minimal_gguf("llama"),
     )
     .unwrap();
@@ -736,27 +848,135 @@ mod tests {
   }
 
   #[test]
-  fn find_mmproj_detects_mmproj_underscore_prefix() {
-    let dir = temp_dir("mmproj-find-underscore");
+  fn find_mmproj_detects_various_patterns() {
+    let dir = temp_dir("mmproj-patterns");
+    let model = "my-model";
+    fs::write(dir.join(format!("{model}.gguf")), build_minimal_gguf("llama")).unwrap();
+
+    let patterns = [
+      format!("mmproj_{model}.gguf"),
+      format!("{model}.mmproj.gguf"),
+      format!("{model}-mmproj.gguf"),
+      format!("{model}_mmproj.gguf"),
+    ];
+
+    for p in patterns {
+      fs::write(dir.join(&p), build_minimal_gguf("llama")).unwrap();
+      let found = find_mmproj(&dir.join(format!("{model}.gguf")));
+      assert!(found.is_some(), "failed to find {p}");
+      assert_eq!(
+        found.unwrap().file_name().and_then(|s| s.to_str()),
+        Some(p.as_str())
+      );
+      fs::remove_file(dir.join(&p)).unwrap();
+    }
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn find_mmproj_handles_quants() {
+    let dir = temp_dir("mmproj-quants");
+    // Model with quant
     fs::write(
-      dir.join("Qwen2.5-7B.Q4_K_M.gguf"),
+      dir.join("Qwen2-7B-Q4_K_M.gguf"),
       build_minimal_gguf("llama"),
     )
     .unwrap();
+
+    // Matching projector with quant
     fs::write(
-      dir.join("mmproj_Qwen2.5-7B.Q4_K_M.gguf"),
+      dir.join("mmproj-Qwen2-7B-Q4_K_M.gguf"),
       build_minimal_gguf("llama"),
     )
     .unwrap();
-    let found = find_mmproj(&dir.join("Qwen2.5-7B.Q4_K_M.gguf"));
+
+    let found = find_mmproj(&dir.join("Qwen2-7B-Q4_K_M.gguf"));
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("mmproj-Qwen2-7B-Q4_K_M.gguf")
+    );
+
+    // Projector with different separator and quant
+    fs::remove_file(dir.join("mmproj-Qwen2-7B-Q4_K_M.gguf")).unwrap();
+    fs::write(
+      dir.join("Qwen2-7B.mmproj.gguf"),
+      build_minimal_gguf("llama"),
+    )
+    .unwrap();
+    let found = find_mmproj(&dir.join("Qwen2-7B-Q4_K_M.gguf"));
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("Qwen2-7B.mmproj.gguf")
+    );
+
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn find_mmproj_handles_unsloth_style_quants() {
+    let dir = temp_dir("mmproj-unsloth");
+    fs::write(dir.join("model-Q4_K_M.gguf"), build_minimal_gguf("llama")).unwrap();
+    fs::write(dir.join("mmproj-BF16.gguf"), build_minimal_gguf("llama")).unwrap();
+
+    let found = find_mmproj(&dir.join("model-Q4_K_M.gguf"));
     assert!(
       found.is_some(),
-      "find_mmproj must find mmproj_Qwen2.5-7B.Q4_K_M.gguf"
+      "should match mmproj-BF16 to Q4_K_M model as fallback"
+    );
+
+    fs::remove_file(dir.join("mmproj-BF16.gguf")).unwrap();
+    fs::write(dir.join("mmproj-Q4_K_M.gguf"), build_minimal_gguf("llama")).unwrap();
+    let found = find_mmproj(&dir.join("model-Q4_K_M.gguf"));
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("mmproj-Q4_K_M.gguf"),
+      "anonymous match should work when only one exists"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn find_mmproj_handles_unsloth_mismatched_quants_when_single() {
+    let dir = temp_dir("mmproj-unsloth-mismatch");
+    fs::write(dir.join("mimi-0.1.Q4_K_M.gguf"), build_minimal_gguf("llama")).unwrap();
+    fs::write(dir.join("mmproj-f16.gguf"), build_minimal_gguf("llama")).unwrap();
+
+    let found = find_mmproj(&dir.join("mimi-0.1.Q4_K_M.gguf"));
+    assert!(
+      found.is_some(),
+      "should find mmproj-f16.gguf even if model is Q4_K_M when it's the only projector"
     );
     assert_eq!(
       found.unwrap().file_name().and_then(|s| s.to_str()),
-      Some("mmproj_Qwen2.5-7B.Q4_K_M.gguf")
+      Some("mmproj-f16.gguf")
     );
+
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn find_mmproj_ignores_ambiguous_anonymous() {
+    let dir = temp_dir("mmproj-ambiguous");
+    fs::write(dir.join("qwen.gguf"), build_minimal_gguf("llama")).unwrap();
+    fs::write(dir.join("mmproj.gguf"), build_minimal_gguf("llama")).unwrap();
+    fs::write(dir.join("mmproj-f16.gguf"), build_minimal_gguf("llama")).unwrap();
+
+    let found = find_mmproj(&dir.join("qwen.gguf"));
+    assert!(
+      found.is_none(),
+      "should ignore all anonymous projectors when multiple exist to avoid ambiguity"
+    );
+
+    // If a base name match is added, it should still be found
+    fs::write(dir.join("qwen-mmproj.gguf"), build_minimal_gguf("llama")).unwrap();
+    let found = find_mmproj(&dir.join("qwen.gguf"));
+    assert_eq!(
+      found.unwrap().file_name().and_then(|s| s.to_str()),
+      Some("qwen-mmproj.gguf"),
+      "base name match should still win even with ambiguous anonymous ones"
+    );
+
     fs::remove_dir_all(&dir).ok();
   }
 
