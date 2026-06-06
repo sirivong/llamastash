@@ -291,6 +291,7 @@ fn knob_label(field: KnobField) -> &'static str {
     KnobField::Ctx => "ctx",
     KnobField::Reasoning => "reasoning",
     KnobField::NGpuLayers => "n_gpu_layers",
+    KnobField::NCpuMoe => "n_cpu_moe",
     KnobField::Threads => "threads",
     KnobField::CacheTypeK => "cache_type_k",
     KnobField::CacheTypeV => "cache_type_v",
@@ -318,6 +319,10 @@ fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobFie
       .unwrap_or_else(|| "default".into()),
     KnobField::NGpuLayers => knobs
       .n_gpu_layers
+      .map(|v| v.to_string())
+      .unwrap_or_else(|| "default".into()),
+    KnobField::NCpuMoe => knobs
+      .n_cpu_moe
       .map(|v| v.to_string())
       .unwrap_or_else(|| "default".into()),
     KnobField::Threads => knobs
@@ -371,6 +376,7 @@ fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
   match field {
     KnobField::Ctx
     | KnobField::NGpuLayers
+    | KnobField::NCpuMoe
     | KnobField::Threads
     | KnobField::Parallel
     | KnobField::BatchSize

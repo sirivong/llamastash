@@ -227,6 +227,11 @@ pub struct TypedKnobs {
   /// Layers offloaded to the GPU. Maps to `--n-gpu-layers`. Use 99
   /// for "all" (llama-server caps internally).
   pub n_gpu_layers: Option<u32>,
+  /// MoE expert layers kept on CPU. Maps to `--n-cpu-moe`. Keeps the
+  /// MoE weights of the first N layers in system RAM while the rest
+  /// offload to GPU — the counterpart to `n_gpu_layers` for MoE
+  /// models that don't fit VRAM.
+  pub n_cpu_moe: Option<u32>,
   /// CPU threads. Maps to `--threads`.
   pub threads: Option<u32>,
   /// K-cache quantisation tag (e.g. `q8_0`). Maps to `--cache-type-k`.

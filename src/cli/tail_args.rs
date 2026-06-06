@@ -107,6 +107,7 @@ fn apply_knob(
     (KnobField::Ctx, ValueKind::U32) => knobs.ctx = Some(parse_u32(flag, value)?),
     (KnobField::Reasoning, ValueKind::Bool) => knobs.reasoning = Some(parse_bool(flag, value)?),
     (KnobField::NGpuLayers, ValueKind::U32) => knobs.n_gpu_layers = Some(parse_u32(flag, value)?),
+    (KnobField::NCpuMoe, ValueKind::U32) => knobs.n_cpu_moe = Some(parse_u32(flag, value)?),
     (KnobField::Threads, ValueKind::U32) => knobs.threads = Some(parse_u32(flag, value)?),
     (KnobField::Parallel, ValueKind::U32) => knobs.parallel = Some(parse_u32(flag, value)?),
     (KnobField::BatchSize, ValueKind::U32) => knobs.batch_size = Some(parse_u32(flag, value)?),
@@ -213,6 +214,15 @@ mod tests {
     let (knobs, extras) = parse_tail_args(&osvec(&["-ngl", "99"])).unwrap();
     assert_eq!(knobs.n_gpu_layers, Some(99));
     assert!(extras.is_empty());
+  }
+
+  #[test]
+  fn n_cpu_moe_parses_canonical_and_alias() {
+    let (knobs, extras) = parse_tail_args(&osvec(&["--n-cpu-moe", "12"])).unwrap();
+    assert_eq!(knobs.n_cpu_moe, Some(12));
+    assert!(extras.is_empty());
+    let (alias, _) = parse_tail_args(&osvec(&["-ncmoe", "8"])).unwrap();
+    assert_eq!(alias.n_cpu_moe, Some(8));
   }
 
   #[test]

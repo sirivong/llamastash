@@ -80,7 +80,7 @@ This sidesteps llama.cpp's own `--fit`, which on Linux 7+ AMD iGPUs (Strix Halo,
 
 ### Typed launch-knob editor
 
-The Settings tab in the TUI exposes the launch knobs that actually matter: `ctx`, `reasoning`, `n_gpu_layers`, `threads`, `cache_type_k/v`, `flash_attn`, `mlock`, `no_mmap`, `parallel`, `batch_size`, `ubatch_size`, `rope_freq_scale`, `keep`, plus a free-text `extras` row for the long tail. Each row shows its **source chip** — `(user)`, `(last used)`, `(arch default)`, `(model default)`, `(server default)` — so you always know where the current value came from.
+The Settings tab in the TUI exposes the launch knobs that actually matter: `ctx`, `reasoning`, `n_gpu_layers`, `n_cpu_moe`, `threads`, `cache_type_k/v`, `flash_attn`, `mlock`, `no_mmap`, `parallel`, `batch_size`, `ubatch_size`, `rope_freq_scale`, `keep`, plus a free-text `extras` row for the long tail. Each row shows its **source chip** — `(user)`, `(last used)`, `(arch default)`, `(model default)`, `(server default)` — so you always know where the current value came from.
 
 Layered resolver: `preset > last-params > yaml arch_defaults > built-in table > llama-server`. See [`docs/usage.md` § Precedence chain](docs/usage.md#precedence-chain). The `extras` row refuses forbidden flags (`--host`, `--listen`, `--bind`, `--api-key`, `--ssl-*`) with a redacted inline warning.
 

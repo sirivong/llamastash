@@ -198,6 +198,7 @@ pub fn argvify(knobs: &TypedKnobs) -> Vec<OsString> {
     match spec.field {
       KnobField::Ctx | KnobField::Reasoning => continue,
       KnobField::NGpuLayers => push_u32(&mut out, spec.canonical, knobs.n_gpu_layers),
+      KnobField::NCpuMoe => push_u32(&mut out, spec.canonical, knobs.n_cpu_moe),
       KnobField::Threads => push_u32(&mut out, spec.canonical, knobs.threads),
       KnobField::CacheTypeK => push_str(&mut out, spec.canonical, knobs.cache_type_k.as_deref()),
       KnobField::CacheTypeV => push_str(&mut out, spec.canonical, knobs.cache_type_v.as_deref()),
@@ -402,6 +403,7 @@ fn try_inherit_field(into: &mut TypedKnobs, from: &TypedKnobs, field: KnobField)
     KnobField::Ctx => copy_some(&mut into.ctx, from.ctx),
     KnobField::Reasoning => copy_some(&mut into.reasoning, from.reasoning),
     KnobField::NGpuLayers => copy_some(&mut into.n_gpu_layers, from.n_gpu_layers),
+    KnobField::NCpuMoe => copy_some(&mut into.n_cpu_moe, from.n_cpu_moe),
     KnobField::Threads => copy_some(&mut into.threads, from.threads),
     KnobField::CacheTypeK => copy_some_clone(&mut into.cache_type_k, &from.cache_type_k),
     KnobField::CacheTypeV => copy_some_clone(&mut into.cache_type_v, &from.cache_type_v),
@@ -578,6 +580,7 @@ mod tests {
       ctx: Some(32768),
       reasoning: Some(true),
       n_gpu_layers: Some(99),
+      n_cpu_moe: Some(12),
       threads: Some(8),
       cache_type_k: Some("q8_0".into()),
       cache_type_v: Some("q8_0".into()),
@@ -596,6 +599,8 @@ mod tests {
       vec![
         "--n-gpu-layers",
         "99",
+        "--n-cpu-moe",
+        "12",
         "--threads",
         "8",
         "--cache-type-k",

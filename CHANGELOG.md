@@ -4,6 +4,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- `n_cpu_moe` launch knob → `--n-cpu-moe` (`-ncmoe`). Keeps the MoE expert weights of the first N layers on CPU while the rest offload to GPU — the counterpart to `n_gpu_layers` for MoE models that don't fit VRAM. Available everywhere the other typed knobs are: the Settings-tab editor, `start` CLI tail args, `arch_defaults` YAML, and persisted `last_params`.
+
 ## [0.0.2] — 2026-06-02
 
 ### Added

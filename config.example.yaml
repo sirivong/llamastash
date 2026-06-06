@@ -382,6 +382,7 @@ keybindings: {}
 #     rope_freq_scale: 1.0           # → --rope-freq-scale
 #     # ── Compute placement ─────────────────────────────────
 #     n_gpu_layers: 99               # → --n-gpu-layers (99 = all)
+#     n_cpu_moe: 12                  # → --n-cpu-moe (MoE layers on CPU)
 #     threads: 8                     # → --threads (CPU)
 #     flash_attn: true               # → --flash-attn
 #     # ── KV cache quantisation ─────────────────────────────

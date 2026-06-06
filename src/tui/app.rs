@@ -249,7 +249,7 @@ pub struct App {
   pub filter_input: crate::tui::input_field::InputField,
   pub launch_picker: Option<LaunchPickerState>,
   /// Vertical scroll offset for the Settings tab's read-only
-  /// running-launch view. The view shows ~17 rows (launch id, 14
+  /// running-launch view. The view shows ~18 rows (launch id, 15
   /// typed knobs, extras, footer); on a short viewport the user
   /// scrolls with ↑/↓. Resets on model-list nav and when the picker
   /// opens or closes.

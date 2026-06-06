@@ -68,6 +68,7 @@ impl PickerField {
         KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => false,
         KnobField::Ctx
         | KnobField::NGpuLayers
+        | KnobField::NCpuMoe
         | KnobField::Threads
         | KnobField::Parallel
         | KnobField::BatchSize
@@ -217,6 +218,7 @@ impl LaunchPickerState {
       KnobField::Ctx => self.cycle_u32(field, CTX_PRESETS, forward),
       KnobField::Reasoning => self.cycle_bool(field, forward),
       KnobField::NGpuLayers => self.cycle_u32(field, &[0, 16, 32, 64, 99], forward),
+      KnobField::NCpuMoe => self.cycle_u32(field, &[0, 4, 8, 16, 32, 64], forward),
       KnobField::Threads => self.cycle_u32(field, &[1, 2, 4, 6, 8, 12, 16, 24], forward),
       KnobField::Parallel => self.cycle_u32(field, &[1, 2, 4, 8, 16], forward),
       KnobField::BatchSize => self.cycle_u32(field, &[256, 512, 1024, 2048, 4096], forward),
@@ -350,6 +352,7 @@ impl LaunchPickerState {
       KnobField::Ctx => self.user_knobs.ctx.is_some(),
       KnobField::Reasoning => self.user_knobs.reasoning.is_some(),
       KnobField::NGpuLayers => self.user_knobs.n_gpu_layers.is_some(),
+      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe.is_some(),
       KnobField::Threads => self.user_knobs.threads.is_some(),
       KnobField::CacheTypeK => self.user_knobs.cache_type_k.is_some(),
       KnobField::CacheTypeV => self.user_knobs.cache_type_v.is_some(),
@@ -368,6 +371,7 @@ impl LaunchPickerState {
     match field {
       KnobField::Ctx => self.user_knobs.ctx,
       KnobField::NGpuLayers => self.user_knobs.n_gpu_layers,
+      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe,
       KnobField::Threads => self.user_knobs.threads,
       KnobField::Parallel => self.user_knobs.parallel,
       KnobField::BatchSize => self.user_knobs.batch_size,
@@ -406,6 +410,7 @@ impl LaunchPickerState {
     match field {
       KnobField::Ctx => self.resolved.ctx,
       KnobField::NGpuLayers => self.resolved.n_gpu_layers,
+      KnobField::NCpuMoe => self.resolved.n_cpu_moe,
       KnobField::Threads => self.resolved.threads,
       KnobField::Parallel => self.resolved.parallel,
       KnobField::BatchSize => self.resolved.batch_size,
@@ -444,6 +449,7 @@ impl LaunchPickerState {
     match field {
       KnobField::Ctx => self.user_knobs.ctx = value,
       KnobField::NGpuLayers => self.user_knobs.n_gpu_layers = value,
+      KnobField::NCpuMoe => self.user_knobs.n_cpu_moe = value,
       KnobField::Threads => self.user_knobs.threads = value,
       KnobField::Parallel => self.user_knobs.parallel = value,
       KnobField::BatchSize => self.user_knobs.batch_size = value,

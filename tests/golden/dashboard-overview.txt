@@ -18,6 +18,7 @@
 │m/y                                                                         ││   ctx             default              │
 │   phi-3                                     phi      Q4_K    8.0k    3.9G  ││   reasoning       default              │
 │                                                                            ││   n_gpu_layers    default              │
+│                                                                            ││   n_cpu_moe       default              │
 │                                                                            ││   threads         default              │
 │                                                                            ││   cache_type_k    default              │
 │                                                                            ││   cache_type_v    default              │
@@ -26,5 +27,4 @@
 │                                                                            ││   mlock           default              │
 │                                                                            ││   no_mmap         default              │
 │                                                                            ││   batch_size      default              │
-│                                                                            ││   ubatch_size     default              │
 └ ◌ launching · ◐ loading · ● ready · ▲ error · ○ stopped · ⇪ external ──────┘└ e:edit for launch · s:stop · ↑↓:scroll ┘

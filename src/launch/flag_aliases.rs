@@ -23,6 +23,7 @@ pub enum KnobField {
   Ctx,
   Reasoning,
   NGpuLayers,
+  NCpuMoe,
   Threads,
   CacheTypeK,
   CacheTypeV,
@@ -88,6 +89,13 @@ const SPECS: &[KnobSpec] = &[
     field: KnobField::NGpuLayers,
     canonical: "--n-gpu-layers",
     aliases: &["-ngl"],
+    kind: ValueKind::U32,
+    fallback_label: LayerLabel::ServerDefault,
+  },
+  KnobSpec {
+    field: KnobField::NCpuMoe,
+    canonical: "--n-cpu-moe",
+    aliases: &["-ncmoe"],
     kind: ValueKind::U32,
     fallback_label: LayerLabel::ServerDefault,
   },
@@ -253,6 +261,15 @@ mod tests {
   }
 
   #[test]
+  fn recognise_n_cpu_moe_canonical_and_alias() {
+    let canonical = recognise("--n-cpu-moe").unwrap();
+    assert_eq!(canonical.field, KnobField::NCpuMoe);
+    assert_eq!(canonical.kind, ValueKind::U32);
+    let alias = recognise("-ncmoe").unwrap();
+    assert_eq!(alias.field, KnobField::NCpuMoe);
+  }
+
+  #[test]
   fn recognise_equals_form_splits_value() {
     let r = recognise("--threads=8").unwrap();
     assert_eq!(r.field, KnobField::Threads);
@@ -289,6 +306,7 @@ mod tests {
         "--ctx-size",
         "--reasoning",
         "--n-gpu-layers",
+        "--n-cpu-moe",
         "--threads",
         "--cache-type-k",
         "--cache-type-v",

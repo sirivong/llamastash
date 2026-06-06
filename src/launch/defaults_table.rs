@@ -82,6 +82,7 @@ fn merge(over: Option<TypedKnobs>, under: TypedKnobs) -> TypedKnobs {
     ctx: over.ctx.or(under.ctx),
     reasoning: over.reasoning.or(under.reasoning),
     n_gpu_layers: over.n_gpu_layers.or(under.n_gpu_layers),
+    n_cpu_moe: over.n_cpu_moe.or(under.n_cpu_moe),
     threads: over.threads.or(under.threads),
     cache_type_k: over.cache_type_k.or(under.cache_type_k),
     cache_type_v: over.cache_type_v.or(under.cache_type_v),

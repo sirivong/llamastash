@@ -399,6 +399,7 @@ fn open_focused_inline_edit(app: &mut App) {
       let initial = match field {
         KnobField::Ctx
         | KnobField::NGpuLayers
+        | KnobField::NCpuMoe
         | KnobField::Threads
         | KnobField::Parallel
         | KnobField::BatchSize
@@ -489,6 +490,7 @@ fn commit_inline_edit(app: &mut App) -> bool {
     PickerField::Knob(k) => match k {
       KnobField::Ctx
       | KnobField::NGpuLayers
+      | KnobField::NCpuMoe
       | KnobField::Threads
       | KnobField::Parallel
       | KnobField::BatchSize
