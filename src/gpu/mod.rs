@@ -62,9 +62,46 @@ pub(crate) fn run_with_timeout(cmd: Command) -> Option<Output> {
   }
 }
 
+/// Normalize a PCI bus address to canonical `00000000:bb:dd.f`.
+///
+/// Handles variants:
+/// - `00000000:0F:00.0` (NVIDIA nvml — 8-char, uppercase)
+/// - `0000:0E:00.0` (rocm-smi — 4-char domain, uppercase)
+/// - `0e:00.0` (lspci short — no domain)
+/// - `00000000:0f:00.0` (vulkaninfo — already canonical)
+pub(crate) fn normalize_pci(raw: &str) -> Option<String> {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  // `[domain:]bus:device.function`. nvml / rocm-smi / vulkaninfo all
+  // emit the domain; lspci's short form omits it (domain 0 implied).
+  let parts: Vec<&str> = trimmed.split(':').collect();
+  let (domain, bus, dev_fn) = match parts.as_slice() {
+    [bus, dev_fn] => (0u32, *bus, *dev_fn),
+    [domain, bus, dev_fn] => (u32::from_str_radix(domain.trim(), 16).ok()?, *bus, *dev_fn),
+    _ => return None,
+  };
+  let bus = u8::from_str_radix(bus.trim(), 16).ok()?;
+  // Split `device.function`; a missing dot means function 0.
+  let (dev, func) = match dev_fn.trim().split_once('.') {
+    Some((d, f)) => (d.trim(), f.trim()),
+    None => (dev_fn.trim(), "0"),
+  };
+  let dev = u8::from_str_radix(dev, 16).ok()?;
+  let func = u8::from_str_radix(func, 16).ok()?;
+  Some(format!("{domain:08x}:{bus:02x}:{dev:02x}.{func:x}"))
+}
+
 /// What detection found. Always a complete snapshot — no
 /// "partial" / "unknown" middle ground — so the IPC handler can
 /// serialise it directly into `status`.
+///
+/// Single-backend hits return the corresponding variant; when two or
+/// more backends each find at least one device the `Multi` variant
+/// carries all of them (each tagged with its backend) so the host
+/// stats pane can render per-GPU rows instead of hiding half the
+/// hardware.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum GpuInfo {
@@ -84,6 +121,10 @@ pub enum GpuInfo {
   /// that the user can attempt `-ngl > 0`; the host pane renders
   /// `backend  unknown` rather than mislabelling the card.
   Unknown { devices: Vec<GpuDevice> },
+  /// Multiple backends each found one or more GPUs. Carries a
+  /// per-device `backend` tag so the host stats pane can group and
+  /// label them independently and render one row per device.
+  Multi { devices: Vec<GpuDevice> },
 }
 
 /// One discrete GPU device (NVIDIA / AMD path).
@@ -94,6 +135,10 @@ pub enum GpuInfo {
 /// can't surface them they stay `None`; the host stats pane renders
 /// `—` in place of a numeric reading rather than dropping the row.
 ///
+/// `backend` tags which probe produced this device ("nvidia", "amd",
+/// "apple_metal", or "unknown"). Used when combining multi-backend
+/// snapshots into a `GpuInfo::Multi`.
+///
 /// Note: this struct intentionally does not derive `Eq` because the
 /// `f32` fields don't satisfy `Eq` (NaN-not-equal-to-itself). The
 /// `PartialEq` derive is sufficient for the only equality use case
@@ -103,12 +148,18 @@ pub enum GpuInfo {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct GpuDevice {
   pub name: String,
+  pub backend: String,
   pub total_memory_bytes: u64,
   pub used_memory_bytes: u64,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub utilization_pct: Option<f32>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub temperature_c: Option<f32>,
+  /// Physical identifier stable across backends (PCI bus address,
+  /// IOKit serial, or DXGI PCI path). Used to deduplicate cards
+  /// found via multiple drivers.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub device_id: Option<String>,
   /// Portion of `total_memory_bytes` that lives in the system RAM
   /// pool (e.g. AMD GTT on UMA APUs like Strix Halo). When `Some`,
   /// the host pane subtracts this from the RAM gauge so the same
@@ -129,9 +180,12 @@ impl GpuInfo {
       Self::Amd { .. } => "amd",
       Self::AppleMetal { .. } => "apple_metal",
       Self::Unknown { .. } => "unknown",
+      Self::Multi { .. } => "multi",
     }
   }
 
+  /// True for any snapshot that found at least one GPU (everything
+  /// except `CpuOnly`).
   pub fn is_gpu(&self) -> bool {
     !matches!(self, Self::CpuOnly)
   }
@@ -150,6 +204,7 @@ impl GpuInfo {
   pub fn is_unified(&self) -> bool {
     match self {
       Self::AppleMetal { .. } => true,
+      Self::Multi { devices } => devices.iter().any(|d| d.uma_shared_total_bytes.is_some()),
       Self::Nvidia { devices } | Self::Amd { devices } | Self::Unknown { devices } => {
         devices.iter().any(|d| d.uma_shared_total_bytes.is_some())
       }
@@ -158,17 +213,231 @@ impl GpuInfo {
   }
 }
 
+/// `(card name → PCI address, "vendor:device" → PCI address)` as
+/// returned by [`query_lspci`]. The named alias keeps the consumers'
+/// signatures readable and drops the `clippy::type_complexity` allows.
+type LspciMaps = (
+  std::collections::BTreeMap<String, String>,
+  std::collections::BTreeMap<String, String>,
+);
+
+/// lspci is Linux-only. On macOS/Windows the backend probes already
+/// emit canonical device IDs, so the cross-backend dedup fallback is
+/// never needed and this returns `None`.
+#[cfg(not(target_os = "linux"))]
+fn query_lspci() -> Option<LspciMaps> {
+  None
+}
+
+/// Run `lspci -D -nn` and parse it into the lookup maps. Returns `None`
+/// when lspci is missing/fails or finds no GPU lines. `-nn` is required
+/// for the numeric `[vendor:device]` ids; `-D` forces the domain into
+/// the address so it matches the nvml/rocm canonical form.
+#[cfg(target_os = "linux")]
+fn query_lspci() -> Option<LspciMaps> {
+  let mut cmd = std::process::Command::new("lspci");
+  cmd.args(["-D", "-nn"]);
+  let output = run_with_timeout(cmd)?;
+  if !output.status.success() {
+    return None;
+  }
+  let stdout = String::from_utf8(output.stdout).ok()?;
+  let maps = parse_lspci(&stdout);
+  if maps.0.is_empty() && maps.1.is_empty() {
+    None
+  } else {
+    Some(maps)
+  }
+}
+
+/// Parse `lspci -D -nn` output into `(name → addr, "vendor:device" →
+/// addr)`. A GPU line looks like:
+/// `0000:0f:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA102 [GeForce RTX 3080] [10de:2206] (rev a1)`
+/// — the leading token is the PCI bus address, and the trailing
+/// `[vvvv:dddd]` bracket (only present with `-nn`) is the numeric
+/// vendor:device id used to resolve a Vulkan device that reports
+/// `0xVVVV:0xDDDD` instead of a bus address.
+#[cfg(any(target_os = "linux", test))]
+fn parse_lspci(stdout: &str) -> LspciMaps {
+  let mut name_map = std::collections::BTreeMap::new();
+  let mut pci_id_map = std::collections::BTreeMap::new();
+  for line in stdout.lines() {
+    let line = line.trim();
+    if !line.contains("VGA") && !line.contains("Display") && !line.contains("3D") {
+      continue;
+    }
+    let Some((addr_tok, rest)) = line.split_once(' ') else {
+      continue;
+    };
+    let Some(addr) = normalize_pci(addr_tok) else {
+      continue;
+    };
+    if let Some((vendor, device)) = last_vendor_device(rest) {
+      pci_id_map.insert(format!("{vendor}:{device}"), addr.clone());
+    }
+    if let Some(name) = lspci_card_name(rest) {
+      name_map.insert(name, addr.clone());
+    }
+  }
+  (name_map, pci_id_map)
+}
+
+/// Find the last `[vvvv:dddd]` numeric vendor:device bracket in the
+/// line tail, returning lowercase `(vendor, device)` hex strings. The
+/// class bracket (`[0300]`) and the marketing-name bracket carry no
+/// colon / non-hex, so they're skipped.
+#[cfg(any(target_os = "linux", test))]
+fn last_vendor_device(s: &str) -> Option<(String, String)> {
+  let mut rest = s;
+  while let Some(open) = rest.rfind('[') {
+    if let Some(close_rel) = rest[open..].find(']') {
+      let inner = &rest[open + 1..open + close_rel];
+      if let Some((v, d)) = inner.split_once(':') {
+        let (v, d) = (v.trim(), d.trim());
+        if u16::from_str_radix(v, 16).is_ok() && u16::from_str_radix(d, 16).is_ok() {
+          return Some((v.to_lowercase(), d.to_lowercase()));
+        }
+      }
+    }
+    rest = &rest[..open];
+  }
+  None
+}
+
+/// Best-effort card name: the text after the class-bracket `]:`, with
+/// the trailing `[vendor:device]` group trimmed. lspci names rarely
+/// equal the vendor tools' marketing strings, so this is a secondary
+/// fallback behind the PCI-id match.
+#[cfg(any(target_os = "linux", test))]
+fn lspci_card_name(rest: &str) -> Option<String> {
+  let after = rest.split_once("]:").map(|(_, t)| t).unwrap_or(rest).trim();
+  let name = after
+    .rsplit_once(" [")
+    .map(|(head, _)| head)
+    .unwrap_or(after)
+    .trim();
+  (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Resolve a canonical PCI address for a device.
+///
+/// Uses the device's own `device_id` (already normalized to canonical
+/// `00000000:bb:dd.f` by the backend probe) as the primary source.
+/// Falls back to lspci name lookup when device_id is absent or
+/// looks like a vendor:device ID (e.g. "0x1002:0x7551").
+fn resolve_device_id(device: &GpuDevice, lspci: &Option<LspciMaps>) -> String {
+  if let Some(pci) = &device.device_id {
+    // PCI bus addresses: "00000002:00.0" — contains ':' but doesn't
+    // start with "0x".
+    // vendor:device IDs: "0x10de:0x2216" — starts with "0x".
+    if pci.contains(':') && !pci.starts_with("0x") {
+      return pci.clone();
+    }
+  }
+  // Fall back to lspci lookups (name map and PCI-ID map).
+  lspci
+    .as_ref()
+    .and_then(|(name_map, pci_id_map)| {
+      name_map
+        .get(&device.name)
+        .or_else(|| {
+          // Try resolving vendor:device IDs (e.g. "0x1002:0x7551")
+          // from vulkaninfo by stripping the "0x" prefix and lowercasing.
+          if let Some(pci) = &device.device_id {
+            if pci.starts_with("0x") && pci.contains(':') {
+              let stripped: String = pci
+                .trim_start_matches("0x")
+                .split(':')
+                .map(|part| {
+                  let hex = part.trim_start_matches('0');
+                  if hex.is_empty() {
+                    "0".to_string()
+                  } else {
+                    hex.to_lowercase()
+                  }
+                })
+                .collect::<Vec<_>>()
+                .join(":");
+              return pci_id_map.get(&stripped);
+            }
+          }
+          None
+        })
+        .cloned()
+    })
+    .unwrap_or_else(|| device.name.clone())
+}
+
+/// Normalize a GPU product name for cross-backend dedup when PCI
+/// resolution is unavailable.
+///
+/// Vulkan reports the same physical card under a decorated name —
+/// `vulkaninfo` appends a driver tag (`AMD Radeon AI PRO R9700 (RADV
+/// GFX1201)`) while `rocm-smi` reports the bare `AMD Radeon AI PRO
+/// R9700`. When lspci can't map both to one PCI address (the primary
+/// dedup key), the raw-name fallback in [`resolve_device_id`] never
+/// collapses them and a 0-VRAM Vulkan duplicate survives. Stripping any
+/// trailing parenthetical group and normalizing whitespace + case lets
+/// that fallback path still match.
+fn normalize_card_name(name: &str) -> String {
+  let base = match name.split_once('(') {
+    Some((head, _)) => head,
+    None => name,
+  };
+  base
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_lowercase()
+}
+
+/// Enrich a list of devices with lspci PCI address lookups.
+///
+/// For devices whose `device_id` is missing or looks like a
+/// vendor:device ID (e.g. "0x1002:0x7551" from vulkaninfo),
+/// resolve the canonical PCI address using the lspci name map.
+fn enrich_with_lspci(devices: &mut [GpuDevice], lspci: &Option<LspciMaps>) {
+  for d in devices.iter_mut() {
+    if let Some(pci) = &d.device_id {
+      // Already has a canonical PCI address — skip.
+      if pci.contains(':') && !pci.starts_with("0x") {
+        continue;
+      }
+    }
+    // Resolve using lspci.
+    d.device_id = Some(resolve_device_id(d, lspci));
+  }
+}
+
 /// Run the full detection chain. Best-effort — every probe failure
-/// just falls through to the next backend, then to `CpuOnly`.
+/// falls through to the next backend. Unlike the v1 single-hit probe,
+/// this collects from **all** backends and returns a `Multi` snapshot
+/// when two or more backends each find at least one device. A single-
+/// backend hit returns that backend's native variant.
+///
+/// Devices from every backend are deduplicated (by PCI address on
+/// Linux, by name elsewhere) so the same physical card seen through
+/// two drivers — e.g. ROCm and Vulkan — collapses to one entry instead
+/// of a phantom 0-VRAM duplicate. Launch-side device selection is
+/// separate: it reads `llama-server --list-devices` (see
+/// [`crate::launch::list_devices`]), not this probe.
+///
 /// Suitable for daemon startup and periodic hotplug-detection
 /// passes; the per-tick host-metrics refresh uses [`refresh_active`]
 /// to avoid spawning every vendor tool every second.
 pub fn probe() -> GpuInfo {
-  if let Some(info) = nvidia::probe() {
-    return info;
+  let mut nvidia_devices: Vec<GpuDevice> = Vec::new();
+  let mut amd_devices: Vec<GpuDevice> = Vec::new();
+  let mut metal_devices: Vec<GpuDevice> = Vec::new();
+  let mut unknown_devices: Vec<GpuDevice> = Vec::new();
+
+  // NVIDIA probe
+  if let Some(devs) = nvidia::probe_devices() {
+    nvidia_devices = devs;
   }
-  if let Some(info) = amd::probe() {
-    return info;
+  // AMD probe
+  if let Some(devs) = amd::probe_devices() {
+    amd_devices = devs;
   }
   // Windows-only: DXGI fills the AMD / Intel slot that `rocm-smi`
   // doesn't reach. Also catches NVIDIA on stripped Windows installs
@@ -176,55 +445,276 @@ pub fn probe() -> GpuInfo {
   // no live util/temp.
   #[cfg(windows)]
   {
-    if let Some(info) = dxgi::probe() {
-      return info;
+    if let Some(devs) = dxgi::probe_devices() {
+      amd_devices.extend(devs.clone());
     }
   }
-  if let Some(info) = metal::probe() {
-    return info;
+  // Apple Silicon probe
+  if let Some(devs) = metal::probe_devices() {
+    metal_devices = devs;
   }
-  // Vulkan check is a last-resort "is *anything* there?" signal —
-  // it can't give us memory numbers, but the supervisor uses it to
-  // hint that the user can probably set `-ngl > 0` even though we
-  // don't know how much VRAM they have. Returns CpuOnly when even
-  // Vulkan can't find a device.
-  vulkan::probe().unwrap_or(GpuInfo::CpuOnly)
+  // Vulkan fallback
+  if let Some(devs) = vulkan::probe_devices() {
+    unknown_devices = devs;
+  }
+
+  // Count total devices across all backends
+  let total =
+    nvidia_devices.len() + amd_devices.len() + metal_devices.len() + unknown_devices.len();
+
+  if total == 0 {
+    return GpuInfo::CpuOnly;
+  }
+
+  // Single-device hits return the native variant for backward compat
+  if total == 1 && nvidia_devices.is_empty() && amd_devices.is_empty() && unknown_devices.is_empty()
+  {
+    // Only Metal — return AppleMetal for the unified-memory path
+    let dev = &metal_devices[0];
+    return GpuInfo::AppleMetal {
+      total_memory_bytes: dev.total_memory_bytes,
+    };
+  }
+  if total == 1 && amd_devices.is_empty() && metal_devices.is_empty() && unknown_devices.is_empty()
+  {
+    return GpuInfo::Nvidia {
+      devices: nvidia_devices,
+    };
+  }
+  if total == 1
+    && nvidia_devices.is_empty()
+    && metal_devices.is_empty()
+    && unknown_devices.is_empty()
+  {
+    return GpuInfo::Amd {
+      devices: amd_devices,
+    };
+  }
+  if total == 1 && nvidia_devices.is_empty() && amd_devices.is_empty() && metal_devices.is_empty() {
+    return GpuInfo::Unknown {
+      devices: unknown_devices,
+    };
+  }
+
+  // Two or more backends — build cards from all devices.
+  // Group by physical card (PCI address on Linux, name elsewhere)
+  // and attach available drivers per card.
+  let lspci = query_lspci();
+
+  // Enrich devices with lspci PCI lookups so vendor:device IDs
+  // from vulkaninfo resolve to canonical PCI addresses. This is
+  // the key to cross-backend dedup (rocm-smi "AMD Radeon…" vs
+  // vulkaninfo "AMD Radeon… (RADV…)").
+  enrich_with_lspci(&mut nvidia_devices, &lspci);
+  enrich_with_lspci(&mut amd_devices, &lspci);
+  enrich_with_lspci(&mut metal_devices, &lspci);
+  enrich_with_lspci(&mut unknown_devices, &lspci);
+
+  // Collect every device into one list. Native backends (CUDA / ROCm /
+  // Metal) go in as-is; Vulkan devices are added only when they don't
+  // already match a native card (dedup by PCI address or name) so a
+  // RADV-decorated duplicate of a ROCm/CUDA card doesn't surface as a
+  // phantom 0-VRAM device.
+  let mut all_devices = Vec::new();
+  for d in nvidia_devices {
+    all_devices.push(d);
+  }
+  for d in amd_devices {
+    all_devices.push(d);
+  }
+  for d in metal_devices {
+    all_devices.push(d);
+  }
+  for d in unknown_devices {
+    // Skip Vulkan devices that match an already-seen card by PCI
+    // address (via lspci on Linux) or by name. The PCI path is exact;
+    // when it's unavailable we fall back to a normalized-name match so
+    // a RADV-decorated Vulkan duplicate of a ROCm/CUDA card still
+    // collapses instead of surfacing as a phantom 0-VRAM device.
+    let seen_id = resolve_device_id(&d, &lspci);
+    let norm_name = normalize_card_name(&d.name);
+    let is_duplicate = all_devices.iter().any(|seen| {
+      resolve_device_id(seen, &lspci) == seen_id || normalize_card_name(&seen.name) == norm_name
+    });
+    if is_duplicate {
+      continue;
+    }
+    all_devices.push(d);
+  }
+
+  GpuInfo::Multi {
+    devices: all_devices,
+  }
 }
 
-/// Refresh the already-detected backend by calling only its vendor
-/// probe. Returns `None` when the previous probe was for a backend
-/// without live metrics (CpuOnly, AppleMetal — unified memory total
-/// is a static system property, Unknown — Vulkan summary has no
-/// live values) or when the vendor tool returned nothing this tick.
+/// Refresh the already-detected backends by calling only their vendor
+/// probes. Returns a new `GpuInfo` when at least one backend changed
+/// this tick, `None` when nothing changed.
+///
+/// For single-backend hits the path is trivial (one vendor tool per
+/// tick). For `Multi` we refresh every backend that previously had
+/// devices so we catch driver rebinds, hotplugged cards, and late
+/// driver loads.
 ///
 /// This is the per-tick fast path used by the host-metrics sampler.
-/// Before this existed the sampler ran the full chain (`nvidia-smi`
-/// → `rocm-smi` → `system_profiler` → `vulkaninfo`) every 1 Hz tick,
-/// which translates to ~86,400 subprocess spawns per day on an idle
-/// daemon. After: one spawn per second targeting only the active
-/// vendor; CPU-only / Vulkan / Metal hosts skip per-tick spawns
-/// entirely (the periodic full re-probe in the sampler still catches
-/// hotplug / late driver loads).
+/// CPU-only / Vulkan / Metal hosts skip per-tick spawns entirely
+/// (the periodic full re-probe in the sampler still catches hotplug /
+/// late driver loads).
 pub fn refresh_active(prev: &GpuInfo) -> Option<GpuInfo> {
   match prev {
-    GpuInfo::Nvidia { .. } => nvidia::probe(),
-    // On Windows, `GpuInfo::Amd` is always DXGI-sourced (no
-    // `rocm-smi.exe` ships) — DXGI data is static, so per-tick
-    // refresh would just re-emit the same snapshot. Return None so
-    // the sampler preserves what it already has and skips the
-    // (failing) `rocm-smi` subprocess spawn. On Linux this still
-    // routes through `amd::probe` for live util/temp.
+    GpuInfo::CpuOnly | GpuInfo::AppleMetal { .. } | GpuInfo::Unknown { .. } => None,
+    GpuInfo::Nvidia { .. } => nvidia::probe_devices().map(|d| GpuInfo::Nvidia { devices: d }),
     #[cfg(unix)]
-    GpuInfo::Amd { .. } => amd::probe(),
+    GpuInfo::Amd { .. } => amd::probe_devices().map(|d| GpuInfo::Amd { devices: d }),
     #[cfg(windows)]
     GpuInfo::Amd { .. } => None,
-    GpuInfo::CpuOnly | GpuInfo::AppleMetal { .. } | GpuInfo::Unknown { .. } => None,
+    GpuInfo::Multi { devices } => {
+      // Derive per-backend lists from the backend tags.
+      let prev_nvidia: Vec<GpuDevice> = devices
+        .iter()
+        .filter(|d| d.backend == "nvidia")
+        .cloned()
+        .collect();
+      let prev_amd: Vec<GpuDevice> = devices
+        .iter()
+        .filter(|d| d.backend == "amd")
+        .cloned()
+        .collect();
+      let prev_metal: Vec<GpuDevice> = devices
+        .iter()
+        .filter(|d| d.backend == "apple_metal")
+        .cloned()
+        .collect();
+      let prev_unknown: Vec<GpuDevice> = devices
+        .iter()
+        .filter(|d| d.backend == "unknown")
+        .cloned()
+        .collect();
+
+      let mut changed = false;
+      let mut next_nvidia = prev_nvidia.clone();
+      let mut next_amd = prev_amd.clone();
+      let next_metal = prev_metal.clone();
+      let next_unknown = prev_unknown.clone();
+      if !prev_nvidia.is_empty() {
+        if let Some(devs) = nvidia::probe_devices() {
+          if !devices_match(&prev_nvidia, &devs) {
+            next_nvidia = devs;
+            changed = true;
+          }
+        }
+      }
+      if !prev_amd.is_empty() {
+        if let Some(devs) = amd::probe_devices() {
+          if !devices_match(&prev_amd, &devs) {
+            next_amd = devs;
+            changed = true;
+          }
+        }
+      }
+      // Metal and Vulkan data are static — no per-tick refresh needed.
+      if changed {
+        let mut all = Vec::new();
+        all.extend(next_nvidia);
+        all.extend(next_amd);
+        all.extend(next_metal);
+        all.extend(next_unknown);
+        Some(GpuInfo::Multi { devices: all })
+      } else {
+        None
+      }
+    }
   }
+}
+
+/// Compare two device lists by name + total_memory_bytes.
+/// We can't use `==` because `GpuDevice` intentionally doesn't
+/// derive `Eq` (NaN-f32 fields). This is sufficient for detecting
+/// changes in the active backend.
+fn devices_match(a: &[GpuDevice], b: &[GpuDevice]) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+  for (da, db) in a.iter().zip(b.iter()) {
+    if da.name != db.name {
+      return false;
+    }
+    if da.total_memory_bytes != db.total_memory_bytes {
+      return false;
+    }
+  }
+  true
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn normalize_pci_canonicalizes_every_vendor_format() {
+    // nvml (8-char domain), rocm-smi (4-char domain), vulkaninfo
+    // (already canonical) and lspci's domain-less short form must all
+    // collapse to the same canonical string so cross-backend dedup
+    // matches the same physical card.
+    for raw in [
+      "00000000:0F:00.0", // nvml
+      "0000:0F:00.0",     // rocm-smi
+      "00000000:0f:00.0", // vulkaninfo
+      "0f:00.0",          // lspci short (no domain)
+    ] {
+      assert_eq!(
+        normalize_pci(raw).as_deref(),
+        Some("00000000:0f:00.0"),
+        "input {raw:?}"
+      );
+    }
+    // Distinct buses stay distinct.
+    assert_ne!(normalize_pci("0e:00.0"), normalize_pci("0f:00.0"));
+    // Garbage is rejected, not silently mangled.
+    assert_eq!(normalize_pci("not-a-pci"), None);
+    assert_eq!(normalize_pci(""), None);
+  }
+
+  #[test]
+  fn parse_lspci_maps_vendor_device_to_canonical_address() {
+    // `lspci -D -nn` shape: leading PCI address + trailing numeric
+    // [vendor:device] bracket.
+    let out = "\
+0000:0f:00.0 VGA compatible controller [0300]: NVIDIA Corporation GA102 [GeForce RTX 3080] [10de:2206] (rev a1)
+0000:0e:00.0 Display controller [0380]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [1002:744c] (rev c8)
+00:1f.3 Audio device [0403]: Intel Corporation Raptor Lake HD Audio [8086:7a50]
+";
+    let (_names, ids) = parse_lspci(out);
+    // The GPU rows resolve vendor:device -> canonical PCI address, even
+    // though the AMD line also carries an "[AMD/ATI]" name bracket
+    // earlier (the right-to-left scan picks the numeric one).
+    assert_eq!(
+      ids.get("10de:2206").map(String::as_str),
+      Some("00000000:0f:00.0")
+    );
+    assert_eq!(
+      ids.get("1002:744c").map(String::as_str),
+      Some("00000000:0e:00.0")
+    );
+    // The non-GPU audio line (no VGA/Display/3D) is ignored.
+    assert!(!ids.contains_key("8086:7a50"));
+  }
+
+  #[test]
+  fn normalize_card_name_strips_vulkan_driver_tag() {
+    // rocm-smi vs vulkaninfo names for the same physical card must
+    // normalize to the same key so the cross-backend dedup collapses
+    // the 0-VRAM Vulkan duplicate.
+    assert_eq!(
+      normalize_card_name("AMD Radeon AI PRO R9700 (RADV GFX1201)"),
+      normalize_card_name("AMD Radeon AI PRO R9700"),
+    );
+    // Distinct cards stay distinct.
+    assert_ne!(
+      normalize_card_name("NVIDIA GeForce RTX 3080"),
+      normalize_card_name("AMD Radeon AI PRO R9700"),
+    );
+  }
 
   #[test]
   fn cpu_only_is_not_gpu() {

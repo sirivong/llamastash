@@ -39,7 +39,7 @@ fn lookup_wildcard(backend: GpuFlavor) -> TypedKnobs {
     // flash_attn opt-in is per-arch (some architectures don't
     // support flash-attn at all). CPU / unknown / unsampled get
     // nothing.
-    GpuFlavor::Nvidia | GpuFlavor::Amd | GpuFlavor::AppleMetal => TypedKnobs {
+    GpuFlavor::Nvidia | GpuFlavor::Amd | GpuFlavor::AppleMetal | GpuFlavor::Multi => TypedKnobs {
       n_gpu_layers: Some(99),
       ..TypedKnobs::default()
     },
@@ -94,6 +94,7 @@ fn merge(over: Option<TypedKnobs>, under: TypedKnobs) -> TypedKnobs {
     ubatch_size: over.ubatch_size.or(under.ubatch_size),
     rope_freq_scale: over.rope_freq_scale.or(under.rope_freq_scale),
     keep: over.keep.or(under.keep),
+    device: over.device.or(under.device),
   }
 }
 

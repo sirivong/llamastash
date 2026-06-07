@@ -63,6 +63,14 @@ pub struct DaemonOptions {
   /// launch); production startup pre-resolves so the daemon fails
   /// fast if the binary is missing.
   pub binary: Option<PathBuf>,
+  /// Additional `llama-server` binaries (from `config.llama_server_paths`)
+  /// probed for devices alongside `binary`. Each is queried with
+  /// `--list-devices` at startup; the union (deduped by selector)
+  /// becomes the launch device catalog. Lets one install offer
+  /// CUDA / ROCm / Vulkan launches by pointing at the matching
+  /// single-backend builds. Backend is inferred from each binary's
+  /// device names — never declared in config.
+  pub extra_binaries: Vec<PathBuf>,
   /// Listening-port range Unit 5's allocator probes. Defaults to
   /// the plan's `41100..=41300`.
   pub port_range: PortRange,
@@ -120,6 +128,7 @@ impl DaemonOptions {
       state_dir: root,
       log_dir,
       binary: None,
+      extra_binaries: Vec::new(),
       port_range: PortRange::default(),
       discovery: DiscoveryOptions::new(Vec::new()),
       probe_timeout_secs: None,
@@ -149,6 +158,7 @@ impl DaemonOptions {
       state_dir,
       log_dir,
       binary: None,
+      extra_binaries: Vec::new(),
       port_range: PortRange::default(),
       // Production-default discovery: no scan roots until a later
       // commit threads config + CLI flags through `handle_start`.
@@ -312,12 +322,45 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       },
       None => ProbeOptions::default(),
     };
+    // Build the launch device catalog from the default binary plus any
+    // configured extras. The default binary leads so it wins selector
+    // collisions (e.g. two builds both exposing `Vulkan0`).
+    let mut catalog_binaries = vec![binary.clone()];
+    for extra in &opts.extra_binaries {
+      if !catalog_binaries.contains(extra) {
+        catalog_binaries.push(extra.clone());
+      }
+    }
+    // Populate the catalog in the background: probing each binary with
+    // `--list-devices` is best-effort I/O we must keep off the startup
+    // critical path so the detached-start parent's `runtime.json` wait
+    // never trips. The cell starts empty and flips to the full set once
+    // the probe finishes.
+    let device_catalog = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    {
+      let cell = Arc::clone(&device_catalog);
+      let binary_count = catalog_binaries.len();
+      tokio::spawn(async move {
+        let built = tokio::task::spawn_blocking(move || {
+          crate::launch::list_devices::build_catalog(&catalog_binaries)
+        })
+        .await
+        .unwrap_or_default();
+        log::info!(
+          "launch device catalog: {} device(s) across {} binary(ies)",
+          built.len(),
+          binary_count
+        );
+        *cell.write().await = built;
+      });
+    }
     ctx = ctx.with_launch_env(LaunchEnv {
       binary,
       port_range: opts.port_range,
       log_dir: opts.log_dir.clone(),
       probe,
       arch_defaults: opts.arch_defaults.clone(),
+      device_catalog,
     });
   } else {
     log::info!(

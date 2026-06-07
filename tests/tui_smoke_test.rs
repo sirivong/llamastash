@@ -360,6 +360,7 @@ fn ready_chat_model_exposes_chat_tab_via_cycle() {
     path: PathBuf::from("/m/qwen.gguf"),
     port: 41100,
     state: SurfaceState::Ready,
+    device: None,
     rss_bytes: None,
     cpu_pct: None,
   }];
@@ -453,6 +454,7 @@ fn picker_warns_when_focused_model_already_has_active_instance() {
     path: PathBuf::from("/m/qwen.gguf"),
     port: 41101,
     state: SurfaceState::Ready,
+    device: None,
     rss_bytes: None,
     cpu_pct: None,
   }];
@@ -502,6 +504,7 @@ fn typing_into_chat_input_extends_prompt_buffer() {
     path: PathBuf::from("/m/qwen.gguf"),
     port: 41100,
     state: SurfaceState::Ready,
+    device: None,
     rss_bytes: None,
     cpu_pct: None,
   }];

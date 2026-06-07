@@ -18,23 +18,39 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sysinfo::{Disks, System};
 
-use crate::gpu::{self, GpuInfo};
+use crate::gpu::{self, GpuDevice, GpuInfo};
 use crate::launch::binary::{locate, LocateInputs};
 
 /// VRAM aggregation rule pinned in Key Decisions:
-/// - Nvidia / AMD: `min(device.total_memory_bytes)` because the
-///   recommender's single-GPU placement is the limiting case.
+/// - Nvidia / AMD / Multi: `min(device.total_memory_bytes)` over the
+///   devices that report a non-zero size, because the recommender's
+///   single-GPU placement is the limiting case.
 /// - AppleMetal: `total_memory_bytes × 0.75` (Metal uses unified
 ///   memory; the ratio leaves headroom for the OS + apps).
 /// - CpuOnly / Unknown: `None`.
+///
+/// Zero-byte devices are excluded from the `min()`. A multi-GPU host
+/// can surface a device whose VRAM size a backend can't read — e.g. a
+/// Vulkan/`--list-devices` (RADV) duplicate of a ROCm card that the
+/// cross-backend dedup failed to collapse. Letting that 0 win the
+/// `min()` would collapse the whole host's effective VRAM to zero and
+/// make the init smoke probe report a false OOM (peak > ceiling of 0).
+/// When *every* device reports 0 we return `None` (the CPU-only path),
+/// never `Some(0)`.
 pub fn aggregate_vram_bytes(info: &GpuInfo) -> Option<u64> {
-  match info {
-    GpuInfo::CpuOnly | GpuInfo::Unknown { .. } => None,
-    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } => {
-      devices.iter().map(|d| d.total_memory_bytes).min()
+  let all_devices: &[GpuDevice] = match info {
+    GpuInfo::CpuOnly | GpuInfo::Unknown { .. } => return None,
+    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } => devices,
+    GpuInfo::AppleMetal { total_memory_bytes } => {
+      return Some((*total_memory_bytes as f64 * 0.75) as u64);
     }
-    GpuInfo::AppleMetal { total_memory_bytes } => Some((*total_memory_bytes as f64 * 0.75) as u64),
-  }
+    GpuInfo::Multi { devices } => devices,
+  };
+  all_devices
+    .iter()
+    .map(|d| d.total_memory_bytes)
+    .filter(|&bytes| bytes > 0)
+    .min()
 }
 
 /// What the recommender + wizard need to know about the host.
@@ -128,6 +144,7 @@ pub fn detect_hardware() -> HardwareSnapshot {
       devices.len() as u32
     }
     GpuInfo::AppleMetal { .. } => 1,
+    GpuInfo::Multi { devices } => devices.len() as u32,
   };
   let mut sys = System::new();
   sys.refresh_memory();
@@ -413,6 +430,53 @@ mod tests {
   fn aggregate_vram_cpu_only_and_unknown_are_none() {
     assert!(aggregate_vram_bytes(&GpuInfo::CpuOnly).is_none());
     assert!(aggregate_vram_bytes(&GpuInfo::Unknown { devices: vec![] }).is_none());
+  }
+
+  #[test]
+  fn aggregate_vram_multi_ignores_zero_byte_device() {
+    // Regression: a Vulkan/RADV duplicate of a ROCm card can report 0
+    // VRAM. It must not win the min() and collapse the host to 0 (which
+    // made the init smoke probe report a false OOM on NVIDIA+AMD hosts).
+    let info = GpuInfo::Multi {
+      devices: vec![
+        GpuDevice {
+          name: "NVIDIA GeForce RTX 3080".into(),
+          backend: "nvidia".into(),
+          total_memory_bytes: 10 * 1_024 * 1_024 * 1_024,
+          ..Default::default()
+        },
+        GpuDevice {
+          name: "AMD Radeon AI PRO R9700".into(),
+          backend: "amd".into(),
+          total_memory_bytes: 32 * 1_024 * 1_024 * 1_024,
+          ..Default::default()
+        },
+        GpuDevice {
+          name: "AMD Radeon AI PRO R9700 (RADV GFX1201)".into(),
+          backend: "unknown".into(),
+          total_memory_bytes: 0,
+          ..Default::default()
+        },
+      ],
+    };
+    assert_eq!(
+      aggregate_vram_bytes(&info),
+      Some(10 * 1_024 * 1_024 * 1_024)
+    );
+  }
+
+  #[test]
+  fn aggregate_vram_all_zero_is_none_not_some_zero() {
+    // Every device reports 0 → None (CPU-only path), never Some(0).
+    let info = GpuInfo::Multi {
+      devices: vec![GpuDevice {
+        name: "Vulkan0".into(),
+        backend: "unknown".into(),
+        total_memory_bytes: 0,
+        ..Default::default()
+      }],
+    };
+    assert_eq!(aggregate_vram_bytes(&info), None);
   }
 
   #[test]

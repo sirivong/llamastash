@@ -222,9 +222,10 @@ fn gpu_device_count(gpu: &GpuInfo) -> usize {
   match gpu {
     GpuInfo::CpuOnly => 0,
     GpuInfo::AppleMetal { .. } => 1,
-    GpuInfo::Nvidia { devices } | GpuInfo::Amd { devices } | GpuInfo::Unknown { devices } => {
-      devices.len()
-    }
+    GpuInfo::Nvidia { devices }
+    | GpuInfo::Amd { devices }
+    | GpuInfo::Unknown { devices }
+    | GpuInfo::Multi { devices } => devices.len(),
   }
 }
 

@@ -68,6 +68,8 @@ pub struct ManagedRow {
   pub path: PathBuf,
   pub port: u16,
   pub state: SurfaceState,
+  /// Launch device selector (`CUDA0`, `Vulkan1`, etc.) when set.
+  pub device: Option<String>,
   /// Latest per-PID RSS reading in bytes. `None` until the daemon's
   /// per-launch sampler has emitted at least one reading.
   pub rss_bytes: Option<u64>,
@@ -271,6 +273,12 @@ pub struct App {
   /// emits. Populated by [`Self::ingest_status`]; consumed by the
   /// Host info-row pane.
   pub host_metrics: HostMetricsSnapshot,
+  /// Launch device catalog from the daemon's `status.device_catalog` —
+  /// the exact `--device` selectors the picker may offer, each tagged
+  /// with the owning binary. Sourced from every configured binary's
+  /// `--list-devices`. Populated by [`Self::ingest_status`]; consumed
+  /// by the launch picker's Device row.
+  pub device_catalog: Vec<crate::launch::list_devices::LaunchDevice>,
   /// Set when the user presses `q` so the event loop can exit.
   pub should_exit: bool,
   /// Whether the modal help overlay is visible. Bound to `?`.
@@ -407,6 +415,7 @@ impl App {
       daemon_connected: false,
       daemon_info: DaemonInfo::default(),
       host_metrics: HostMetricsSnapshot::default(),
+      device_catalog: Vec::new(),
       should_exit: false,
       show_help: false,
       help_scroll: 0,
@@ -789,6 +798,15 @@ impl App {
         }
       }
     }
+    if let Some(catalog) = body.get("device_catalog") {
+      if !catalog.is_null() {
+        if let Ok(devices) =
+          serde_json::from_value::<Vec<crate::launch::list_devices::LaunchDevice>>(catalog.clone())
+        {
+          self.device_catalog = devices;
+        }
+      }
+    }
   }
 
   /// Apply a `last_params_list` IPC response. The TUI uses the
@@ -896,6 +914,7 @@ impl App {
         path: m.path.clone(),
         port: m.port,
         state: m.state,
+        device: m.device.clone(),
       })
       .collect();
     let mut all = build_rows(RowInputs {
@@ -1163,6 +1182,50 @@ impl App {
     self.focused_managed()
   }
 
+  /// The launch-device catalog entry for the focused running model,
+  /// but only when that model's binary differs from the daemon's
+  /// default `server_path`. The Daemon panel's `server` row uses this
+  /// to swap in (and highlight) the binary the hovered launch is
+  /// actually running on, so in multi-binary setups the operator can
+  /// see which backend each model uses as the cursor moves.
+  ///
+  /// Returns `None` when the cursor isn't on a running model, when the
+  /// row's `--device` selector has no catalog entry (stale/un-probed),
+  /// or when the resolved binary is the default — in every one of
+  /// those cases the row falls back to the plain default-path render.
+  /// Whether the host exposes more than one selectable GPU device.
+  /// Drives the multi-GPU UI gates: the launch picker's `device` row
+  /// and the model list's `Device` column only appear when `true`, so
+  /// single-GPU / CPU-only users aren't shown a control that can never
+  /// carry a choice.
+  pub fn multi_device(&self) -> bool {
+    self.device_catalog.len() > 1
+  }
+
+  pub fn focused_override_device(&self) -> Option<&crate::launch::list_devices::LaunchDevice> {
+    let rows = self.rendered_rows();
+    let selector = match rows.get(self.list_cursor) {
+      Some(ListRow::Model {
+        device: Some(d), ..
+      }) => d.clone(),
+      _ => return None,
+    };
+    let entry = self
+      .device_catalog
+      .iter()
+      .find(|e| e.selector == selector)?;
+    let is_default = self
+      .daemon_info
+      .server_path
+      .as_deref()
+      .is_some_and(|def| entry.binary == Path::new(def));
+    if is_default {
+      None
+    } else {
+      Some(entry)
+    }
+  }
+
   /// Build a [`LaunchPickerState`] seeded for the currently
   /// focused model — pure, no side effects. Returns `None` when
   /// the cursor sits on a header (no model focused). Both
@@ -1196,6 +1259,11 @@ impl App {
       }
     }
     state.active_instances = active_count;
+    // Populate the Device row from the launch device catalog — the
+    // exact `--device` selectors the daemon's configured binaries
+    // accept (sourced from their `--list-devices`). The picker cycles
+    // this flat list and stores the chosen selector verbatim.
+    state.device_catalog = self.device_catalog.clone();
     Some(state)
   }
 
@@ -1611,6 +1679,7 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
     // know to hide the endpoint slot for these rows.
     port: 0,
     state: SurfaceState::External,
+    device: None,
     rss_bytes: None,
     cpu_pct: None,
   })
@@ -1659,11 +1728,18 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     .get("latest_cpu_pct")
     .and_then(Value::as_f64)
     .map(|n| n as f32);
+  let device = row
+    .get("params")
+    .and_then(|p| p.get("knobs"))
+    .and_then(|k| k.get("device"))
+    .and_then(Value::as_str)
+    .map(|s| s.to_string());
   Some(ManagedRow {
     launch_id,
     path,
     port,
     state,
+    device,
     rss_bytes,
     cpu_pct,
   })
@@ -1674,6 +1750,7 @@ mod tests {
   use super::*;
   use crate::discovery::ModelSource;
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+  use crate::launch::list_devices::LaunchDevice;
   use serde_json::json;
 
   fn fake(path: &str, parent: &str) -> DiscoveredModel {
@@ -2031,6 +2108,7 @@ mod tests {
       path: m.path.clone(),
       port: 41100,
       state: SurfaceState::Ready,
+      device: None,
       rss_bytes: None,
       cpu_pct: None,
     }];
@@ -2047,6 +2125,83 @@ mod tests {
       "drill still focuses the right pane (read-only running view)"
     );
     assert_eq!(app.right_tab, RightTab::Settings);
+  }
+
+  fn launch_device(selector: &str, backend: &str, binary: &str) -> LaunchDevice {
+    LaunchDevice {
+      selector: selector.into(),
+      backend: backend.into(),
+      name: "Test GPU".into(),
+      binary: PathBuf::from(binary),
+      total_mib: Some(24576),
+      free_mib: Some(24000),
+    }
+  }
+
+  /// Build an app whose cursor sits on a running model bound to
+  /// `device`, with `server_path` as the daemon's default binary.
+  fn running_on_device_app(device: Option<&str>, server_path: &str) -> App {
+    let m = fake("/m/a.gguf", "/m");
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![m.clone()];
+    app.managed = vec![ManagedRow {
+      launch_id: "L1".into(),
+      path: m.path.clone(),
+      port: 41100,
+      state: SurfaceState::Ready,
+      device: device.map(String::from),
+      rss_bytes: None,
+      cpu_pct: None,
+    }];
+    app.daemon_info = DaemonInfo {
+      server_path: Some(server_path.into()),
+      ..Default::default()
+    };
+    // Rows: [TableHeader, Header(▶ Running), Model(running)] — the
+    // running row lands at index 2.
+    app.list_cursor = 2;
+    app
+  }
+
+  #[test]
+  fn focused_override_device_returns_entry_for_non_default_binary() {
+    let mut app = running_on_device_app(Some("CUDA1"), "/usr/bin/llama-server");
+    app.device_catalog = vec![
+      launch_device("CUDA0", "CUDA", "/usr/bin/llama-server"),
+      launch_device("CUDA1", "CUDA", "/opt/cuda/llama-server"),
+    ];
+    assert!(app.focused_managed().is_some(), "cursor must be on the run");
+    let dev = app
+      .focused_override_device()
+      .expect("non-default binary must surface as an override");
+    assert_eq!(dev.binary, PathBuf::from("/opt/cuda/llama-server"));
+  }
+
+  #[test]
+  fn focused_override_device_none_when_binary_is_default() {
+    // The hovered launch runs on the *default* binary's own device —
+    // no override, so the server row stays on the plain default render.
+    let mut app = running_on_device_app(Some("CUDA0"), "/usr/bin/llama-server");
+    app.device_catalog = vec![launch_device("CUDA0", "CUDA", "/usr/bin/llama-server")];
+    assert!(app.focused_override_device().is_none());
+  }
+
+  #[test]
+  fn focused_override_device_none_when_row_not_running() {
+    // No device selector on the row (idle / auto launch) — nothing to
+    // resolve against the catalog.
+    let mut app = running_on_device_app(None, "/usr/bin/llama-server");
+    app.device_catalog = vec![launch_device("CUDA1", "CUDA", "/opt/cuda/llama-server")];
+    assert!(app.focused_override_device().is_none());
+  }
+
+  #[test]
+  fn focused_override_device_none_when_selector_absent_from_catalog() {
+    // Stale persisted selector (catalog re-probed without it) must not
+    // panic or fabricate an override.
+    let mut app = running_on_device_app(Some("ROCm0"), "/usr/bin/llama-server");
+    app.device_catalog = vec![launch_device("CUDA0", "CUDA", "/usr/bin/llama-server")];
+    assert!(app.focused_override_device().is_none());
   }
 
   #[test]
@@ -2140,6 +2295,7 @@ mod tests {
       path: PathBuf::from(path),
       port,
       state,
+      device: None,
       rss_bytes: None,
       cpu_pct: None,
     }

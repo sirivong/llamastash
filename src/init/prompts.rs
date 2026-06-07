@@ -316,6 +316,63 @@ fn format_gpu_segment(hw: &HardwareSnapshot) -> String {
       };
       format!("{name_segment}{mem}")
     }
+    GpuInfo::Multi { devices } => {
+      // Show per-backend breakdown
+      let mut nvidia = vec![];
+      let mut amd = vec![];
+      let mut unknown = vec![];
+      for d in devices {
+        match d.backend.as_str() {
+          "nvidia" => nvidia.push(d),
+          "amd" => amd.push(d),
+          _ => unknown.push(d),
+        }
+      }
+      let parts: Vec<String> = vec![
+        if !nvidia.is_empty() {
+          let names = nvidia
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+          Some(format!("NVIDIA · {}", names))
+        } else {
+          None
+        },
+        if !amd.is_empty() {
+          let names = amd
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+          Some(format!("AMD · {}", names))
+        } else {
+          None
+        },
+        if !unknown.is_empty() {
+          let names = unknown
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+          Some(format!("Unknown · {}", names))
+        } else {
+          None
+        },
+      ]
+      .into_iter()
+      .flatten()
+      .collect();
+      let mem = hw
+        .vram_bytes
+        .map(|b| format!(" · {} VRAM", format_gib(b)))
+        .unwrap_or_default();
+      if parts.is_empty() {
+        "(none)".to_string()
+      } else {
+        format!("{}{}", parts.join(" + "), mem)
+      }
+    }
   }
 }
 

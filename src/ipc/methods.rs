@@ -172,6 +172,21 @@ pub struct LaunchEnv {
   /// on the `LayerLabel::ArchDefault` layer of the resolver, between
   /// `LastUsed` and `BuiltIn`. Empty map = no escape-hatch layer.
   pub arch_defaults: std::collections::BTreeMap<String, crate::config::TypedKnobs>,
+  /// Launch device catalog: the union of every configured binary's
+  /// `--list-devices` output, deduped by selector (see
+  /// [`crate::launch::list_devices`]). `start_model` looks the chosen
+  /// `knobs.device` selector up here to decide *which* binary to spawn;
+  /// `status` projects it so the TUI device picker offers exactly the
+  /// selectors `--device` will accept.
+  ///
+  /// Behind a shared `RwLock` because it is populated by a background
+  /// task *after* the daemon binds its listeners — probing each binary
+  /// with `--list-devices` is best-effort I/O we never want on the
+  /// startup critical path (the detached-start parent only waits a few
+  /// seconds for `runtime.json`). Reads start empty and flip to the
+  /// full set once the probe completes; a launch in that brief window
+  /// finds no selector match and falls back to the default `binary`.
+  pub device_catalog: Arc<RwLock<Vec<crate::launch::list_devices::LaunchDevice>>>,
 }
 
 impl MethodContext {
@@ -494,11 +509,24 @@ async fn status_response(ctx: &MethodContext) -> Value {
   // }
   // ```
   let proxy = ctx.proxy_status.as_ref().map(project_proxy_status);
+  // Launch device catalog — the exact `--device` selectors the TUI
+  // picker may offer, each tagged with the binary that owns it.
+  // Sourced from every configured binary's `--list-devices` (not from
+  // vendor tools), so what the picker shows is precisely what
+  // `llama-server` will accept. Empty when no binary is configured.
+  let device_catalog = match ctx.launch.as_ref() {
+    Some(env) => {
+      let catalog_snap = env.device_catalog.read().await;
+      serde_json::to_value(&*catalog_snap).unwrap_or(Value::Null)
+    }
+    None => Value::Null,
+  };
   let mut body = json!({
     "models": models,
     "external": external,
     "gpu": gpu,
     "host": host,
+    "device_catalog": device_catalog,
     "daemon": {
       "pid": std::process::id(),
       "uptime_seconds": ctx.started_at.elapsed().as_secs(),
@@ -930,6 +958,13 @@ pub(crate) struct StartParams {
   /// doesn't model. Appended after the resolved knobs.
   #[serde(default)]
   pub(crate) extras: Vec<String>,
+  /// Optional path to a multimodal projector (mmproj) file. When
+  /// `None`, the daemon auto-detects by scanning the parent
+  /// directory of the model for a `mmproj-<stem>.gguf` companion.
+  /// Set to `Some(path)` to override the auto-detection, or leave
+  /// as `None` to let the daemon find it automatically.
+  #[serde(default)]
+  pub(crate) mmproj_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -1142,6 +1177,18 @@ pub(crate) async fn start_model_inner(
   let mut launch_params = LaunchParams::new(parsed.model_path.clone(), mode);
   launch_params.port = Some(port);
   launch_params.extras = parsed.extras.into_iter().map(OsString::from).collect();
+  // Resolve the multimodal projector: an explicit `mmproj_path` wins;
+  // otherwise auto-detect a companion next to the model — unless the
+  // caller is already managing the projector through `extras`
+  // (`--mmproj` to pin a path, `--no-mmproj` to force text-only), in
+  // which case auto-detection would only emit a redundant second flag.
+  launch_params.mmproj_path = parsed.mmproj_path.clone().or_else(|| {
+    if extras_manage_mmproj(&launch_params.extras) {
+      None
+    } else {
+      crate::discovery::scanner::find_mmproj(&parsed.model_path)
+    }
+  });
 
   // Merge the caller's top-level `ctx` and `reasoning` into the
   // User-layer typed knobs so they participate in the resolver chain
@@ -1198,6 +1245,10 @@ pub(crate) async fn start_model_inner(
   launch_params.ctx = resolved.knobs.ctx;
   launch_params.reasoning = resolved.knobs.reasoning.unwrap_or(false);
   launch_params.knobs = resolved.knobs;
+  // Leave `device` exactly as the resolver chain set it. When no layer
+  // selected one it stays `None`, so `compose()` emits no `--device`
+  // and `llama-server` keeps its default (auto-select / split across
+  // every visible GPU) — the documented backwards-compatible behavior.
 
   // VRAM-aware ctx auto-fit. When every resolver layer left ctx
   // unset, the spawn would otherwise rely on llama.cpp's `--fit`,
@@ -1263,9 +1314,45 @@ pub(crate) async fn start_model_inner(
   let total_weight_bytes = launch_total_bytes(ctx, &launch_params.model_path).await;
   let scaled_probe = env.probe.scale_for_model(total_weight_bytes);
 
+  // Pick the binary that owns the chosen `--device` selector. The
+  // selector (`Vulkan0`, `CUDA0`, …) came from a specific binary's
+  // `--list-devices`, so we must spawn *that* binary or the selector
+  // is invalid. Unset / empty device falls back to the default binary
+  // with no `--device`.
+  let selector = launch_params
+    .knobs
+    .device
+    .as_deref()
+    .filter(|s| !s.is_empty())
+    .map(str::to_string);
+  let launch_binary = match selector {
+    Some(sel) => {
+      let owning_binary = {
+        let catalog = env.device_catalog.read().await;
+        catalog
+          .iter()
+          .find(|d| d.selector == sel)
+          .map(|d| d.binary.clone())
+      };
+      owning_binary.unwrap_or_else(|| {
+        // Stale persisted selector or the catalog probe failed. Drop
+        // the selector so `compose()` doesn't emit an invalid
+        // `--device` the default binary would reject, and spawn the
+        // default binary with auto-select.
+        log::warn!(
+          "device selector {sel:?} not in launch catalog; dropping it and spawning default binary {}",
+          env.binary.display()
+        );
+        launch_params.knobs.device = None;
+        env.binary.clone()
+      })
+    }
+    None => env.binary.clone(),
+  };
+
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
-    binary: env.binary.clone(),
+    binary: launch_binary,
     params: launch_params.clone(),
     port,
     mode,
@@ -1322,12 +1409,13 @@ pub(crate) async fn start_model_inner(
   // Loading → Ready transition). We poll because ManagedModel
   // doesn't expose a transition channel yet.
   //
-  // Persist the *user-supplied* knob deltas, not the resolved set —
-  // so source chips in the picker stay meaningful (a knob the user
+  // Persist the *user-supplied* knob deltas, not the full resolved set
+  // — so source chips in the picker stay meaningful (a knob the user
   // never touched keeps re-resolving from yaml / built-in / model
   // default instead of being frozen as `(last used)`).
   let mut persist_params = launch_params.clone();
   persist_params.knobs = user_knobs;
+  persist_params.knobs.device = launch_params.knobs.device.clone();
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
@@ -1438,6 +1526,21 @@ fn resolve_model_id_and_arch(
   let id = compute_model_id(path, &header.raw);
   let arch = crate::gguf::metadata::summarise(&header.header).arch;
   Ok((id, arch))
+}
+
+/// Does the caller's `extras` tail already manage the multimodal
+/// projector? `--mmproj <path>` pins a projector and `--no-mmproj`
+/// force-disables it; in either case the daemon must not auto-detect
+/// one too. Matches the flag head in both space form (`--mmproj`) and
+/// equals form (`--mmproj=/path`), case-insensitively. `--no-mmproj-offload`
+/// (offload tuning, projector still on) is left to auto-detect, so the
+/// match is exact rather than a prefix test.
+fn extras_manage_mmproj(extras: &[OsString]) -> bool {
+  extras.iter().any(|e| {
+    let lossy = e.to_string_lossy();
+    let head = lossy.split('=').next().unwrap_or(&lossy);
+    head.eq_ignore_ascii_case("--mmproj") || head.eq_ignore_ascii_case("--no-mmproj")
+  })
 }
 
 /// Total on-disk weight bytes for the model the launch handler is
@@ -1709,6 +1812,27 @@ mod tests {
 
   fn ctx() -> MethodContext {
     MethodContext::new(ShutdownToken::new())
+  }
+
+  #[test]
+  fn extras_manage_mmproj_detects_explicit_projector_flags() {
+    let pin = vec![OsString::from("--mmproj"), OsString::from("/m/p.gguf")];
+    assert!(extras_manage_mmproj(&pin), "space-form --mmproj");
+    let pin_eq = vec![OsString::from("--MMPROJ=/m/p.gguf")];
+    assert!(
+      extras_manage_mmproj(&pin_eq),
+      "equals-form, case-insensitive"
+    );
+    let disable = vec![OsString::from("--no-mmproj")];
+    assert!(extras_manage_mmproj(&disable), "--no-mmproj force-disable");
+    // Offload tuning leaves the projector on → auto-detect still runs.
+    let offload = vec![OsString::from("--no-mmproj-offload")];
+    assert!(
+      !extras_manage_mmproj(&offload),
+      "--no-mmproj-offload is not projector management"
+    );
+    let unrelated = vec![OsString::from("--threads"), OsString::from("8")];
+    assert!(!extras_manage_mmproj(&unrelated));
   }
 
   #[tokio::test]

@@ -341,6 +341,10 @@ impl ManagedModel {
 /// it stamps the `ready_at` field and on a probe timeout flips to
 /// `Error{cause}`.
 pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
+  // `input.params.knobs.device` already holds a real `--device`
+  // selector (`Vulkan0`, `CUDA0`, …) resolved against `input.binary`'s
+  // own `--list-devices`, so compose emits it verbatim — no backend
+  // formatting needed here.
   let argv = compose(&input.params, input.port);
   let mut cmd = Command::new(&input.binary);
   cmd

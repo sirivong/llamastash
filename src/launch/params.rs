@@ -166,6 +166,13 @@ pub struct LaunchParams {
   /// documented on the Settings tab.
   #[serde(default)]
   pub extras: Vec<OsString>,
+  /// Optional path to a multimodal projector (mmproj) file. When set,
+  /// the supervisor appends `--mmproj <path>` to the llama-server
+  /// argv. The file is auto-detected by scanning the parent directory
+  /// of the model for a `mmproj-<stem>.gguf` or `mmproj_<stem>.gguf`
+  /// companion.
+  #[serde(default)]
+  pub mmproj_path: Option<PathBuf>,
 }
 
 impl LaunchParams {
@@ -178,6 +185,7 @@ impl LaunchParams {
       reasoning: false,
       knobs: TypedKnobs::default(),
       extras: Vec::new(),
+      mmproj_path: None,
     }
   }
 }
@@ -192,11 +200,19 @@ impl LaunchParams {
 /// chips, but `compose` emits them inline (ctx → `-c <N>`, reasoning
 /// → `--jinja --reasoning-format deepseek`) so their argv order and
 /// bundle shape stay distinct from the other knobs.
+///
+/// `Device` is also skipped here: `knobs.device` holds a real
+/// `llama-server` device selector (`Vulkan0`, `CUDA0`, `ROCm0`) and
+/// `compose` emits it exactly once as `--device <selector>`. Emitting
+/// it here too would put a *second* `--device` on the argv;
+/// llama-server validates each `--device` token as it parses, so a
+/// stray/duplicate value makes it bail with `invalid device: …` before
+/// last-occurrence-wins ever applies.
 pub fn argvify(knobs: &TypedKnobs) -> Vec<OsString> {
   let mut out: Vec<OsString> = Vec::new();
   for spec in knob_specs() {
     match spec.field {
-      KnobField::Ctx | KnobField::Reasoning => continue,
+      KnobField::Ctx | KnobField::Reasoning | KnobField::Device => continue,
       KnobField::NGpuLayers => push_u32(&mut out, spec.canonical, knobs.n_gpu_layers),
       KnobField::NCpuMoe => push_u32(&mut out, spec.canonical, knobs.n_cpu_moe),
       KnobField::Threads => push_u32(&mut out, spec.canonical, knobs.threads),
@@ -216,7 +232,7 @@ pub fn argvify(knobs: &TypedKnobs) -> Vec<OsString> {
     debug_assert!(
       matches!(
         spec.kind,
-        ValueKind::U32 | ValueKind::F32 | ValueKind::Bool | ValueKind::KvCacheType
+        ValueKind::U32 | ValueKind::F32 | ValueKind::Bool | ValueKind::KvCacheType | ValueKind::Str
       ),
       "ValueKind exhaustiveness drift"
     );
@@ -415,6 +431,7 @@ fn try_inherit_field(into: &mut TypedKnobs, from: &TypedKnobs, field: KnobField)
     KnobField::UbatchSize => copy_some(&mut into.ubatch_size, from.ubatch_size),
     KnobField::RopeFreqScale => copy_some(&mut into.rope_freq_scale, from.rope_freq_scale),
     KnobField::Keep => copy_some(&mut into.keep, from.keep),
+    KnobField::Device => copy_some_clone(&mut into.device, &from.device),
   }
 }
 
@@ -442,8 +459,15 @@ fn copy_some_clone(into: &mut Option<String>, from: &Option<String>) -> bool {
 /// `llama-server`. Caller passes the resolved listening port
 /// separately because allocation happens in the supervisor, not in
 /// `LaunchParams`.
+///
+/// `params.knobs.device`, when set, is a real `llama-server` device
+/// selector (`Vulkan0`, `CUDA0`, `ROCm0`) sourced from that binary's
+/// own `--list-devices` output (see [`crate::launch::list_devices`]).
+/// It is emitted verbatim as a single `--device <selector>` — no index
+/// math, no backend guessing. The caller is responsible for spawning
+/// the matching binary so the selector is valid.
 pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
-  let knob_argv = argvify(&params.knobs);
+  let mut knob_argv = argvify(&params.knobs);
   let mut argv: Vec<OsString> = Vec::with_capacity(16 + knob_argv.len() + params.extras.len());
   argv.push("--host".into());
   argv.push("127.0.0.1".into());
@@ -451,6 +475,10 @@ pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
   argv.push(allocated_port.to_string().into());
   argv.push("-m".into());
   argv.push(params.model_path.clone().into());
+  if let Some(ref mmproj) = params.mmproj_path {
+    argv.push("--mmproj".into());
+    argv.push(mmproj.clone().into());
+  }
   match params.mode {
     LaunchMode::Chat => {}
     LaunchMode::Embedding => argv.push("--embeddings".into()),
@@ -464,6 +492,12 @@ pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
   if let Some(ctx) = params.ctx {
     argv.push("-c".into());
     argv.push(ctx.to_string().into());
+  }
+  // Emit the device selector verbatim — exactly once. Empty / unset
+  // means "let llama-server auto-select" (no flag).
+  if let Some(sel) = params.knobs.device.as_deref().filter(|s| !s.is_empty()) {
+    knob_argv.push("--device".into());
+    knob_argv.push(sel.into());
   }
   argv.extend(knob_argv);
   // Defensive strip: refuse to pass loopback-breaking flags even if
@@ -592,6 +626,7 @@ mod tests {
       ubatch_size: Some(512),
       rope_freq_scale: Some(1.0),
       keep: Some(128),
+      device: None,
     };
     let argv = strs(&argvify(&knobs));
     assert_eq!(
@@ -1071,6 +1106,22 @@ mod tests {
   }
 
   #[test]
+  fn compose_emits_mmproj_flag_when_path_set() {
+    let mut p = base_params();
+    p.mmproj_path = Some(PathBuf::from("/m/mmproj-model.gguf"));
+    let argv = strs(&compose(&p, 41100));
+    let i = argv.iter().position(|a| a == "--mmproj").unwrap();
+    assert_eq!(argv[i + 1], "/m/mmproj-model.gguf");
+  }
+
+  #[test]
+  fn compose_omits_mmproj_flag_when_path_not_set() {
+    let p = base_params();
+    let argv = strs(&compose(&p, 41100));
+    assert!(!argv.iter().any(|a| a == "--mmproj"));
+  }
+
+  #[test]
   fn launch_params_serde_round_trip() {
     let mut p = base_params();
     p.knobs.n_gpu_layers = Some(99);
@@ -1078,5 +1129,65 @@ mod tests {
     let json = serde_json::to_string(&p).unwrap();
     let back: LaunchParams = serde_json::from_str(&json).unwrap();
     assert_eq!(back, p);
+  }
+
+  // ---- Device selector tests ----
+
+  /// Collect every `--device` value present in the argv.
+  fn device_values(argv: &[String]) -> Vec<&str> {
+    argv
+      .iter()
+      .enumerate()
+      .filter(|(_, a)| *a == "--device")
+      .flat_map(|(i, _)| argv.get(i + 1).map(|v| v.as_str()))
+      .collect()
+  }
+
+  #[test]
+  fn compose_emits_selector_verbatim_exactly_once() {
+    // `knobs.device` holds a real llama-server selector now. It must be
+    // passed through unchanged and appear exactly once — a duplicate or
+    // a mangled value (`0:0`) makes llama-server bail with
+    // `invalid device`.
+    for sel in ["Vulkan0", "Vulkan1", "CUDA0", "ROCm0"] {
+      let mut p = base_params();
+      p.knobs.device = Some(sel.into());
+      let argv = strs(&compose(&p, 41100));
+      let vals = device_values(&argv);
+      assert_eq!(
+        vals,
+        vec![sel],
+        "selector {sel} must be the only --device value"
+      );
+    }
+  }
+
+  #[test]
+  fn compose_skips_device_when_none() {
+    let p = base_params();
+    assert!(p.knobs.device.is_none());
+    let argv = strs(&compose(&p, 41100));
+    assert!(!argv.iter().any(|a| *a == "--device"));
+  }
+
+  #[test]
+  fn compose_skips_device_when_empty_string() {
+    // Empty selector means "auto-select" — no flag emitted.
+    let mut p = base_params();
+    p.knobs.device = Some(String::new());
+    let argv = strs(&compose(&p, 41100));
+    assert!(!argv.iter().any(|a| *a == "--device"));
+  }
+
+  #[test]
+  fn argvify_never_emits_device() {
+    // The selector belongs to compose, not argvify — otherwise it would
+    // be emitted twice.
+    let knobs = TypedKnobs {
+      device: Some("Vulkan1".into()),
+      ..TypedKnobs::default()
+    };
+    let argv = strs(&argvify(&knobs));
+    assert!(!argv.iter().any(|a| a == "--device"));
   }
 }

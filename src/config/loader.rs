@@ -39,7 +39,22 @@ pub struct Config {
   pub model_paths: Vec<PathBuf>,
   pub disable_default_cache_paths: CachePathsConfig,
   pub port_range: PortRange,
+  /// Single `llama-server` binary. Back-compat with pre-multi-binary
+  /// configs and the `--llama-server` flag / `LLAMASTASH_LLAMA_SERVER`
+  /// env. When `llama_server_paths` is also set, this one is treated
+  /// as the *default* binary (used for auto / no-device launches) and
+  /// is prepended to the probe set.
   pub llama_server_path: Option<PathBuf>,
+  /// Additional `llama-server` binaries to probe for devices. Each is
+  /// queried with `--list-devices` at daemon start; the union of their
+  /// devices (deduped by exact selector, first-listed wins) becomes
+  /// the launch device catalog. Binaries are **not** labelled by
+  /// backend in config — the backend is inferred from each binary's
+  /// own device names (`Vulkan0`, `CUDA0`, `ROCm0`, …). This lets one
+  /// install offer CUDA / ROCm / Vulkan launches by pointing at the
+  /// matching single-backend builds.
+  #[serde(default)]
+  pub llama_server_paths: Vec<PathBuf>,
   pub keybindings: BTreeMap<String, String>,
   pub disable_scan: bool,
   /// Per-launch health-probe timeout in seconds. Defaults to 120 s,
@@ -254,6 +269,14 @@ pub struct TypedKnobs {
   pub rope_freq_scale: Option<f32>,
   /// Tokens to retain on context shift. Maps to `--keep`.
   pub keep: Option<u32>,
+  /// GPU device to target (`--device`). `None` lets llama-server
+  /// auto-select (the default, which may split across all GPUs on
+  /// Vulkan). When set, the value is a real `llama-server` device
+  /// selector exactly as that binary's `--list-devices` reports it
+  /// (`"Vulkan0"`, `"CUDA0"`, `"ROCm0"`) — sourced from the launch
+  /// device catalog, never a bare index. The daemon spawns the binary
+  /// that owns the selector (see [`crate::launch::list_devices`]).
+  pub device: Option<String>,
 }
 
 impl Default for Config {
@@ -265,6 +288,7 @@ impl Default for Config {
       disable_default_cache_paths: CachePathsConfig::default(),
       port_range: PortRange::default(),
       llama_server_path: None,
+      llama_server_paths: Vec::new(),
       keybindings: BTreeMap::new(),
       disable_scan: false,
       probe_timeout_secs: 120,
@@ -781,6 +805,43 @@ arch_defaults:
   fn arch_defaults_absent_defaults_to_empty_map() {
     let cfg = Config::default();
     assert!(cfg.arch_defaults.is_empty());
+  }
+
+  #[test]
+  fn llama_server_paths_round_trip_through_yaml() {
+    let dir = temp_test_dir("llama-server-paths");
+    let path = dir.join("config.yaml");
+    fs::write(
+      &path,
+      r"
+llama_server_path: /opt/builds/vulkan/llama-server
+llama_server_paths:
+  - /opt/builds/cuda/llama-server
+  - /opt/builds/rocm/llama-server
+",
+    )
+    .expect("config fixture should be written");
+
+    let loaded = load_config_from_path(&path);
+
+    assert!(loaded.warning.is_none(), "valid config should not warn");
+    assert_eq!(
+      loaded.config.llama_server_path,
+      Some(PathBuf::from("/opt/builds/vulkan/llama-server"))
+    );
+    assert_eq!(
+      loaded.config.llama_server_paths,
+      vec![
+        PathBuf::from("/opt/builds/cuda/llama-server"),
+        PathBuf::from("/opt/builds/rocm/llama-server"),
+      ]
+    );
+  }
+
+  #[test]
+  fn llama_server_paths_absent_defaults_to_empty_vec() {
+    let cfg = Config::default();
+    assert!(cfg.llama_server_paths.is_empty());
   }
 
   #[test]

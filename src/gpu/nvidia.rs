@@ -12,12 +12,12 @@
 
 use std::process::Command;
 
-use super::{run_with_timeout, GpuDevice, GpuInfo};
+use super::{run_with_timeout, GpuDevice};
 
 /// Run `nvidia-smi`. Returns `None` if the binary isn't on `$PATH`,
 /// its exit status is non-zero (no NVIDIA driver loaded), or the
 /// invocation exceeds the per-probe wall-clock deadline.
-pub fn probe() -> Option<GpuInfo> {
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   let mut cmd = Command::new("nvidia-smi");
   cmd.args([
     "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
@@ -32,11 +32,39 @@ pub fn probe() -> Option<GpuInfo> {
   if devices.is_empty() {
     return None;
   }
-  Some(GpuInfo::Nvidia { devices })
+  // Also grab PCI bus IDs — needed for deduplication across backends.
+  let mut pci_cmd = Command::new("nvidia-smi");
+  pci_cmd.args(["--query-gpu=pci.bus_id", "--format=csv,noheader"]);
+  let pci_ids = run_with_timeout(pci_cmd)
+    .filter(|o| o.status.success())
+    .and_then(|o| String::from_utf8(o.stdout).ok())
+    .map(|s| parse_pci_ids(&s))
+    .unwrap_or_default();
+  Some(
+    devices
+      .into_iter()
+      .enumerate()
+      .map(|(i, mut d)| {
+        d.device_id = pci_ids.get(i).cloned();
+        d
+      })
+      .collect(),
+  )
+}
+
+/// Parse `nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader`
+/// output. Each row is a PCI bus address like `00000000:0F:00.0`.
+/// Normalized to canonical `00000000:0f:00.0` (8-char, lowercase).
+fn parse_pci_ids(stdout: &str) -> Vec<String> {
+  stdout
+    .lines()
+    .filter_map(|l| crate::gpu::normalize_pci(l.trim()))
+    .collect()
 }
 
 /// Parse the `--format=csv,noheader,nounits` output. Exposed so unit
 /// tests can pin the format without spawning a subprocess.
+/// Each device is tagged with the "nvidia" backend.
 pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
   let mut out = Vec::new();
   for line in stdout.lines() {
@@ -58,6 +86,7 @@ pub(crate) fn parse(stdout: &str) -> Vec<GpuDevice> {
     let temperature_c = parts.get(4).and_then(|s| parse_optional_f32(s));
     out.push(GpuDevice {
       name,
+      backend: "nvidia".into(),
       total_memory_bytes: total_mib.saturating_mul(1024 * 1024),
       used_memory_bytes: used_mib.saturating_mul(1024 * 1024),
       utilization_pct,

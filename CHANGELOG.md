@@ -7,6 +7,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 ### Added
 
 - `n_cpu_moe` launch knob → `--n-cpu-moe` (`-ncmoe`). Keeps the MoE expert weights of the first N layers on CPU while the rest offload to GPU — the counterpart to `n_gpu_layers` for MoE models that don't fit VRAM. Available everywhere the other typed knobs are: the Settings-tab editor, `start` CLI tail args, `arch_defaults` YAML, and persisted `last_params`.
+- Multi-GPU device selection: the new `--device` / `-d` launch knob pins a model to one card instead of letting `llama-server` split it across every visible GPU. The TUI picker cycles the devices that `llama-server --list-devices` reports (`CUDA0`, `ROCm0`, `Vulkan0`, …); the default emits no flag (auto-select). The device row and the model list's `Device` column appear only when more than one GPU is detected, so single-GPU users see no change. Mixed-vendor hosts surface every card in host stats, with per-device rows in `status --json`. (#14)
 
 ## [0.0.2] — 2026-06-02
 

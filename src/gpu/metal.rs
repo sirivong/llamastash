@@ -16,10 +16,10 @@ use std::process::Command;
 #[cfg(any(target_os = "macos", test))]
 use serde_json::Value;
 
-use super::GpuInfo;
+use super::GpuDevice;
 
 #[cfg(target_os = "macos")]
-pub fn probe() -> Option<GpuInfo> {
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   let mut cmd = Command::new("system_profiler");
   cmd.args(["SPDisplaysDataType", "-json"]);
   let output = super::run_with_timeout(cmd)?;
@@ -27,12 +27,20 @@ pub fn probe() -> Option<GpuInfo> {
     return None;
   }
   let stdout = String::from_utf8(output.stdout).ok()?;
-  let total_memory_bytes = parse(&stdout)?;
-  Some(GpuInfo::AppleMetal { total_memory_bytes })
+  let total_memory_bytes = parse_memory(&stdout)?;
+  // Apple Silicon reports one unified-memory GPU. Tag it for the
+  // multi-backend probe so the host pane knows its backend.
+  Some(vec![GpuDevice {
+    name: "Apple Silicon (unified)".into(),
+    backend: "apple_metal".into(),
+    total_memory_bytes,
+    used_memory_bytes: 0,
+    ..Default::default()
+  }])
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn probe() -> Option<GpuInfo> {
+pub fn probe_devices() -> Option<Vec<GpuDevice>> {
   None
 }
 
@@ -40,7 +48,7 @@ pub fn probe() -> Option<GpuInfo> {
 /// SPDisplaysDataType -json`. Returns `None` on Intel Macs or
 /// malformed JSON. Cross-compile-only on macOS (no Linux caller).
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn parse(stdout: &str) -> Option<u64> {
+pub(crate) fn parse_memory(stdout: &str) -> Option<u64> {
   let v: Value = serde_json::from_str(stdout).ok()?;
   let displays = v.get("SPDisplaysDataType")?.as_array()?;
   for gpu in displays {
@@ -111,7 +119,7 @@ mod tests {
         }
       ]
     }"#;
-    assert_eq!(parse(stdout), Some(16 * 1024 * 1024 * 1024));
+    assert_eq!(parse_memory(stdout), Some(16 * 1024 * 1024 * 1024));
   }
 
   #[test]
@@ -123,7 +131,7 @@ mod tests {
         }
       ]
     }"#;
-    assert_eq!(parse(stdout), None);
+    assert_eq!(parse_memory(stdout), None);
   }
 
   #[test]
@@ -146,12 +154,12 @@ mod tests {
       ]
     }"#;
     // No VRAM field → falls back to system_total_memory(); just assert Some.
-    assert!(parse(stdout).is_some());
+    assert!(parse_memory(stdout).is_some());
   }
 
   #[test]
   fn missing_displays_returns_none() {
-    assert_eq!(parse(r#"{"other": []}"#), None);
-    assert_eq!(parse(r#"{"SPDisplaysDataType": []}"#), None);
+    assert_eq!(parse_memory(r#"{"other": []}"#), None);
+    assert_eq!(parse_memory(r#"{"SPDisplaysDataType": []}"#), None);
   }
 }

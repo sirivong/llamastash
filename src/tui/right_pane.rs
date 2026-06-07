@@ -673,6 +673,7 @@ mod tests {
       path: PathBuf::from(format!("/m/{name}.gguf")),
       port: 41100,
       state: SurfaceState::Ready,
+      device: None,
       rss_bytes: rss,
       cpu_pct: cpu,
     }

@@ -40,6 +40,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       // is actually pinned to a real number.
       let resolved_ctx = last.and_then(|p| p.ctx).or(persisted_knobs.ctx);
       for spec in knob_specs() {
+        // Match the editable form: no device row on single-GPU hosts.
+        if spec.field == KnobField::Device && !app.multi_device() {
+          continue;
+        }
         let value = match spec.field {
           KnobField::Ctx => resolved_ctx
             .map(|v| v.to_string())
@@ -145,6 +149,12 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   // the value; the chip names the layer that would supply it.
   for spec in knob_specs() {
     let field = spec.field;
+    // The device row is hidden on single-GPU / CPU-only hosts so the
+    // editor isn't cluttered with a control that can only hold
+    // `default`. Navigation skips it too (see `field_visible`).
+    if !picker_view.field_visible(PickerField::Knob(field)) {
+      continue;
+    }
     let focused = row_for(PickerField::Knob(field));
     if focused {
       focused_line = Some(lines.len() as u16);
@@ -303,6 +313,7 @@ fn knob_label(field: KnobField) -> &'static str {
     KnobField::UbatchSize => "ubatch_size",
     KnobField::RopeFreqScale => "rope_freq_scale",
     KnobField::Keep => "keep",
+    KnobField::Device => "device",
   }
 }
 
@@ -361,6 +372,12 @@ fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobFie
     KnobField::FlashAttn => bool_label(knobs.flash_attn),
     KnobField::Mlock => bool_label(knobs.mlock),
     KnobField::NoMmap => bool_label(knobs.no_mmap),
+    KnobField::Device => knobs
+      .device
+      .as_deref()
+      .filter(|v| !v.is_empty())
+      .map(str::to_string)
+      .unwrap_or_else(|| "default".into()),
   }
 }
 
@@ -392,6 +409,7 @@ fn format_knob_value(state: &LaunchPickerState, field: KnobField) -> String {
     KnobField::CacheTypeK | KnobField::CacheTypeV => state
       .effective_str(field)
       .unwrap_or_else(|| "default".into()),
+    KnobField::Device => state.device_value_display(),
     KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
       match state.effective_bool(field) {
         Some(true) => "on".into(),

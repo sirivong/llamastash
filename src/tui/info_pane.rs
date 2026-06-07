@@ -123,6 +123,31 @@ fn parse_port_from_url(url: &str) -> Option<u16> {
 }
 
 fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
+  // When the cursor sits on a model running on a *non-default*
+  // `llama-server` binary, swap the row to that binary and paint it in
+  // the success colour so it's obvious the hovered launch is on a
+  // different backend than the daemon's default server. Multi-binary
+  // setups point CUDA / ROCm / Vulkan launches at separate builds, so
+  // moving the cursor lets the operator see which one each model uses.
+  if let Some(dev) = app.focused_override_device() {
+    // The backend tag comes from the catalog entry's own selector
+    // prefix (the hovered launch's binary), not `flavor_label` — that
+    // helper reports the *default* server's host-derived backend, which
+    // would mislabel an override build on a mixed-vendor host.
+    let flavor_chunk = format!(" ({})", dev.backend.to_lowercase());
+    let path = dev.binary.display().to_string();
+    let path_budget = budget.saturating_sub(flavor_chunk.width());
+    let path_truncated = ellipsise(&path, path_budget);
+    let path_style = palette
+      .success_style()
+      .add_modifier(ratatui::style::Modifier::BOLD);
+    return Line::from(vec![
+      Span::styled(LABEL_SERVER, palette.label_style()),
+      Span::styled(path_truncated, path_style),
+      Span::styled(flavor_chunk, palette.success_style()),
+    ]);
+  }
+
   // When the daemon hasn't resolved a `llama-server` binary, point
   // the user at the override knobs instead of a bare `—` — they
   // can install llama.cpp or set LLAMASTASH_LLAMA_SERVER / pass
@@ -263,7 +288,7 @@ fn running_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a
 fn flavor_label(app: &App) -> Option<&'static str> {
   use crate::daemon::host_metrics::GpuFlavor;
   match app.host_metrics.flavor() {
-    GpuFlavor::Nvidia => Some("cuda"),
+    GpuFlavor::Nvidia | GpuFlavor::Multi => Some("cuda"),
     GpuFlavor::Amd => Some(if cfg!(target_os = "windows") {
       "vulkan"
     } else {
@@ -335,6 +360,7 @@ mod tests {
   use crate::daemon::host_metrics::HostMetricsSnapshot;
   use crate::discovery::{DiscoveredModel, ModelSource};
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
+  use crate::launch::list_devices::LaunchDevice;
   use crate::tui::app::{App, AppOptions, DaemonInfo, ManagedRow};
   use crate::tui::status_icons::SurfaceState;
   use ratatui::backend::TestBackend;
@@ -370,6 +396,7 @@ mod tests {
       path: PathBuf::from(path),
       port,
       state,
+      device: None,
       rss_bytes: Some(4_200_000_000),
       cpu_pct: Some(312.0),
     }
@@ -584,6 +611,72 @@ mod tests {
     assert!(
       running_row.contains("5 ("),
       "expected `5 (` count prefix even on overflow, got: {running_row:?}"
+    );
+  }
+
+  #[test]
+  fn server_row_swaps_to_override_binary_for_focused_running_model() {
+    // Cursor on a model running on a non-default binary: the server
+    // row shows that binary (not the daemon default) plus the device's
+    // own backend tag, so the operator can see the hovered launch is on
+    // a different backend.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model("/m/a.gguf", "/m")];
+    app.managed = vec![ManagedRow {
+      launch_id: "L1".into(),
+      path: PathBuf::from("/m/a.gguf"),
+      port: 41100,
+      state: SurfaceState::Ready,
+      device: Some("CUDA1".into()),
+      rss_bytes: None,
+      cpu_pct: None,
+    }];
+    app.daemon_info = DaemonInfo {
+      server_path: Some("/usr/bin/llama-server".into()),
+      ..Default::default()
+    };
+    app.device_catalog = vec![LaunchDevice {
+      selector: "CUDA1".into(),
+      backend: "CUDA".into(),
+      name: "Test GPU".into(),
+      binary: PathBuf::from("/opt/cuda/llama-server"),
+      total_mib: Some(24576),
+      free_mib: Some(24000),
+    }];
+    // Rows: [TableHeader, Header(▶ Running), Model] — running row at 2.
+    app.list_cursor = 2;
+    let rows = render_lines(&app);
+    let server_row = rows.iter().find(|r| r.contains("server")).unwrap();
+    assert!(
+      server_row.contains("/opt/cuda/llama-server"),
+      "expected override binary path, got: {server_row:?}"
+    );
+    assert!(
+      server_row.contains("(cuda)"),
+      "expected device-derived backend tag, got: {server_row:?}"
+    );
+    assert!(
+      !server_row.contains("/usr/bin/llama-server"),
+      "default path must not appear when an override is in effect: {server_row:?}"
+    );
+  }
+
+  #[test]
+  fn server_row_keeps_default_path_when_no_override() {
+    // Cursor on a header (no focused model) — the row renders the
+    // daemon's default binary, never an override.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model("/m/a.gguf", "/m")];
+    app.daemon_info = DaemonInfo {
+      server_path: Some("/usr/bin/llama-server".into()),
+      ..Default::default()
+    };
+    app.list_cursor = 0;
+    let rows = render_lines(&app);
+    let server_row = rows.iter().find(|r| r.contains("server")).unwrap();
+    assert!(
+      server_row.contains("/usr/bin/llama-server"),
+      "expected default path with no override, got: {server_row:?}"
     );
   }
 

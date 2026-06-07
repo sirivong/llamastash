@@ -62,6 +62,12 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
   let model_dir = unique_temp("happy-models");
   let model_path = model_dir.join("m.gguf");
   std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
+  // A multimodal projector companion next to the model (issue #13).
+  // The daemon must auto-detect it and thread `--mmproj` into the spawn
+  // params — asserted on the running snapshot below. Folded into this
+  // happy-path test rather than a separate daemon-spawning test to
+  // avoid adding parallel load to this contended integration binary.
+  std::fs::write(model_dir.join("mmproj-m.gguf"), build_minimal_gguf("llama")).unwrap();
   let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
 
   let opts = DaemonOptions {
@@ -170,6 +176,15 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
     s.running.len(),
     1,
     "running snapshot must contain the active launch"
+  );
+  // The auto-detected projector rode through into the spawn params.
+  // Compare against the canonical parent: the daemon resolves the
+  // projector relative to the canonical model path, which differs from
+  // `model_dir` on macOS (/tmp → /private/tmp).
+  assert_eq!(
+    s.running[0].params.mmproj_path,
+    Some(model_path_canon.parent().unwrap().join("mmproj-m.gguf")),
+    "daemon must auto-detect the mmproj companion and thread it into spawn params"
   );
 
   // 5) stop_model brings it down + drops the running snapshot.

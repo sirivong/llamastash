@@ -123,6 +123,7 @@ async fn build_state(
     log_dir: log_dir.to_path_buf(),
     probe: fast_probe(),
     arch_defaults: BTreeMap::new(),
+    device_catalog: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
   };
   let ctx = MethodContext::with_catalog(token, catalog)
     .with_supervisors(SupervisorRegistry::new())

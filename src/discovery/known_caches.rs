@@ -328,9 +328,18 @@ mod tests {
     // On Linux the Ollama systemd path is appended unconditionally.
     let _lock = crate::cli::test_lock::serialize();
     let saved_hf = std::env::var_os("HF_HUB_CACHE");
+    let saved_hf_hub = std::env::var_os("HUGGINGFACE_HUB_CACHE");
+    let saved_hf_home = std::env::var_os("HF_HOME");
+    let saved_xdg = std::env::var_os("XDG_CACHE_HOME");
     let saved_ollama = std::env::var_os("OLLAMA_MODELS");
     std::env::set_var("HF_HUB_CACHE", "/relocated/hub");
     std::env::set_var("OLLAMA_MODELS", "/relocated/ollama");
+    // Clear the other env vars that huggingface_hub_dirs checks, so
+    // only HF_HUB_CACHE drives the result — the test verifies that a
+    // relocated override wins even when home is None.
+    std::env::remove_var("HF_HOME");
+    std::env::remove_var("XDG_CACHE_HOME");
+    std::env::remove_var("HUGGINGFACE_HUB_CACHE");
 
     let user: Vec<PathBuf> = Vec::new();
     let roots = default_set(RootResolution {
@@ -372,6 +381,18 @@ mod tests {
     match saved_ollama {
       Some(v) => std::env::set_var("OLLAMA_MODELS", v),
       None => std::env::remove_var("OLLAMA_MODELS"),
+    }
+    match saved_hf_hub {
+      Some(v) => std::env::set_var("HUGGINGFACE_HUB_CACHE", v),
+      None => std::env::remove_var("HUGGINGFACE_HUB_CACHE"),
+    }
+    match saved_hf_home {
+      Some(v) => std::env::set_var("HF_HOME", v),
+      None => std::env::remove_var("HF_HOME"),
+    }
+    match saved_xdg {
+      Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+      None => std::env::remove_var("XDG_CACHE_HOME"),
     }
   }
 

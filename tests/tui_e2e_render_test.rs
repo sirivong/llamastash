@@ -110,6 +110,7 @@ fn seeded_dashboard_app() -> App {
     path: PathBuf::from("/m/x/qwen-7b.gguf"),
     port: 41100,
     state: SurfaceState::Ready,
+    device: None,
     rss_bytes: Some(4_500_000_000),
     cpu_pct: Some(312.0),
   }];
