@@ -18,10 +18,21 @@
 //!   Loading → Ready transition deterministically)
 //! - `--trap-sigterm` (test-only — ignore SIGTERM so the supervisor's
 //!   SIGKILL-after-5s path can be exercised)
+//! - `--list-devices` (one-shot, mirrors real `llama-server`: prints a
+//!   fake adapter table and exits *without* serving). The number of
+//!   adapters comes from the `FAKE_LLAMA_DEVICES` env var, default `0`
+//!   so the fixture stays inert for every test that doesn't opt in.
+//!   Set `FAKE_LLAMA_DEVICES=2` to emulate a multi-GPU host and light
+//!   up the daemon's launch-device catalog + the TUI's Multi-GPU
+//!   placement knobs (`device` / `tensor_split` / `main_gpu` /
+//!   `split_mode`); `1` is single-GPU, `0` is CPU-only. Selectors are
+//!   `Vulkan<N>` so they parse on every platform. The daemon's catalog
+//!   probe (`list_devices::probe`) runs exactly `<binary>
+//!   --list-devices`, so this is all it needs.
 //!
-//! Output: this binary prints its bound address to stdout as the
-//! first line `listening on 127.0.0.1:<port>` so tests can wait
-//! for that signal if they want.
+//! Output: when serving, this binary prints its bound address to
+//! stdout as the first line `listening on 127.0.0.1:<port>` so tests
+//! can wait for that signal if they want.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,6 +67,30 @@ impl Mode {
       Mode::Rerank => "rerank",
     }
   }
+}
+
+/// Emit a fake `--list-devices` table and return. The adapter count
+/// comes from `FAKE_LLAMA_DEVICES` (default `0`): `0` emulates a
+/// CPU-only host, `1` a single-GPU host, `2`+ a multi-GPU host. The
+/// `Vulkan<N>` selectors parse on every platform and feed the daemon's
+/// device catalog (which gates the TUI's Multi-GPU placement knobs on
+/// `catalog.len() > 1`). Memory numbers are arbitrary but descend per
+/// adapter so the rows are visibly distinct.
+fn print_fake_devices() {
+  let n: u32 = std::env::var("FAKE_LLAMA_DEVICES")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0);
+  // Mirror real llama-server's header so a future parser tweak that
+  // keys off it keeps working; `parse_list_devices` skips it today.
+  println!("Available devices:");
+  for i in 0..n {
+    let total = 16384u32.saturating_sub(i * 4096).max(2048);
+    let free = total.saturating_sub(1024);
+    println!("  Vulkan{i}: Fake GPU {i} ({total} MiB, {free} MiB free)");
+  }
+  use std::io::Write;
+  let _ = std::io::stdout().flush();
 }
 
 fn parse_args() -> Args {
@@ -100,6 +135,16 @@ fn parse_args() -> Args {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
+  // `--list-devices` is a one-shot, non-serving invocation: real
+  // llama-server prints its adapter table and exits. The daemon's
+  // launch-device catalog probe runs exactly `<binary> --list-devices`,
+  // so honour it here and exit before binding any socket. Count comes
+  // from `FAKE_LLAMA_DEVICES` (default 0 → inert / CPU-only).
+  if std::env::args().skip(1).any(|a| a == "--list-devices") {
+    print_fake_devices();
+    return;
+  }
+
   let args = parse_args();
 
   if args.trap_sigterm {
