@@ -103,6 +103,13 @@ const SPECS: &[KnobSpec] = &[
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
+    field: KnobField::Device,
+    canonical: "--device",
+    aliases: &["-d"],
+    kind: ValueKind::Str,
+    fallback_label: LayerLabel::ServerDefault,
+  },
+  KnobSpec {
     field: KnobField::Threads,
     canonical: "--threads",
     aliases: &["-t"],
