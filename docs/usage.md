@@ -261,12 +261,14 @@ Launch a model. Layered resolution: catalog row → optional preset → per-invo
 ```
 llamastash start <ref> [--preset NAME] [--ctx N] [--port N]
                      [--reasoning on|off] [--mode chat|embedding|rerank]
-                     [-- <llama-server-flags>...]
+                     [--<advanced-knob> ...] [-- <llama-server-flags>...]
 ```
+
+Every typed knob the Settings editor exposes is also a first-class `start` flag — `--n-gpu-layers`, `--threads`, `--device`, `--tensor-split`, `--main-gpu`, `--split-mode`, `--flash-attn`, `--cache-type-k`/`-v`, `--batch-size`, `--mlock`, … Run `start --help` for the full list under **Advanced launch params** (the flags are generated from the same spec table the TUI uses, so the two surfaces can't drift). Booleans take `--flash-attn` (= on) or `--flash-attn=false`. Anything `start` doesn't recognise as a knob — including `llama-server`'s single-dash shorts like `-ngl` — still works verbatim after `--`. A knob set both inline and after `--` resolves to the `--` value.
 
 Modes are strict: when the catalog reports `mode_hint = unknown` and no `--mode` is passed, the CLI exits `64` rather than silently defaulting to chat.
 
-`--ctx` above the model's native context length is allowed (the supervisor still tries, per R12); a warning prints to stderr.
+`--ctx` above the model's native context length is allowed (the supervisor still tries, per R12); a warning prints to stderr. When `--preset` and inline knobs are combined, the inline knobs layer onto the preset — they override only the fields they set, leaving the rest of the preset intact.
 
 ### `llamastash stop <target>` / `llamastash stop --all`
 

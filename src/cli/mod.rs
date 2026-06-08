@@ -15,6 +15,7 @@ pub mod exit_codes;
 pub mod favorites;
 pub(crate) mod format;
 pub mod init;
+pub mod knob_flags;
 pub mod last_params;
 pub mod list;
 pub mod logs;

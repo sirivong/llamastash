@@ -304,7 +304,15 @@ pub struct StartArgs {
   /// default to `chat` when this is `None`.
   #[arg(long, value_enum)]
   pub mode: Option<LaunchMode>,
+  /// Advanced launch params, generated from the typed-knob spec table
+  /// (`--n-gpu-layers`, `--device`, `--tensor-split`, `--flash-attn`,
+  /// …). See `crate::cli::knob_flags`; the same knobs are also
+  /// reachable via the trailing `-- <raw>` passthrough.
+  #[command(flatten)]
+  pub knobs: crate::cli::knob_flags::KnobFlags,
   /// Extra flags forwarded verbatim to `llama-server` after `--`.
+  /// Also accepts any typed knob (e.g. `-ngl 99`) for parity with the
+  /// inline flags above.
   #[arg(last = true, value_name = "ARG")]
   pub extra: Vec<OsString>,
   /// Emit JSON instead of human-readable success prose. Stable

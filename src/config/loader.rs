@@ -293,6 +293,35 @@ pub struct TypedKnobs {
   pub split_mode: Option<String>,
 }
 
+impl TypedKnobs {
+  /// Layer `over` on top of `self`: every `Some` field in `over` wins,
+  /// untouched fields keep `self`'s value. Used to apply per-invocation
+  /// CLI overrides onto a preset baseline without wiping the preset's
+  /// other knobs. Mirrors the `.or()` layering in
+  /// `crate::launch::defaults_table`.
+  pub fn overlay(&mut self, over: TypedKnobs) {
+    self.ctx = over.ctx.or(self.ctx);
+    self.reasoning = over.reasoning.or(self.reasoning);
+    self.n_gpu_layers = over.n_gpu_layers.or(self.n_gpu_layers);
+    self.n_cpu_moe = over.n_cpu_moe.or(self.n_cpu_moe);
+    self.threads = over.threads.or(self.threads);
+    self.cache_type_k = over.cache_type_k.or(self.cache_type_k.take());
+    self.cache_type_v = over.cache_type_v.or(self.cache_type_v.take());
+    self.flash_attn = over.flash_attn.or(self.flash_attn);
+    self.mlock = over.mlock.or(self.mlock);
+    self.no_mmap = over.no_mmap.or(self.no_mmap);
+    self.parallel = over.parallel.or(self.parallel);
+    self.batch_size = over.batch_size.or(self.batch_size);
+    self.ubatch_size = over.ubatch_size.or(self.ubatch_size);
+    self.rope_freq_scale = over.rope_freq_scale.or(self.rope_freq_scale);
+    self.keep = over.keep.or(self.keep);
+    self.device = over.device.or(self.device.take());
+    self.tensor_split = over.tensor_split.or(self.tensor_split.take());
+    self.main_gpu = over.main_gpu.or(self.main_gpu);
+    self.split_mode = over.split_mode.or(self.split_mode.take());
+  }
+}
+
 impl Default for Config {
   fn default() -> Self {
     Self {

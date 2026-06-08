@@ -60,12 +60,33 @@ pub enum ValueKind {
   Str,
 }
 
+impl ValueKind {
+  /// Placeholder shown after the flag in `--help` (clap value name).
+  /// For the closed-set kinds it spells out the choices so the help is
+  /// self-documenting; the free-form `Str` kinds get a generic name a
+  /// caller can refine per-knob.
+  pub fn cli_value_name(self) -> &'static str {
+    match self {
+      ValueKind::U32 => "N",
+      ValueKind::F32 => "X",
+      ValueKind::Bool => "BOOL",
+      ValueKind::KvCacheType => "f16|q8_0|q4_0",
+      ValueKind::SplitMode => "none|layer|row",
+      ValueKind::Str => "VALUE",
+    }
+  }
+}
+
 /// One row in the alias table.
 pub struct KnobSpec {
   pub field: KnobField,
   pub canonical: &'static str,
   pub aliases: &'static [&'static str],
   pub kind: ValueKind,
+  /// One-line description, shown as the flag's `--help` text on `start`
+  /// (see `crate::cli::knob_flags`) and available to the TUI editor.
+  /// Single source of truth — keep terse and imperative.
+  pub help: &'static str,
   /// Layer reported by the resolver when no chain layer supplies a
   /// value. `ServerDefault` for flags whose omission falls back to
   /// llama-server's hardcoded default. `ModelDefault` for flags
@@ -91,6 +112,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--ctx-size",
     aliases: &["-c"],
     kind: ValueKind::U32,
+    help: "context length in tokens (0 = model's trained maximum)",
     fallback_label: LayerLabel::ModelDefault,
   },
   KnobSpec {
@@ -98,6 +120,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--reasoning",
     aliases: &[],
     kind: ValueKind::Bool,
+    help: "enable reasoning (jinja + deepseek reasoning-format bundle)",
     fallback_label: LayerLabel::ModelDefault,
   },
   KnobSpec {
@@ -105,6 +128,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--n-gpu-layers",
     aliases: &["-ngl"],
     kind: ValueKind::U32,
+    help: "layers offloaded to the GPU (0 = CPU-only)",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -112,6 +136,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--n-cpu-moe",
     aliases: &["-ncmoe"],
     kind: ValueKind::U32,
+    help: "MoE expert layers kept on the CPU (frees VRAM)",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -119,6 +144,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--device",
     aliases: &["-d"],
     kind: ValueKind::Str,
+    help: "device selector(s), comma-separated (e.g. Vulkan0,Vulkan1)",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -126,6 +152,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--tensor-split",
     aliases: &["-ts"],
     kind: ValueKind::Str,
+    help: "proportional split across GPUs (e.g. 3,1)",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -133,6 +160,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--main-gpu",
     aliases: &["-mg"],
     kind: ValueKind::U32,
+    help: "index of the primary GPU holding non-split tensors",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -140,6 +168,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--split-mode",
     aliases: &["-sm"],
     kind: ValueKind::SplitMode,
+    help: "how to split the model across GPUs",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -147,6 +176,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--threads",
     aliases: &["-t"],
     kind: ValueKind::U32,
+    help: "CPU threads used during generation",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -154,6 +184,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--cache-type-k",
     aliases: &["-ctk"],
     kind: ValueKind::KvCacheType,
+    help: "K cache quantization type",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -161,6 +192,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--cache-type-v",
     aliases: &["-ctv"],
     kind: ValueKind::KvCacheType,
+    help: "V cache quantization type",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -168,6 +200,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--parallel",
     aliases: &["-np"],
     kind: ValueKind::U32,
+    help: "parallel sequences served concurrently",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -175,6 +208,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--flash-attn",
     aliases: &["-fa"],
     kind: ValueKind::Bool,
+    help: "enable flash attention",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -182,6 +216,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--mlock",
     aliases: &[],
     kind: ValueKind::Bool,
+    help: "lock the model in RAM (prevents swap-out)",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -189,6 +224,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--no-mmap",
     aliases: &[],
     kind: ValueKind::Bool,
+    help: "load the whole model into RAM instead of mmap",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -196,6 +232,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--batch-size",
     aliases: &["-b"],
     kind: ValueKind::U32,
+    help: "logical batch size for prompt processing",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -203,6 +240,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--ubatch-size",
     aliases: &["-ub"],
     kind: ValueKind::U32,
+    help: "physical (micro) batch size",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -210,6 +248,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--rope-freq-scale",
     aliases: &[],
     kind: ValueKind::F32,
+    help: "RoPE frequency scaling factor (context extension)",
     fallback_label: LayerLabel::ServerDefault,
   },
   KnobSpec {
@@ -217,6 +256,7 @@ const SPECS: &[KnobSpec] = &[
     canonical: "--keep",
     aliases: &[],
     kind: ValueKind::U32,
+    help: "tokens kept from the initial prompt on context shift",
     fallback_label: LayerLabel::ServerDefault,
   },
 ];
@@ -225,6 +265,18 @@ const SPECS: &[KnobSpec] = &[
 /// the typed editor to render rows top-to-bottom.
 pub fn knob_specs() -> &'static [KnobSpec] {
   SPECS
+}
+
+/// Whether `field` is surfaced as a generated first-class `start` flag
+/// (see `crate::cli::knob_flags`).
+///
+/// `Ctx` and `Reasoning` are excluded: they keep their dedicated
+/// `--ctx` / `--reasoning` flags on `StartArgs` (with bundled
+/// reasoning-format semantics), and a derived `--reasoning` would
+/// collide with the existing one. Every other knob is CLI-derived, so
+/// adding a spec row automatically yields a `start` flag.
+pub fn is_cli_derived(field: KnobField) -> bool {
+  !matches!(field, KnobField::Ctx | KnobField::Reasoning)
 }
 
 /// Lookup a spec by field.
@@ -460,6 +512,38 @@ mod tests {
         "--keep",
       ]
     );
+  }
+
+  #[test]
+  fn every_spec_has_help_text() {
+    // The `start` command derives a `--help` line per knob from
+    // `spec.help` (see `crate::cli::knob_flags`); a blank one would
+    // ship an undocumented flag.
+    for spec in knob_specs() {
+      assert!(
+        !spec.help.trim().is_empty(),
+        "{:?} ({}) has empty help text",
+        spec.field,
+        spec.canonical
+      );
+    }
+  }
+
+  #[test]
+  fn ctx_and_reasoning_are_not_cli_derived() {
+    // They keep their dedicated `--ctx` / `--reasoning` flags on
+    // `StartArgs`; everything else becomes a generated `start` flag.
+    assert!(!is_cli_derived(KnobField::Ctx));
+    assert!(!is_cli_derived(KnobField::Reasoning));
+    for spec in knob_specs() {
+      if !matches!(spec.field, KnobField::Ctx | KnobField::Reasoning) {
+        assert!(
+          is_cli_derived(spec.field),
+          "{:?} should be CLI-derived",
+          spec.field
+        );
+      }
+    }
   }
 
   #[test]

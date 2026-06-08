@@ -13,6 +13,7 @@
 //! than silently default to chat. The plan's `cli_args::StartArgs`
 //! comment is the authority.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -56,13 +57,15 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
   if let Some(r) = args.reasoning {
     params.reasoning = Some(matches!(r, ReasoningFlag::On));
   }
-  if !args.extra.is_empty() {
-    let (knobs, extras) = parse_tail_args(&args.extra)?;
-    params.knobs = knobs;
-    params.extras = extras
-      .into_iter()
-      .map(|s| s.to_string_lossy().into_owned())
-      .collect();
+  let (cli_knobs, cli_extras) = parse_cli_knobs(&args.knobs.tokens, &args.extra)?;
+  // Layer per-invocation overrides onto the preset baseline instead of
+  // replacing it — a CLI `--threads` must not wipe a preset's other
+  // knobs.
+  params.knobs.overlay(cli_knobs);
+  // Only replace preset extras when the invocation supplied some; an
+  // inline-only launch keeps the preset's passthrough flags.
+  if !cli_extras.is_empty() {
+    params.extras = cli_extras;
   }
 
   // Warning surfaces (kept best-effort; never block the launch):
@@ -257,6 +260,30 @@ async fn fetch_preset_params(
   })
 }
 
+/// Resolve the per-invocation knob overrides from the two CLI surfaces:
+/// the generated inline flags (`--threads 8`, captured as canonical
+/// tokens by `crate::cli::knob_flags`) and the trailing `-- <raw>`
+/// passthrough. Both feed the single [`parse_tail_args`] validator;
+/// passthrough tokens come last so a flag set on both wins from `--`
+/// (last-occurrence-wins). Returns the parsed knobs plus any
+/// unrecognised tokens to forward verbatim as `extras`.
+fn parse_cli_knobs(
+  knob_tokens: &[OsString],
+  extra: &[OsString],
+) -> Result<(TypedKnobs, Vec<String>), CliExit> {
+  if knob_tokens.is_empty() && extra.is_empty() {
+    return Ok((TypedKnobs::default(), Vec::new()));
+  }
+  let mut combined: Vec<OsString> = knob_tokens.to_vec();
+  combined.extend(extra.iter().cloned());
+  let (knobs, extras) = parse_tail_args(&combined)?;
+  let extras = extras
+    .into_iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
+  Ok((knobs, extras))
+}
+
 fn build_payload(model_path: &str, mode: &str, p: &PartialParams) -> Value {
   let mut obj = serde_json::Map::new();
   obj.insert(
@@ -436,6 +463,57 @@ mod tests {
     );
   }
 
+  fn osvec(args: &[&str]) -> Vec<OsString> {
+    args.iter().map(OsString::from).collect()
+  }
+
+  #[test]
+  fn cli_knobs_empty_when_nothing_passed() {
+    let (knobs, extras) = parse_cli_knobs(&[], &[]).unwrap();
+    assert_eq!(knobs, TypedKnobs::default());
+    assert!(extras.is_empty());
+  }
+
+  #[test]
+  fn cli_knobs_inline_and_passthrough_combine_passthrough_wins() {
+    // Inline `--threads 4` (from the generated flags) plus a trailing
+    // `-- --threads 16` passthrough: the `--` value wins, and an
+    // unrecognised passthrough flag routes to extras.
+    let (knobs, extras) = parse_cli_knobs(
+      &osvec(&["--threads", "4", "--device", "Vulkan0"]),
+      &osvec(&["--threads", "16", "--rope-freq-base", "10000"]),
+    )
+    .unwrap();
+    assert_eq!(knobs.threads, Some(16));
+    assert_eq!(knobs.device.as_deref(), Some("Vulkan0"));
+    assert_eq!(
+      extras,
+      vec!["--rope-freq-base".to_string(), "10000".to_string()]
+    );
+  }
+
+  #[test]
+  fn cli_knobs_overlay_onto_preset_keeps_untouched_preset_fields() {
+    // Preset baseline sets threads + mlock; the invocation only
+    // overrides threads. mlock must survive.
+    let mut preset = TypedKnobs {
+      threads: Some(8),
+      mlock: Some(true),
+      ..TypedKnobs::default()
+    };
+    let (cli_knobs, _) = parse_cli_knobs(&osvec(&["--threads", "2"]), &[]).unwrap();
+    preset.overlay(cli_knobs);
+    assert_eq!(preset.threads, Some(2), "CLI override wins");
+    assert_eq!(preset.mlock, Some(true), "untouched preset knob survives");
+  }
+
+  #[test]
+  fn cli_knobs_bad_value_is_usage() {
+    let err = parse_cli_knobs(&osvec(&["--threads", "xyz"]), &[]).unwrap_err();
+    assert_eq!(err.code, USAGE);
+    assert!(err.to_string().contains("--threads"), "{err}");
+  }
+
   #[test]
   fn direct_path_candidate_requires_explicit_mode() {
     let dir = tempfile::tempdir().unwrap();
@@ -449,6 +527,7 @@ mod tests {
       port: None,
       reasoning: None,
       mode: None,
+      knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       json: false,
     };
@@ -470,6 +549,7 @@ mod tests {
       port: None,
       reasoning: None,
       mode: Some(CliLaunchMode::Chat),
+      knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       json: false,
     };
@@ -497,6 +577,7 @@ mod tests {
       port: None,
       reasoning: None,
       mode: Some(CliLaunchMode::Chat),
+      knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       json: false,
     };
@@ -536,6 +617,7 @@ mod tests {
       port: None,
       reasoning: None,
       mode: Some(CliLaunchMode::Chat),
+      knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       json: false,
     };
