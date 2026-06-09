@@ -482,12 +482,34 @@ fn render_header_name(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
       .display_label_for(path)
       .unwrap_or_else(|| model_display_name(path))
   };
-  let name_line = match app.right_pane_focus() {
-    Some(m) => Line::from(Span::styled(label_for(&m.path), name_style)),
-    None => match app.focused_path() {
-      Some(p) => Line::from(Span::styled(label_for(&p), name_style)),
-      None => Line::from(Span::styled("—", palette.muted_style())),
-    },
+  // Resolve the focused path (running launch first, then the list
+  // selection) so the title and its modality glyphs describe one model.
+  let focused = app
+    .right_pane_focus()
+    .map(|m| m.path.clone())
+    .or_else(|| app.focused_path());
+  let name_line = match focused {
+    Some(path) => {
+      let mut spans = vec![Span::styled(label_for(&path), name_style)];
+      // `◉` vision / `♪` audio after the title when discovery found an
+      // mmproj projector — single-cell glyphs in the accent tone, see
+      // `Multimodal::LEGEND` (also surfaced in the help overlay).
+      let glyphs: Vec<String> = app
+        .multimodal_for(&path)
+        .map(|mm| mm.glyphs())
+        .unwrap_or_default()
+        .iter()
+        .map(|g| g.to_string())
+        .collect();
+      if !glyphs.is_empty() {
+        spans.push(Span::styled(
+          format!("  {}", glyphs.join(" ")),
+          palette.accent_style(),
+        ));
+      }
+      Line::from(spans)
+    }
+    None => Line::from(Span::styled("—", palette.muted_style())),
   };
   frame.render_widget(Paragraph::new(name_line), area);
 }
@@ -816,6 +838,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }
   }
 
@@ -1117,6 +1140,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     // Row 0 is the table header, row 1 is the directory group
@@ -1141,6 +1165,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }];
     // Row 0 is the table header, row 1 is the directory group
     // header, row 2 is the model.
@@ -1164,6 +1189,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }];
     app.list_cursor = 2;
     let palette = app.palette();
@@ -1180,6 +1206,49 @@ mod tests {
       assert_eq!(cell.symbol(), ch.to_string());
       assert_eq!(cell.fg, palette.muted);
     }
+  }
+
+  #[test]
+  fn header_renders_modality_glyph_after_title() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![crate::discovery::DiscoveredModel {
+      path: PathBuf::from("/m/gemma-3-4b-it.gguf"),
+      parent: PathBuf::from("/m"),
+      source: crate::discovery::ModelSource::UserPath,
+      metadata: None,
+      parse_error: None,
+      split_siblings: Vec::new(),
+      display_label: None,
+      multimodal: Some(crate::discovery::Multimodal {
+        vision: true,
+        audio: false,
+      }),
+    }];
+    app.list_cursor = 2;
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(80, 14)).unwrap();
+    term
+      .draw(|f| render(f, Rect::new(0, 0, 80, 14), &app, palette, false))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+
+    // Name row is y=2 (border, blank pad, name). The vision glyph must
+    // appear on it, in the accent tone.
+    let name_row: String = (0..80)
+      .map(|x| buf.cell((x, 2)).unwrap().symbol().to_string())
+      .collect();
+    assert!(
+      name_row.contains('◉'),
+      "vision glyph must follow the title: {name_row:?}"
+    );
+    let glyph_x = (0..80)
+      .find(|&x| buf.cell((x, 2)).unwrap().symbol() == "◉")
+      .unwrap();
+    assert_eq!(buf.cell((glyph_x, 2)).unwrap().fg, palette.accent);
   }
 
   #[test]
@@ -1234,6 +1303,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     app.list_cursor = 2;
@@ -1307,6 +1377,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }];
     app.managed = vec![ready_managed("qwen", None, None)];
     app.list_cursor = 2;

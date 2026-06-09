@@ -38,6 +38,7 @@ fn fake_model(path: &str, parent: &str) -> DiscoveredModel {
     parse_error: None,
     split_siblings: Vec::new(),
     display_label: None,
+    multimodal: None,
   }
 }
 

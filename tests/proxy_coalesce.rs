@@ -104,6 +104,7 @@ fn discovered(path: &Path, display_label: Option<&str>, arch: &str) -> Discovere
     parse_error: None,
     split_siblings: Vec::new(),
     display_label: display_label.map(str::to_string),
+    multimodal: None,
   }
 }
 

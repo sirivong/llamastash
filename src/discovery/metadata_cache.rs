@@ -31,6 +31,13 @@ use crate::gguf::metadata::ModelMetadata;
 pub struct CachedParse {
   pub metadata: Option<ModelMetadata>,
   pub parse_error: Option<String>,
+  /// Multimodal capability of the model's mmproj projector companion,
+  /// resolved once on the cache-miss path so warm rescans don't repeat
+  /// the sibling `read_dir` + projector header read. Keyed (like the
+  /// rest of this entry) on the *model* file, so a projector dropped in
+  /// alongside an already-cached model won't surface until that model
+  /// file changes or the daemon restarts — an accepted edge case.
+  pub multimodal: Option<crate::discovery::Multimodal>,
 }
 
 #[derive(Debug)]
@@ -181,6 +188,7 @@ mod tests {
         weights_bytes: None,
       }),
       parse_error: None,
+      multimodal: None,
     }
   }
 

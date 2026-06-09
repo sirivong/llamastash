@@ -288,6 +288,7 @@ fn discovered(path: &str, display_label: &str, arch: &str) -> DiscoveredModel {
     parse_error: None,
     split_siblings: Vec::new(),
     display_label: Some(display_label.to_string()),
+    multimodal: None,
   }
 }
 

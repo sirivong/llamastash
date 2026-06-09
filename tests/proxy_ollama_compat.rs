@@ -172,6 +172,7 @@ fn make_model(
     parse_error: None,
     split_siblings: Vec::new(),
     display_label: display_label.map(str::to_string),
+    multimodal: None,
   }
 }
 
@@ -186,6 +187,7 @@ fn make_parse_error_model(path: &str) -> DiscoveredModel {
     parse_error: Some("synthetic parse failure".to_string()),
     split_siblings: Vec::new(),
     display_label: None,
+    multimodal: None,
   }
 }
 

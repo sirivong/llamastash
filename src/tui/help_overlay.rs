@@ -173,18 +173,23 @@ fn build_sections(app: &App) -> Vec<Section> {
   sections
 }
 
-/// Static legend explaining glyphs used in panel labels. Currently
-/// the only entry is the `*` suffix on the Host panel's RAM row,
-/// which flags unified memory (Apple Metal / AMD UMA APUs share
-/// the same physical pool with VRAM, so the RAM total subtracts
-/// the GPU-allocated bytes to avoid double-counting).
+/// Static legend explaining glyphs used in panel labels: the `*`
+/// suffix on the Host panel's RAM row (unified memory — Apple Metal /
+/// AMD UMA APUs share the same physical pool with VRAM, so the RAM
+/// total subtracts the GPU-allocated bytes to avoid double-counting),
+/// and the `◉`/`♪` modality glyphs the right-pane title carries when a
+/// model has an auto-detected mmproj projector.
 fn legend_section() -> Section {
+  let mut rows = vec![(
+    "RAM*".to_string(),
+    "unified memory (shared with VRAM)".to_string(),
+  )];
+  for (glyph, desc) in crate::discovery::Multimodal::LEGEND {
+    rows.push((glyph.to_string(), desc.to_string()));
+  }
   Section {
     title: "Legend",
-    rows: vec![(
-      "RAM*".to_string(),
-      "unified memory (shared with VRAM)".to_string(),
-    )],
+    rows,
   }
 }
 
@@ -367,6 +372,22 @@ mod tests {
     assert!(
       frame.contains("RAM*") && frame.contains("unified memory"),
       "RAM* legend row missing:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_shows_modality_glyph_legend() {
+    // The right-pane title carries `◉`/`♪` when a model has an mmproj
+    // projector; the Legend section explains the glyphs.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 40, &app);
+    assert!(
+      frame.contains('◉') && frame.contains("vision"),
+      "vision glyph legend row missing:\n{frame}"
+    );
+    assert!(
+      frame.contains('♪') && frame.contains("audio"),
+      "audio glyph legend row missing:\n{frame}"
     );
   }
 

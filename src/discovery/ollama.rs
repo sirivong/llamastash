@@ -134,6 +134,10 @@ pub fn enumerate(root: PathBuf, cache: Option<MetadataCache>) -> mpsc::Receiver<
             parse_error: hit.parse_error,
             split_siblings: Vec::new(),
             display_label: Some(resolved_name_tag.clone()),
+            // Ollama stores the projector as a separate manifest blob, not
+            // a directory sibling, so the scanner's `find_mmproj` doesn't
+            // apply here — left unset until Ollama-side detection lands.
+            multimodal: None,
           };
           if tx.send(model).await.is_err() {
             return;
@@ -151,10 +155,12 @@ pub fn enumerate(root: PathBuf, cache: Option<MetadataCache>) -> mpsc::Receiver<
         Ok(Ok(read)) => CachedParse {
           metadata: Some(summarise_metadata(&read.header)),
           parse_error: None,
+          multimodal: None,
         },
         Ok(Err(e)) => CachedParse {
           metadata: None,
           parse_error: Some(format!("{resolved_name_tag}: {e}")),
+          multimodal: None,
         },
         Err(join_err) => {
           log::warn!("ollama parser task panicked: {join_err}");
@@ -175,6 +181,7 @@ pub fn enumerate(root: PathBuf, cache: Option<MetadataCache>) -> mpsc::Receiver<
         parse_error: cached.parse_error,
         split_siblings: Vec::new(),
         display_label: Some(resolved_name_tag.clone()),
+        multimodal: None,
       };
       if tx.send(model).await.is_err() {
         return;

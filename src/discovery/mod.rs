@@ -62,6 +62,47 @@ pub struct DiscoveredModel {
   /// content-addressed blob hash. `None` for sources where the file
   /// stem is already meaningful (HF cache, LM Studio, user paths).
   pub display_label: Option<String>,
+  /// Multimodal capability of the model's auto-detected mmproj projector
+  /// companion (vision / audio), or `None` when no projector was found.
+  /// Derived from the projector GGUF's `clip.has_*_encoder` keys by the
+  /// scanner (see [`scanner::find_mmproj`]). Surfaced after the model
+  /// title in the TUI so the user knows a model launches multimodal.
+  pub multimodal: Option<Multimodal>,
+}
+
+/// Multimodal modality a model's mmproj projector advertises. A
+/// projector can be vision-only, audio-only, or both (an "omni" model),
+/// so the two flags are independent rather than an enum. Derived from
+/// the projector GGUF's `clip.has_vision_encoder` / `clip.has_audio_encoder`
+/// metadata keys (llama.cpp clip convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Multimodal {
+  pub vision: bool,
+  pub audio: bool,
+}
+
+impl Multimodal {
+  /// `(glyph, description)` for every modality the header can render —
+  /// single source of truth shared by the right-pane title glyphs and
+  /// the help-overlay Legend so the two never drift. Glyphs are
+  /// single-cell BMP symbols matching the `status_icons` house style.
+  pub const LEGEND: [(char, &'static str); 2] = [
+    ('◉', "vision (multimodal projector)"),
+    ('♪', "audio (multimodal projector)"),
+  ];
+
+  /// Glyphs for the modalities this projector actually advertises, in
+  /// `LEGEND` order. Empty when neither flag is set.
+  pub fn glyphs(&self) -> Vec<char> {
+    let mut out = Vec::new();
+    if self.vision {
+      out.push(Self::LEGEND[0].0);
+    }
+    if self.audio {
+      out.push(Self::LEGEND[1].0);
+    }
+    out
+  }
 }
 
 /// Provenance label for a discovered model. The TUI groups by source

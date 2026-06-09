@@ -98,6 +98,7 @@ fn discovered(path: &Path, display_label: Option<&str>, arch: Option<&str>) -> D
     parse_error: None,
     split_siblings: Vec::new(),
     display_label: display_label.map(str::to_string),
+    multimodal: None,
   }
 }
 

@@ -1006,6 +1006,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }];
     focused_app.go_top();
     let deletable_hints = build_models_hints(&focused_app, FilterChipMode::Inactive, false, true);

@@ -1157,6 +1157,17 @@ impl App {
       .and_then(|m| m.display_label.clone())
   }
 
+  /// Multimodal capability of the model at `path` (vision / audio) if
+  /// discovery detected an mmproj projector companion. Drives the glyph
+  /// the right-pane header renders after the model title.
+  pub fn multimodal_for(&self, path: &Path) -> Option<crate::discovery::Multimodal> {
+    self
+      .models
+      .iter()
+      .find(|m| m.path == path)
+      .and_then(|m| m.multimodal)
+  }
+
   /// Friendly display name with fallback. Prefers the discovery
   /// label, falls back to the path's file_stem. Centralised so every
   /// surface (toast, confirm dialog, header, daemon panel) renders
@@ -1657,6 +1668,18 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
       .get("display_label")
       .and_then(Value::as_str)
       .map(String::from),
+    multimodal: row.get("multimodal").and_then(parse_multimodal),
+  })
+}
+
+fn parse_multimodal(v: &Value) -> Option<crate::discovery::Multimodal> {
+  if v.is_null() {
+    return None;
+  }
+  let flag = |key: &str| v.get(key).and_then(Value::as_bool).unwrap_or(false);
+  Some(crate::discovery::Multimodal {
+    vision: flag("vision"),
+    audio: flag("audio"),
   })
 }
 
@@ -1789,6 +1812,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }
   }
 
@@ -1817,6 +1841,36 @@ mod tests {
     assert_eq!(
       parsed.split_siblings[0],
       PathBuf::from("/m/m-00002-of-00002.gguf")
+    );
+  }
+
+  #[test]
+  fn parse_list_models_row_reads_multimodal() {
+    use crate::discovery::Multimodal;
+    let base = |mm: Value| {
+      json!({
+        "path": "/m/a.gguf",
+        "parent": "/m",
+        "source": "user",
+        "multimodal": mm,
+      })
+    };
+    // Object → flags surface verbatim.
+    let vision =
+      parse_list_models_row(&base(json!({ "vision": true, "audio": false }))).expect("row parses");
+    assert_eq!(
+      vision.multimodal,
+      Some(Multimodal {
+        vision: true,
+        audio: false
+      })
+    );
+    // null / absent → None.
+    assert_eq!(
+      parse_list_models_row(&base(Value::Null))
+        .expect("row parses")
+        .multimodal,
+      None
     );
   }
 

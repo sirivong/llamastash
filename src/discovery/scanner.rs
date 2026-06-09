@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::discovery::metadata_cache::{self, CachedParse, MetadataCache};
 use crate::discovery::split_gguf::{group, DiscoveredEntry};
-use crate::discovery::{DiscoveredModel, ModelSource};
+use crate::discovery::{DiscoveredModel, ModelSource, Multimodal};
 use crate::gguf::{read_path, summarise_metadata, GgufError, HeaderReadOptions, ModelMetadata};
 
 /// One root to scan plus how to label files found beneath it.
@@ -313,6 +313,39 @@ pub fn find_mmproj(model_path: &Path) -> Option<PathBuf> {
   None
 }
 
+/// Resolve the multimodal capability a model's mmproj projector
+/// advertises, or `None` when the model has no projector companion.
+///
+/// Reads the projector GGUF's `clip.has_vision_encoder` /
+/// `clip.has_audio_encoder` flags (the llama.cpp clip convention) from a
+/// header-only parse. A projector that advertises neither — older
+/// vision-only mmproj files predate the audio split — is treated as
+/// vision so the common case still surfaces a badge. Best-effort: an
+/// unreadable projector header yields `None` rather than failing the
+/// scan.
+fn detect_multimodal(model_path: &Path) -> Option<Multimodal> {
+  let projector = find_mmproj(model_path)?;
+  let read = read_path(&projector, HeaderReadOptions::default()).ok()?;
+  let flag = |key: &str| {
+    read
+      .header
+      .metadata
+      .get(key)
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false)
+  };
+  let vision = flag("clip.has_vision_encoder");
+  let audio = flag("clip.has_audio_encoder");
+  Some(if !vision && !audio {
+    Multimodal {
+      vision: true,
+      audio: false,
+    }
+  } else {
+    Multimodal { vision, audio }
+  })
+}
+
 /// Concurrency cap for [`walk_root`]'s per-file parse. Default to
 /// `num_cpus()`-flavoured but capped — too many parallel
 /// `spawn_blocking` calls land everything on the blocking pool
@@ -459,27 +492,41 @@ async fn parse_into_model(
         parse_error: hit.parse_error,
         split_siblings: siblings,
         display_label: None,
+        multimodal: hit.multimodal,
       };
     }
   }
 
+  // On a cache miss, parse the model header and detect its mmproj
+  // modality together on one blocking-pool hop. Detection runs only
+  // here (not on warm cache hits) so periodic rescans don't repeat the
+  // sibling `read_dir` + projector header read.
   let path_for_parse = path.clone();
-  let parsed: Result<_, GgufError> =
-    tokio::task::spawn_blocking(move || read_path(&path_for_parse, HeaderReadOptions::default()))
-      .await
-      .unwrap_or_else(|join_err| {
+  let (parsed, multimodal): (Result<_, GgufError>, Option<Multimodal>) =
+    tokio::task::spawn_blocking(move || {
+      let parsed = read_path(&path_for_parse, HeaderReadOptions::default());
+      let multimodal = detect_multimodal(&path_for_parse);
+      (parsed, multimodal)
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+      (
         Err(GgufError::Io(std::io::Error::other(format!(
           "parser task panicked: {join_err}"
-        ))))
-      });
+        )))),
+        None,
+      )
+    });
   let cached = match parsed {
     Ok(read) => CachedParse {
       metadata: Some(summarise_metadata(&read.header)),
       parse_error: None,
+      multimodal,
     },
     Err(e) => CachedParse {
       metadata: None,
       parse_error: Some(e.to_string()),
+      multimodal,
     },
   };
   if let Some(c) = cache {
@@ -495,6 +542,7 @@ async fn parse_into_model(
     parse_error: cached.parse_error,
     split_siblings: siblings,
     display_label: None,
+    multimodal: cached.multimodal,
   }
 }
 
@@ -1160,6 +1208,60 @@ mod tests {
       find_mmproj(&dir.join("zephyr-7b.gguf")),
       None,
       "must not cross-assign another model's projector"
+    );
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  /// Write a projector GGUF beside a model, optionally advertising the
+  /// vision / audio clip encoders.
+  fn write_projector(path: &Path, vision: bool, audio: bool) {
+    use crate::gguf::header::GgufValue;
+    let mut b = crate::gguf::test_fixtures::FixtureBuilder::new();
+    if vision {
+      b = b.with_kv("clip.has_vision_encoder", GgufValue::Bool(true));
+    }
+    if audio {
+      b = b.with_kv("clip.has_audio_encoder", GgufValue::Bool(true));
+    }
+    fs::write(path, b.build()).unwrap();
+  }
+
+  #[test]
+  fn detect_multimodal_none_without_projector() {
+    let dir = temp_dir("mm-none");
+    fs::write(dir.join("model.gguf"), build_minimal_gguf("llama")).unwrap();
+    assert_eq!(detect_multimodal(&dir.join("model.gguf")), None);
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn detect_multimodal_reads_vision_audio_and_omni_flags() {
+    for (vision, audio) in [(true, false), (false, true), (true, true)] {
+      let dir = temp_dir("mm-flags");
+      fs::write(dir.join("model.gguf"), build_minimal_gguf("llama")).unwrap();
+      write_projector(&dir.join("mmproj-model.gguf"), vision, audio);
+      assert_eq!(
+        detect_multimodal(&dir.join("model.gguf")),
+        Some(Multimodal { vision, audio }),
+        "clip flags vision={vision} audio={audio} must surface verbatim"
+      );
+      fs::remove_dir_all(&dir).ok();
+    }
+  }
+
+  #[test]
+  fn detect_multimodal_defaults_to_vision_without_clip_keys() {
+    // Older vision-only mmproj files predate the audio split and ship no
+    // `clip.has_*_encoder` keys; treat them as vision so the badge shows.
+    let dir = temp_dir("mm-legacy");
+    fs::write(dir.join("model.gguf"), build_minimal_gguf("llama")).unwrap();
+    write_projector(&dir.join("mmproj-model.gguf"), false, false);
+    assert_eq!(
+      detect_multimodal(&dir.join("model.gguf")),
+      Some(Multimodal {
+        vision: true,
+        audio: false
+      })
     );
     fs::remove_dir_all(&dir).ok();
   }

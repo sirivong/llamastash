@@ -568,6 +568,7 @@ mod tests {
       parent: std::path::PathBuf::from("/tmp"),
       source: crate::discovery::ModelSource::HuggingFace,
       display_label: None,
+      multimodal: None,
       parse_error: None,
       split_siblings: vec![],
       metadata: Some(ModelMetadata {

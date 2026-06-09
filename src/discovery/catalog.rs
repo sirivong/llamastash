@@ -115,6 +115,13 @@ fn model_row(m: &DiscoveredModel) -> Value {
     }),
     "parse_error": m.parse_error,
     "display_label": m.display_label,
+    // Multimodal projector capability (vision / audio), or null when the
+    // model has no mmproj companion. Additive — the TUI renders a glyph
+    // after the model title from this field.
+    "multimodal": m.multimodal.map(|mm| json!({
+      "vision": mm.vision,
+      "audio": mm.audio,
+    })),
   })
 }
 
@@ -154,6 +161,7 @@ mod tests {
       parse_error: None,
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     }
   }
 
@@ -264,11 +272,39 @@ mod tests {
       parse_error: Some("BadMagic".to_string()),
       split_siblings: Vec::new(),
       display_label: None,
+      multimodal: None,
     };
     cat.upsert(m).await;
     let v = cat.to_list_response().await;
     let row = &v["models"][0];
     assert!(row["metadata"].is_null());
     assert_eq!(row["parse_error"], json!("BadMagic"));
+  }
+
+  #[tokio::test]
+  async fn multimodal_serialises_as_object_or_null() {
+    use crate::discovery::Multimodal;
+    let cat = ModelCatalog::new();
+    // No projector → null.
+    cat
+      .upsert(fake_model("/m/plain.gguf", ModelSource::UserPath))
+      .await;
+    // Vision projector → object with the two flags.
+    let mut vis = fake_model("/m/vision.gguf", ModelSource::UserPath);
+    vis.multimodal = Some(Multimodal {
+      vision: true,
+      audio: false,
+    });
+    cat.upsert(vis).await;
+
+    let v = cat.to_list_response().await;
+    let rows = v["models"].as_array().unwrap();
+    let plain = rows.iter().find(|r| r["path"] == "/m/plain.gguf").unwrap();
+    let vision = rows.iter().find(|r| r["path"] == "/m/vision.gguf").unwrap();
+    assert!(plain["multimodal"].is_null());
+    assert_eq!(
+      vision["multimodal"],
+      json!({ "vision": true, "audio": false })
+    );
   }
 }
