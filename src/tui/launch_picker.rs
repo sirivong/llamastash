@@ -55,7 +55,11 @@ static ALL_FIELDS: LazyLock<Box<[PickerField]>> = LazyLock::new(|| {
 /// Backend choices the picker cycles through, in ←/→ order. `Auto` plus one
 /// entry per concrete backend; a second backend adds a variant here and the
 /// chooser row becomes visible.
-const BACKEND_CHOICES: &[BackendChoice] = &[BackendChoice::Auto, BackendChoice::LlamaCpp];
+const BACKEND_CHOICES: &[BackendChoice] = &[
+  BackendChoice::Auto,
+  BackendChoice::LlamaCpp,
+  BackendChoice::Lemonade,
+];
 
 /// Whether the backend chooser row should appear — only when there's an
 /// actual choice (more than one concrete backend beyond `Auto`).

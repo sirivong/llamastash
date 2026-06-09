@@ -554,9 +554,10 @@ async fn status_response(ctx: &MethodContext) -> Value {
 /// Build the `status.backends` array (R3/R16): one row per backend with
 /// whether its binary is installed on this host and which accelerators it
 /// can run on. llama.cpp's accelerator set unions its CPU floor with the
-/// GPU backends the live device catalog reveals. Additional backends append
-/// their own row.
+/// GPU backends the live device catalog reveals; Lemonade reports its
+/// static cpu+npu (a live `lemond` system-info probe is deferred).
 async fn backends_status(ctx: &MethodContext) -> Value {
+  use crate::backend::lemonade::LemonadeBackend;
   use crate::backend::llama_cpp::LlamaCppBackend;
   use crate::backend::Backend;
 
@@ -576,12 +577,21 @@ async fn backends_status(ctx: &MethodContext) -> Value {
     }
   }
 
-  json!([backend_row(
-    llama.id(),
-    llama.lifecycle().label(),
-    llama_installed,
-    llama_acc.labels()
-  )])
+  let lemonade = LemonadeBackend::new();
+  json!([
+    backend_row(
+      llama.id(),
+      llama.lifecycle().label(),
+      llama_installed,
+      llama_acc.labels()
+    ),
+    backend_row(
+      lemonade.id(),
+      lemonade.lifecycle().label(),
+      lemond_installed(),
+      lemonade.accelerators().labels()
+    ),
+  ])
 }
 
 fn backend_row(id: &str, lifecycle: &str, installed: bool, accelerators: Vec<&str>) -> Value {
@@ -608,6 +618,21 @@ fn accelerator_from_selector(selector: &str) -> Option<crate::backend::Accelerat
   } else {
     None
   }
+}
+
+/// Best-effort: is a `lemond` executable on PATH? The "installed" signal
+/// for the Lemonade backend in `status`. (`config.lemonade.binary` is a
+/// stronger signal but isn't on the `MethodContext`; PATH covers the common
+/// case + a manually-installed `lemond` on PATH.)
+fn lemond_installed() -> bool {
+  let exe = if cfg!(windows) {
+    "lemond.exe"
+  } else {
+    "lemond"
+  };
+  std::env::var_os("PATH")
+    .map(|paths| std::env::split_paths(&paths).any(|d| d.join(exe).is_file()))
+    .unwrap_or(false)
 }
 
 /// Project the proxy listener's status cell into the wire shape
@@ -2263,6 +2288,10 @@ mod tests {
       ids.contains(&"llamacpp"),
       "backends must list llamacpp: {ids:?}"
     );
+    assert!(
+      ids.contains(&"lemonade"),
+      "backends must list lemonade: {ids:?}"
+    );
     // Each row carries the R16 fields; llama.cpp always offers CPU.
     let llama = backends
       .iter()
@@ -2277,6 +2306,20 @@ mod tests {
       .filter_map(|v| v.as_str())
       .collect();
     assert!(accel.contains(&"cpu"), "llama.cpp floor is cpu: {accel:?}");
+    // The Lemonade row is a managed-multiplexer offering cpu+npu.
+    let lemon = backends
+      .iter()
+      .find(|b| b["id"] == "lemonade")
+      .expect("lemonade row");
+    assert!(lemon["installed"].is_boolean());
+    assert_eq!(lemon["lifecycle"], json!("managed_multiplexer"));
+    let lacc: Vec<&str> = lemon["accelerators"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter_map(|v| v.as_str())
+      .collect();
+    assert!(lacc.contains(&"npu"), "lemonade offers npu: {lacc:?}");
   }
 
   #[tokio::test]

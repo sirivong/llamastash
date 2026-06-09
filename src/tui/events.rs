@@ -4677,10 +4677,11 @@ mod tests {
 
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.focus, Focus::RightPane);
-    // Up from Ctx wraps to the last row (Extras).
+    // The Backend chooser row is visible (a second backend is registered),
+    // so it precedes Ctx; Up from Ctx lands on Backend.
     assert_eq!(
       app.launch_picker.as_ref().expect("picker").field,
-      PickerField::Extras
+      PickerField::Backend
     );
   }
 
