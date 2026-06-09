@@ -102,7 +102,10 @@ async fn bind_with_scan(base: SocketAddr, max_offset: u16) -> BindOutcome {
 }
 
 /// Build the canonical loopback `SocketAddr` from a port. The host is
-/// fixed at `127.0.0.1` — the control plane never binds LAN.
+/// fixed at `127.0.0.1` — the control plane never binds LAN. There is
+/// deliberately no host knob here: `proxy.host` opts only the *proxy
+/// data plane* into LAN exposure (see `crate::proxy::server::listen_addr`);
+/// the control plane stays loopback + same-UID-trust regardless.
 pub fn loopback_addr(port: u16) -> SocketAddr {
   SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
@@ -403,6 +406,19 @@ async fn collect_body(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn loopback_addr_is_always_loopback() {
+    // Guard for the LAN-exposed-proxy feature: the proxy data plane can
+    // bind a routable host, but the control plane must stay loopback no
+    // matter what. `loopback_addr` has no host parameter by design.
+    for port in [0u16, 1, 48134, 11434, 65535] {
+      assert!(
+        loopback_addr(port).ip().is_loopback(),
+        "control plane must never leave loopback (port {port})"
+      );
+    }
+  }
 
   #[tokio::test]
   async fn bind_returns_bound_addr_on_ephemeral_port() {
