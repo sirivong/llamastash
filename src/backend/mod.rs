@@ -44,6 +44,7 @@
 //! rows — reusable by any future backend.
 
 pub mod identity;
+pub mod lemonade;
 pub mod llama_cpp;
 
 use std::collections::BTreeSet;
