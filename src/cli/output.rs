@@ -126,12 +126,15 @@ pub(crate) fn display_size(row: &CatalogRow) -> String {
     .unwrap_or_else(|| "?".to_string())
 }
 
-/// Backend id that serves a catalog row, from its source label (R14).
-/// Every local-file source (user / huggingface / ollama / lm-studio) maps
-/// to `llamacpp`. A future managed-multiplexer backend registers its own
-/// discovery source and adds an arm here.
-pub(crate) fn backend_for_source(_source: &str) -> &'static str {
-  "llamacpp"
+/// Backend id that serves a catalog row, from its source label (R14):
+/// the Lemonade discovery source maps to `lemonade`; every local-file
+/// source (user / huggingface / ollama / lm-studio) to `llamacpp`.
+pub(crate) fn backend_for_source(source: &str) -> &'static str {
+  if source == "lemonade" {
+    "lemonade"
+  } else {
+    "llamacpp"
+  }
 }
 
 /// JSON projection of `list_models` rows. Stable shape — agents pin
@@ -152,8 +155,8 @@ pub fn list_json(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) -> 
         "parent": r.parent,
         "source": r.source,
         // Backend that serves this row (R14 badge): derived from the
-        // source label — every local-file source is served by the direct
-        // llama.cpp backend.
+        // source label — a Lemonade-registry row is served by lemonade,
+        // every local-file source by the direct llama.cpp backend.
         "backend": backend_for_source(&r.source),
         "arch": r.arch,
         "quant": r.quant,

@@ -277,13 +277,14 @@ impl LaunchPickerState {
   }
 
   /// Whether the resolved active backend honors `field` (R6). The Settings
-  /// editor greys rows the active backend can't honor. The picker always
-  /// edits a GGUF model, so the choices here all resolve to llama.cpp (which
-  /// honors every typed knob); a backend that honors a subset adds its arm.
+  /// editor greys rows the active backend can't honor. `Auto`/llama.cpp honor
+  /// every typed knob; Lemonade (managed-multiplexer) honors none.
   pub fn knob_supported(&self, field: KnobField) -> bool {
+    use crate::backend::lemonade::LemonadeBackend;
     use crate::backend::llama_cpp::LlamaCppBackend;
     use crate::backend::Backend;
     match self.backend {
+      BackendChoice::Lemonade => LemonadeBackend::new().capabilities().supports(field),
       BackendChoice::Auto | BackendChoice::LlamaCpp => {
         LlamaCppBackend::new().capabilities().supports(field)
       }
@@ -293,6 +294,7 @@ impl LaunchPickerState {
   /// The active backend's id for the "not supported by `<id>`" label.
   pub fn active_backend_id(&self) -> &'static str {
     match self.backend {
+      BackendChoice::Lemonade => "lemonade",
       BackendChoice::Auto | BackendChoice::LlamaCpp => "llamacpp",
     }
   }

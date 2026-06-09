@@ -138,8 +138,8 @@ pub enum BackendChoice {
   /// flag (snake_case would give `llama_cpp`).
   #[serde(rename = "llamacpp")]
   LlamaCpp,
-  // Additional backends (e.g. a managed-multiplexer engine) add a variant
-  // here + a `resolve_backend` arm.
+  /// Force the Lemonade (`lemond`) managed-multiplexer backend.
+  Lemonade,
 }
 
 impl BackendChoice {
@@ -148,6 +148,7 @@ impl BackendChoice {
     match self {
       BackendChoice::Auto => "auto",
       BackendChoice::LlamaCpp => "llamacpp",
+      BackendChoice::Lemonade => "lemonade",
     }
   }
 }
@@ -614,7 +615,11 @@ mod tests {
 
   #[test]
   fn backend_choice_serde_is_snake_case() {
-    for c in [BackendChoice::Auto, BackendChoice::LlamaCpp] {
+    for c in [
+      BackendChoice::Auto,
+      BackendChoice::LlamaCpp,
+      BackendChoice::Lemonade,
+    ] {
       let s = serde_json::to_string(&c).unwrap();
       let back: BackendChoice = serde_json::from_str(&s).unwrap();
       assert_eq!(c, back);
@@ -622,6 +627,10 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&BackendChoice::LlamaCpp).unwrap(),
       "\"llamacpp\""
+    );
+    assert_eq!(
+      serde_json::to_string(&BackendChoice::Lemonade).unwrap(),
+      "\"lemonade\""
     );
   }
 

@@ -32,8 +32,8 @@
 //!   produces a [`LaunchPlan::DelegateToManager`] carrying the umbrella
 //!   [`ProcessLaunchSpec`] + the model to serve. [`Backend::prepare_launch`]
 //!   stays synchronous for both shapes — the async API call happens when the
-//!   plan is *executed*. No concrete managed-multiplexer backend ships on
-//!   this build; the lifecycle types exist for the first one to register.
+//!   plan is *executed*. Lemonade ([`lemonade`]) is the first
+//!   managed-multiplexer backend.
 //!
 //! # Generalized identity (R12)
 //!
@@ -52,6 +52,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::backend::identity::ModelIdentity;
+use crate::backend::lemonade::{LemonadeBackend, LEMONADE_BACKEND_ID};
 use crate::backend::llama_cpp::LlamaCppBackend;
 use crate::daemon::probe::ProbeOptions;
 use crate::launch::flag_aliases::{knob_specs, KnobField};
@@ -319,38 +320,43 @@ pub trait Backend {
 pub enum Backends {
   /// Direct, zero-overhead llama.cpp (process-per-model).
   LlamaCpp(LlamaCppBackend),
-  // Additional backends (e.g. a managed-multiplexer engine) add a variant
-  // here; the compiler then flags every `match` that must handle it.
+  /// Lemonade (`lemond`) managed-multiplexer — one umbrella, many models.
+  Lemonade(LemonadeBackend),
 }
 
 impl Backend for Backends {
   fn id(&self) -> &'static str {
     match self {
       Backends::LlamaCpp(b) => b.id(),
+      Backends::Lemonade(b) => b.id(),
     }
   }
 
   fn lifecycle(&self) -> Lifecycle {
     match self {
       Backends::LlamaCpp(b) => b.lifecycle(),
+      Backends::Lemonade(b) => b.lifecycle(),
     }
   }
 
   fn capabilities(&self) -> &KnobCapability {
     match self {
       Backends::LlamaCpp(b) => b.capabilities(),
+      Backends::Lemonade(b) => b.capabilities(),
     }
   }
 
   fn accelerators(&self) -> AcceleratorSupport {
     match self {
       Backends::LlamaCpp(b) => b.accelerators(),
+      Backends::Lemonade(b) => b.accelerators(),
     }
   }
 
   fn identify(&self, path: &Path, header_bytes: &[u8]) -> ModelIdentity {
     match self {
       Backends::LlamaCpp(b) => b.identify(path, header_bytes),
+      Backends::Lemonade(b) => b.identify(path, header_bytes),
     }
   }
 
@@ -363,6 +369,7 @@ impl Backend for Backends {
   ) -> LaunchPlan {
     match self {
       Backends::LlamaCpp(b) => b.prepare_launch(params, port, binary, probe),
+      Backends::Lemonade(b) => b.prepare_launch(params, port, binary, probe),
     }
   }
 }
@@ -370,10 +377,9 @@ impl Backend for Backends {
 /// Map a model's [`ModelIdentity`] to the backend that runs it (R13).
 ///
 /// This is the identity-keyed selection rule (the **auto** half of R17): a
-/// GGUF identity binds to the **direct** llama.cpp backend. A non-GGUF
-/// backend-registry identity has no concrete backend on this foundation
-/// build (a managed-multiplexer engine adds its arm here), so it falls back
-/// to the safe direct path.
+/// GGUF identity binds to the **direct** llama.cpp backend; a Lemonade
+/// backend-registry identity binds to the Lemonade managed-multiplexer. An
+/// unknown backend-registry id falls back to the safe direct path.
 ///
 /// This is the one selection seam — adding a backend means adding a variant
 /// to [`Backends`] and a branch here, not editing the supervisor, proxy, or
@@ -381,6 +387,9 @@ impl Backend for Backends {
 pub fn backend_for_identity(identity: &ModelIdentity) -> Backends {
   match identity {
     ModelIdentity::Gguf(_) => Backends::LlamaCpp(LlamaCppBackend::new()),
+    ModelIdentity::Backend(id) if id.backend == LEMONADE_BACKEND_ID => {
+      Backends::Lemonade(LemonadeBackend::new())
+    }
     ModelIdentity::Backend(_) => Backends::LlamaCpp(LlamaCppBackend::new()),
   }
 }
@@ -395,6 +404,7 @@ pub fn resolve_backend(identity: &ModelIdentity, choice: BackendChoice) -> Backe
   match choice {
     BackendChoice::Auto => backend_for_identity(identity),
     BackendChoice::LlamaCpp => Backends::LlamaCpp(LlamaCppBackend::new()),
+    BackendChoice::Lemonade => Backends::Lemonade(LemonadeBackend::new()),
   }
 }
 
@@ -451,24 +461,39 @@ mod tests {
     use crate::gguf::identity::compute;
 
     let gguf = ModelIdentity::Gguf(compute("/m/model.gguf", b"hdr"));
-    // A backend-registry identity with no concrete backend on this build
-    // falls back to the safe direct path.
-    let registry = ModelIdentity::Backend(BackendModelId {
+    let lemon = ModelIdentity::Backend(BackendModelId {
+      backend: LEMONADE_BACKEND_ID.into(),
+      name: "Qwen2.5-7B-Instruct-GGUF".into(),
+    });
+    // A backend-registry identity for an *unknown* backend falls back to the
+    // safe direct path.
+    let unknown = ModelIdentity::Backend(BackendModelId {
       backend: "made-up".into(),
       name: "x".into(),
     });
 
     // Auto runs the R13 identity rule; GGUF + explicit llama.cpp both bind
-    // the direct backend.
+    // the direct backend; a Lemonade identity binds Lemonade.
     assert_eq!(resolve_backend(&gguf, BackendChoice::Auto).id(), "llamacpp");
     assert_eq!(
       resolve_backend(&gguf, BackendChoice::LlamaCpp).id(),
       "llamacpp"
     );
     assert_eq!(
-      resolve_backend(&registry, BackendChoice::Auto).id(),
+      resolve_backend(&lemon, BackendChoice::Auto).id(),
+      "lemonade"
+    );
+    assert_eq!(
+      resolve_backend(&unknown, BackendChoice::Auto).id(),
       "llamacpp",
-      "no concrete backend for a registry identity → safe direct fallback"
+      "no concrete backend for an unknown registry identity → safe direct fallback"
+    );
+
+    // An explicit override wins over the identity rule (R17): force Lemonade
+    // even for a GGUF identity.
+    assert_eq!(
+      resolve_backend(&gguf, BackendChoice::Lemonade).id(),
+      "lemonade"
     );
 
     // The default choice is Auto.
@@ -508,13 +533,24 @@ mod tests {
       Lifecycle::ProcessPerModel
     );
 
-    // A backend-registry identity with no concrete backend on this build
-    // falls back to the safe direct path.
-    let registry = ModelIdentity::Backend(BackendModelId {
+    // A Lemonade-registry identity binds the managed-multiplexer backend.
+    let lemon = ModelIdentity::Backend(BackendModelId {
+      backend: LEMONADE_BACKEND_ID.into(),
+      name: "Qwen2.5-7B-Instruct-GGUF".into(),
+    });
+    assert_eq!(backend_for_identity(&lemon).id(), "lemonade");
+    assert_eq!(
+      backend_for_identity(&lemon).lifecycle(),
+      Lifecycle::ManagedMultiplexer
+    );
+
+    // A backend-registry identity for an unknown backend falls back to the
+    // safe direct path.
+    let unknown = ModelIdentity::Backend(BackendModelId {
       backend: "made-up".into(),
       name: "x".into(),
     });
-    assert_eq!(backend_for_identity(&registry).id(), "llamacpp");
+    assert_eq!(backend_for_identity(&unknown).id(), "llamacpp");
   }
 
   #[test]
@@ -522,6 +558,10 @@ mod tests {
     let llama = Backends::LlamaCpp(LlamaCppBackend::new());
     assert_eq!(llama.id(), "llamacpp");
     assert_eq!(llama.lifecycle(), Lifecycle::ProcessPerModel);
+
+    let lemon = Backends::Lemonade(LemonadeBackend::new());
+    assert_eq!(lemon.id(), "lemonade");
+    assert_eq!(lemon.lifecycle(), Lifecycle::ManagedMultiplexer);
 
     // The dispatch enum routes prepare_launch to the process-per-model plan.
     use crate::launch::mode::LaunchMode;

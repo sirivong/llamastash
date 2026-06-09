@@ -355,6 +355,7 @@ pub enum BackendArg {
   Auto,
   #[value(name = "llamacpp")]
   LlamaCpp,
+  Lemonade,
 }
 
 impl BackendArg {
@@ -363,6 +364,7 @@ impl BackendArg {
     match self {
       BackendArg::Auto => "auto",
       BackendArg::LlamaCpp => "llamacpp",
+      BackendArg::Lemonade => "lemonade",
     }
   }
 }
