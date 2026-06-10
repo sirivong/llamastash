@@ -88,9 +88,9 @@ llamastash list          # Lemonade registry models appear, tagged `lemonade`
 ```
 
 Send a chat request for a Lemonade model through the proxy and it routes to the
-umbrella. In the TUI Launch picker, a Lemonade model shows a **Backend** row
-reading `lemonade` with the llama.cpp-specific knobs greyed (Lemonade takes a
-model name, not launch flags); a plain GGUF row hides the Backend row.
+umbrella. In the TUI Launch picker, a Lemonade model shows only the knobs
+lemond honors — `ctx` and the free-form extras (forwarded as the recipe's
+`*_args`); the llama.cpp-specific knobs are hidden.
 
 ## 5. Troubleshooting
 

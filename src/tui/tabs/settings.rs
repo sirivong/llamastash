@@ -147,26 +147,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   // short ones the focused row stays visible with ≥1 row of context.
   let mut focused_line: Option<u16> = None;
 
-  // Backend chooser (R17) — first row, shown only when there's an actual
-  // choice (more than one concrete backend). With just llama.cpp it is
-  // hidden + skipped in navigation, so single-backend users see no clutter.
-  if picker_view.field_visible(PickerField::Backend) {
-    let focused = row_for(PickerField::Backend);
-    if focused {
-      focused_line = Some(lines.len() as u16);
-    }
-    lines.push(kv_focused(
-      "backend",
-      picker_view.backend_label().to_string(),
-      None,
-      focused,
-      // Cycled with ←/→, not text-editable.
-      false,
-      palette,
-      show_source,
-    ));
-  }
-
   // Every typed knob — including ctx and reasoning — flows through
   // the same `value (chip)` shape, grouped by function with a header
   // per cluster (display order is distinct from argv order). Empty

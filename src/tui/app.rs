@@ -1974,9 +1974,14 @@ mod tests {
       picker.model_backend,
       crate::launch::params::BackendChoice::Lemonade
     );
+    let visible: Vec<PickerField> = PickerField::all()
+      .iter()
+      .copied()
+      .filter(|f| picker.field_visible(*f))
+      .collect();
     assert!(
-      picker.field_visible(PickerField::Backend),
-      "lemonade row must surface the Backend chooser"
+      visible.len() == 2,
+      "lemonade picker is ctx + extras only, got {visible:?}"
     );
   }
 

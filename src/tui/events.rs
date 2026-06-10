@@ -435,9 +435,6 @@ fn open_focused_inline_edit(app: &mut App) {
       picker.extras_input.set_text(joined);
       picker.extras_input.enter_edit();
     }
-    // Backend is cycled (←/→), not typed — unreachable past the
-    // `is_editable()` guard above; the arm satisfies exhaustiveness.
-    PickerField::Backend => {}
   }
 }
 
@@ -563,9 +560,6 @@ fn commit_inline_edit(app: &mut App) -> bool {
       }
     },
     PickerField::Extras => Ok(()),
-    // Backend is cycled, never inline-edited (no `inline_edit.field` is
-    // ever set to it); arm satisfies exhaustiveness.
-    PickerField::Backend => Ok(()),
   };
   match result {
     Ok(()) => {
@@ -1752,7 +1746,7 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
     extras,
     mode,
     prefer_port: picker.prefer_port,
-    backend: picker.backend,
+    backend: picker.model_backend,
   });
 
   if active_instances > 0 {
