@@ -72,6 +72,12 @@ pub struct ProxyState {
   /// the CLI / env OR-chain that may force it off); never mutated
   /// thereafter.
   pub(crate) fallback_enabled: bool,
+  /// Bearer-token policy for the data routes. Built from the resolved
+  /// `ProxyConfig::api_key`; when no key is configured this is the
+  /// disabled policy and [`crate::proxy::auth::ProxyAuth::enforced`]
+  /// returns `false`, so the router skips the check entirely. Set once
+  /// at daemon startup; never mutated thereafter.
+  pub(crate) auth: super::auth::ProxyAuth,
 }
 
 impl ProxyState {
@@ -89,11 +95,26 @@ impl ProxyState {
   /// The proxy task receives this handle from `run_foreground` after
   /// the rest of the daemon context has been assembled. `ollama_compat`
   /// and `fallback_enabled` reflect the resolved bools from
-  /// `ProxyConfig` (after the CLI / env OR-chain).
+  /// `ProxyConfig` (after the CLI / env OR-chain). Auth is disabled
+  /// (loopback, same-UID posture) — production uses
+  /// [`Self::from_context_with_auth`] to attach a bearer key.
   pub fn from_context(
     ctx: &MethodContext,
     ollama_compat: bool,
     fallback_enabled: bool,
+  ) -> Arc<Self> {
+    Self::from_context_with_auth(ctx, ollama_compat, fallback_enabled, None)
+  }
+
+  /// Like [`Self::from_context`] but with a resolved bearer `api_key`
+  /// (`None` disables auth). The daemon's `run_foreground` passes the
+  /// resolved `ProxyConfig::api_key` here; tests use the keyless
+  /// [`Self::from_context`].
+  pub fn from_context_with_auth(
+    ctx: &MethodContext,
+    ollama_compat: bool,
+    fallback_enabled: bool,
+    api_key: Option<String>,
   ) -> Arc<Self> {
     Arc::new(Self {
       http_client: Arc::new(build_http_client()),
@@ -103,6 +124,7 @@ impl ProxyState {
       ctx: ctx.clone(),
       ollama_compat,
       fallback_enabled,
+      auth: super::auth::ProxyAuth::new(api_key),
     })
   }
 }

@@ -164,7 +164,7 @@ async fn shutdown_listener(shutdown: ShutdownToken, handle: tokio::task::JoinHan
 async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
   let deadline = std::time::Instant::now() + budget;
   while std::time::Instant::now() < deadline {
-    if let ProxyStatus::Listening { addr } = status.read().unwrap().clone() {
+    if let ProxyStatus::Listening { addr, .. } = status.read().unwrap().clone() {
       return Some(addr);
     }
     sleep(Duration::from_millis(10)).await;

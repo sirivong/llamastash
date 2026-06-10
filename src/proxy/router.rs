@@ -59,6 +59,21 @@ pub async fn route(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRespo
   let method = req.method().clone();
   let path = req.uri().path().to_string();
 
+  // Bearer auth on the data plane. The liveness / identity probes
+  // (`GET|HEAD /`, `GET /health`) stay open so health checks and the
+  // Ollama handshake work without a key; everything else (`/v1/*`,
+  // `/api/*`) requires the configured `Authorization: Bearer <key>`.
+  // When no key is configured `enforced()` is `false` and we skip the
+  // check before touching the headers — the loopback default path is
+  // unchanged (no added allocation, one boolean test).
+  let auth_exempt = matches!(
+    (&method, path.as_str()),
+    (&Method::GET | &Method::HEAD, "/") | (&Method::GET, "/health")
+  );
+  if !auth_exempt && state.auth.enforced() && !state.auth.check(req.headers()) {
+    return unauthorized();
+  }
+
   // Route table — OpenAI compat (`/v1/...`) is the primary surface;
   // Ollama compat (`/api/...`, Tier 1) is the discovery surface so
   // Ollama-shape clients recognise the proxy.
@@ -659,6 +674,25 @@ fn capabilities_for(discovered: Option<&DiscoveredModel>) -> Vec<&'static str> {
 
 fn not_found() -> ProxyResponse {
   error_response(StatusCode::NOT_FOUND, "not_found", "no such route")
+}
+
+/// `401 Unauthorized` for the data plane when bearer auth is enforced
+/// and the request's `Authorization` header is missing or wrong.
+/// OpenAI-shaped body (so SDK clients surface it as an auth error)
+/// plus a `WWW-Authenticate: Bearer` challenge. The message is
+/// deliberately generic — it never echoes the supplied token.
+fn unauthorized() -> ProxyResponse {
+  let bytes = serde_json::to_vec(&ErrorResponse {
+    error: ErrorObject::new("invalid_request_error", "missing or invalid API key")
+      .with_code("invalid_api_key"),
+  })
+  .expect("json encoding of fixed shape");
+  let mut resp = json_response(StatusCode::UNAUTHORIZED, bytes);
+  resp.headers_mut().insert(
+    hyper::header::WWW_AUTHENTICATE,
+    hyper::header::HeaderValue::from_static("Bearer"),
+  );
+  Ok(resp)
 }
 
 /// Build an OpenAI-shaped error response from a `(status, type,

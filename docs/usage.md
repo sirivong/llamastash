@@ -384,9 +384,37 @@ The three are OR-ed; any one of them turns compat mode on. Effects:
 
 Default mode (no compat) is fine when clients reach `/api/tags` directly without doing the handshake (`ollama-python`'s default code path, most IDE plugins, curl scripts). Compat mode is required when the client is `ollama` CLI or links the Ollama-Go SDK.
 
+### LAN access (opt-in, behind a key)
+
+By default the proxy binds `127.0.0.1` and runs keyless — same-machine threat model. To reach your models from another box, bind a routable address:
+
+| Source | Form |
+| ------ | ---- |
+| CLI    | `llamastash daemon start --proxy-host 0.0.0.0` |
+| Config | `proxy.host: 0.0.0.0` in `config.yaml` |
+| Env    | `LLAMASTASH_PROXY_HOST=0.0.0.0` |
+
+CLI beats env beats config. A specific NIC IP or an IPv6 address (`::`) work too. Only the proxy data plane moves — the control plane and `llama-server` children stay loopback.
+
+Because an open proxy on the network would let anyone drive your GPU, a non-loopback bind **requires** a bearer key:
+
+- On the first LAN-enabled `daemon start`, llamastash generates an `sk-llamastash-…` key, writes it to `proxy.api_key` in your config (atomic, mode `0600`), and prints it once. Send it as `Authorization: Bearer <key>`:
+
+  ```bash
+  curl http://<box-ip>:11434/v1/chat/completions \
+    -H "Authorization: Bearer sk-llamastash-…" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"<discovered-name>","messages":[{"role":"user","content":"hi"}]}'
+  ```
+
+- The daemon **refuses** to bind a non-loopback address with no key (`status.proxy.status: "refused_insecure"`; the daemon and control plane keep running). Resolve it by letting the CLI provision a key, setting `proxy.api_key`, or passing `--insecure-no-auth` / `proxy.insecure_no_auth: true` to deliberately run an unauthenticated LAN proxy. A loud warning prints either way.
+- A configured key is enforced on every data route (`/v1/*`, `/api/*`); the liveness probes `GET /` and `GET /health` stay open. `LLAMASTASH_PROXY_API_KEY` overrides the config key for the process and is never written back to disk (containers / secret managers).
+
+> **No TLS yet.** LAN mode is plaintext HTTP, so the bearer key is visible to anyone sniffing the network. Keep it on a trusted LAN, or put a TLS-terminating reverse proxy (caddy, nginx, …) in front. Native TLS is a planned follow-up.
+
 ### Connecting an agent
 
-Set the OpenAI base URL to `http://127.0.0.1:11435/v1` (default mode) or `http://127.0.0.1:11434/v1` (Ollama-compat mode) and use any string as the API key — the proxy ignores authentication. The base-URL pattern works with any OpenAI-compatible client; the standard env var names across the ecosystem are:
+Set the OpenAI base URL to `http://127.0.0.1:11435/v1` (default mode) or `http://127.0.0.1:11434/v1` (Ollama-compat mode). On the default loopback bind the proxy ignores authentication, so any string works as the API key. If you exposed the proxy on the LAN ([LAN access](#lan-access-opt-in-behind-a-key)), put your `sk-llamastash-…` key in the client's API-key field instead: OpenAI-compatible clients send the API key as `Authorization: Bearer <key>`, which is exactly what the proxy validates, so no client-side change is needed beyond the key value. (The proxy only accepts the `Authorization: Bearer` scheme, not Azure-style `api-key:` headers; Ollama-native clients hitting `/api/*` send no key, so they get a `401` once auth is on.) The base-URL pattern works with any OpenAI-compatible client; the standard env var names across the ecosystem are:
 
 | Client                    | Env var(s)                                                                                           |
 | ------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -434,7 +462,7 @@ The model keys must match what you send in `body.model`; llamastash
 will resolve that name against the catalog and auto-start the target if
 needed.
 
-> **Auth posture.** The proxy has **no authentication** by design. It binds loopback-only (`127.0.0.1`), so the threat model is "same machine, any UID can issue requests." Don't run llamastash on a shared host or expose the port; the proxy refuses to bind anything but loopback and the daemon ships no `--host` / `--bind` / `--api-key` knob. LAN exposure, auth, and TLS are deferred follow-ups (see the roadmap in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md) and the v1 R34 deferral kept in [`AGENTS.md`](https://github.com/llamastash/llamastash/blob/main/AGENTS.md)).
+> **Auth posture.** On the default loopback bind the proxy has **no authentication** — the threat model is "same machine, any UID can issue requests," so don't run llamastash on a shared host. Exposing it on the LAN ([LAN access](#lan-access-opt-in-behind-a-key)) requires a bearer key, which llamastash auto-provisions and enforces; the daemon refuses a non-loopback bind with no key unless you pass `--insecure-no-auth`. TLS is still a deferred follow-up, so LAN mode is plaintext (trusted network or reverse proxy). The control plane and `llama-server` children always stay loopback regardless.
 
 ### Is the proxy up?
 
@@ -442,20 +470,24 @@ needed.
 llamastash status --json | jq .proxy
 ```
 
-Shape, all four states:
+`host` is the bound IP (derived from `listen`); `auth` is `"enforced"` when a bearer key is required, `"none"` on the keyless loopback default, or `"required"` for `refused_insecure`. The key itself is never reported. Shape, all five states:
 
 ```json
-// Listening on the configured port:
-{ "enabled": true,  "listen": "127.0.0.1:11435", "status": "listening",   "bind_error": null }
+// Listening on the configured port (keyless loopback default):
+{ "enabled": true,  "listen": "127.0.0.1:11435", "host": "127.0.0.1", "status": "listening",       "auth": "none",     "bind_error": null }
+// Listening on the LAN with a bearer key required:
+{ "enabled": true,  "listen": "0.0.0.0:11434",   "host": "0.0.0.0",   "status": "listening",       "auth": "enforced", "bind_error": null }
 // Config has proxy.enabled: false:
-{ "enabled": false, "listen": null,              "status": "disabled",    "bind_error": null }
+{ "enabled": false, "listen": null,              "host": null,        "status": "disabled",        "auth": "none",     "bind_error": null }
 // All six ports in the scan range (port..=port+5) taken:
-{ "enabled": true,  "listen": "127.0.0.1:11439", "status": "port_in_use", "bind_error": null }
+{ "enabled": true,  "listen": "127.0.0.1:11439", "host": "127.0.0.1", "status": "port_in_use",     "auth": "none",     "bind_error": null }
 // Bind failed for some other reason (EACCES, EADDRNOTAVAIL, …):
-{ "enabled": true,  "listen": "127.0.0.1:80",    "status": "unbound",     "bind_error": "permission denied" }
+{ "enabled": true,  "listen": "127.0.0.1:80",    "host": "127.0.0.1", "status": "unbound",         "auth": "none",     "bind_error": "permission denied" }
+// Non-loopback host requested with no key and no --insecure-no-auth (daemon stays up, proxy skipped):
+{ "enabled": true,  "listen": "0.0.0.0:11434",   "host": "0.0.0.0",   "status": "refused_insecure", "auth": "required", "bind_error": "refused to bind a non-loopback proxy without authentication; set proxy.api_key or pass --insecure-no-auth" }
 ```
 
-The same block is on the IPC `status` method response. The TUI's Daemon info pane shows the proxy state on row 3 as `proxy <status> 127.0.0.1:<port>` (always present alongside the `server <path>` row above it); a toast fires on the transition into `port_in_use`. `proxy.enabled: false` renders the row as `proxy disabled`.
+The same block is on the IPC `status` method response. The TUI's Daemon info pane shows the proxy state on row 3 as `proxy <status> <addr>` (an authed LAN listener adds `(auth)`); a toast fires on the transition into `port_in_use` or `refused_insecure`. `proxy.enabled: false` renders the row as `proxy disabled`.
 
 ### Endpoints
 

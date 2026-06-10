@@ -11,7 +11,7 @@
 //! `status` — connect to the daemon and report PID + uptime; emits "not
 //! running" if the socket is missing or the connection fails.
 
-use std::{path::PathBuf, time::Duration};
+use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 
@@ -37,6 +37,8 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
       proxy_port,
       ollama_compat,
       no_proxy_fallback,
+      proxy_host,
+      insecure_no_auth,
     } => {
       handle_start(
         foreground,
@@ -44,6 +46,8 @@ pub async fn handle(action: DaemonAction, cli: &Cli, config: &Config) -> Result<
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
+        proxy_host,
+        insecure_no_auth,
         cli,
         config,
       )
@@ -67,17 +71,26 @@ async fn handle_start(
   proxy_port: Option<u16>,
   ollama_compat: bool,
   no_proxy_fallback: bool,
+  proxy_host: Option<IpAddr>,
+  insecure_no_auth: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<()> {
-  let opts = build_options(
+  let mut opts = build_options(
     state_dir,
     proxy_port,
     ollama_compat,
     no_proxy_fallback,
+    proxy_host,
+    insecure_no_auth,
     cli,
     config,
   )?;
+  // Provision the proxy bearer key when a LAN bind is requested. Runs
+  // in the parent (or the foreground process) so the generated key is
+  // printed to the user's terminal; the detached child re-reads it
+  // from config. No-op for loopback / pre-set key / --insecure-no-auth.
+  provision_proxy_key(&mut opts, cli, foreground)?;
   if foreground {
     // `--foreground` (or `-f`) keeps the daemon attached to the
     // controlling terminal. Print a one-line notice up front so the
@@ -142,6 +155,127 @@ fn print_already_running(pid: i32) {
     crate::cli::colors::dim("daemon: already running"),
     crate::cli::colors::dim("pid"),
     console::style(pid.to_string()).bold(),
+  );
+}
+
+/// Provision the proxy bearer key when a non-loopback bind is
+/// requested. Runs in the CLI parent (and the foreground path) so the
+/// generated key reaches the user's terminal. No-op for a loopback
+/// bind, when a key is already set (config or `LLAMASTASH_PROXY_API_KEY`),
+/// or when `--insecure-no-auth` waives auth. Otherwise it generates a
+/// key, persists `proxy.api_key` to `config.yaml` (atomic, mode 0600),
+/// sets it on `opts`, and prints it once.
+///
+/// Idempotent across the detached re-exec: the child re-reads the now-
+/// persisted key from config, so this short-circuits without
+/// regenerating or reprinting.
+///
+/// `foreground` controls how a persistence failure is handled. The
+/// generated key lives on `opts` regardless, so a `--foreground` daemon
+/// (same process) keeps working for this run even if the write failed.
+/// A detached daemon re-execs and reads the key back from config — the
+/// key is never passed via argv — so if the write failed the child
+/// can't see it, hits the backstop, and silently drops the proxy. In
+/// that case we refuse to start rather than print a key that will never
+/// authenticate.
+fn provision_proxy_key(opts: &mut DaemonOptions, cli: &Cli, foreground: bool) -> Result<()> {
+  let host = opts.proxy.effective_host();
+  // Loopback needs no key; a configured / env key is used as-is (and an
+  // env key is deliberately never written back to disk).
+  if host.is_loopback() || opts.proxy.api_key.is_some() {
+    return Ok(());
+  }
+  let port = opts.proxy.effective_port();
+  if opts.proxy.insecure_no_auth {
+    eprintln!(
+      "{}",
+      crate::cli::colors::warning(&format!(
+        "proxy: binding {host}:{port} with NO authentication (--insecure-no-auth). \
+         Anyone who can reach this address can use your models — trusted networks only."
+      ))
+    );
+    return Ok(());
+  }
+  let key = crate::proxy::ProxyApiKey::generate();
+  let key_str = key.as_str().to_string();
+  opts.proxy.api_key = Some(key_str.clone());
+  let persisted = match crate::config::config_path(cli.config.clone()) {
+    Some(path) => {
+      match crate::config::writer::merge_and_write(&path, proxy_api_key_additions(&key_str)) {
+        Ok(_) => true,
+        Err(e) => {
+          log::warn!("failed to persist generated proxy api_key: {e}");
+          false
+        }
+      }
+    }
+    None => {
+      log::warn!("no writable config path; generated proxy api_key was not persisted");
+      false
+    }
+  };
+  // A detached daemon reads the key back from config; an unpersisted key
+  // can't reach it, so the proxy would refuse to bind while we'd have
+  // claimed LAN access is up. Fail loudly instead.
+  if !persisted && !foreground {
+    return Err(anyhow::anyhow!(
+      "proxy: generated a LAN API key but could not save it to config, so the \
+       backgrounded daemon can't read it back and the proxy would not start. Set a \
+       writable config (e.g. --config <path>) or set proxy.api_key yourself, or run \
+       with --foreground. Daemon not started."
+    ));
+  }
+  print_provisioned_key(host, port, &key_str, persisted);
+  Ok(())
+}
+
+/// Build the `{ proxy: { api_key: <key> } }` YAML fragment the config
+/// merge persists. Nested so the recursive merge sets only `api_key`
+/// and preserves the user's other `proxy` keys.
+fn proxy_api_key_additions(key: &str) -> serde_yaml::Value {
+  let mut proxy = serde_yaml::Mapping::new();
+  proxy.insert(
+    serde_yaml::Value::String("api_key".into()),
+    serde_yaml::Value::String(key.to_string()),
+  );
+  let mut root = serde_yaml::Mapping::new();
+  root.insert(
+    serde_yaml::Value::String("proxy".into()),
+    serde_yaml::Value::Mapping(proxy),
+  );
+  serde_yaml::Value::Mapping(root)
+}
+
+/// One-time banner shown when a LAN proxy key is auto-generated. When
+/// `persisted` the key is saved to config and reused on the next start;
+/// otherwise (a foreground run whose write failed) it lives only in
+/// this process and a fresh key is generated next time — the banner
+/// says so rather than claiming it was saved.
+fn print_provisioned_key(host: IpAddr, port: u16, key: &str, persisted: bool) {
+  println!(
+    "{}",
+    crate::cli::colors::success(&format!("proxy: LAN access enabled on {host}:{port}"))
+  );
+  let save_note = if persisted {
+    "proxy: generated an API key (saved to your config, shown once):"
+  } else {
+    "proxy: generated an API key (could NOT save to config — valid for this run only, regenerates next start):"
+  };
+  println!("{}", crate::cli::colors::dim(save_note));
+  println!("    {key}");
+  // For 0.0.0.0 / :: the user must substitute the box's LAN IP; show a
+  // bearer-token usage hint either way.
+  let example_host = if host.is_unspecified() {
+    "<lan-ip>".to_string()
+  } else {
+    host.to_string()
+  };
+  println!(
+    "{}",
+    crate::cli::colors::dim(&format!(
+      "    use it as a bearer token, e.g.\n    \
+       curl http://{example_host}:{port}/v1/models -H \"Authorization: Bearer {key}\""
+    ))
   );
 }
 
@@ -237,11 +371,16 @@ fn force_stop_via_pid(pid: i32, attach_dir: &std::path::Path) -> Result<()> {
 /// `known_caches::default_set`. An empty config + no flags still
 /// produces a working daemon — the daemon just operates with whichever
 /// HF/Ollama/LM Studio caches exist on disk.
+// Same rationale as `handle_start`: each `daemon start` knob costs an
+// argument here. A typed bundle would just relocate the unpack.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_options(
   state_dir: Option<PathBuf>,
   proxy_port: Option<u16>,
   ollama_compat_cli: bool,
   no_proxy_fallback_cli: bool,
+  proxy_host: Option<IpAddr>,
+  insecure_no_auth_cli: bool,
   cli: &Cli,
   config: &Config,
 ) -> Result<DaemonOptions> {
@@ -318,6 +457,51 @@ pub(crate) fn build_options(
   opts.proxy = config.proxy.clone();
   if let Some(p) = proxy_port {
     opts.proxy.port = Some(p);
+  }
+  // Proxy bind host: CLI > env (`LLAMASTASH_PROXY_HOST`) > config.
+  // A bad env value is logged and ignored rather than failing startup
+  // — the config / default host still applies.
+  if let Some(h) = proxy_host {
+    opts.proxy.host = Some(h);
+  } else if let Some(raw) = std::env::var_os("LLAMASTASH_PROXY_HOST") {
+    match raw.to_string_lossy().trim().parse::<IpAddr>() {
+      Ok(h) => opts.proxy.host = Some(h),
+      Err(e) => log::warn!(
+        "ignoring LLAMASTASH_PROXY_HOST={:?}: not a valid IP address ({e})",
+        raw
+      ),
+    }
+  }
+  // Insecure-no-auth opt-out: OR of (config field, `--insecure-no-auth`
+  // CLI flag, `LLAMASTASH_PROXY_INSECURE_NO_AUTH` env var). Any one of
+  // the three waives the LAN auth requirement; the key auto-provision
+  // path and the daemon backstop both read the resolved value.
+  let env_insecure = env_flag_truthy("LLAMASTASH_PROXY_INSECURE_NO_AUTH");
+  opts.proxy.insecure_no_auth = opts.proxy.insecure_no_auth || insecure_no_auth_cli || env_insecure;
+  // Proxy API key env override: `LLAMASTASH_PROXY_API_KEY` wins over
+  // the config value for this process and is never written back to
+  // disk (containers / secret managers). An empty/blank value is
+  // ignored so a stray `export` doesn't accidentally enable auth.
+  if let Some(raw) = std::env::var_os("LLAMASTASH_PROXY_API_KEY") {
+    let key = raw.to_string_lossy().trim().to_string();
+    if !key.is_empty() {
+      opts.proxy.api_key = Some(key);
+    }
+  }
+  // Normalize a blank / whitespace-only `api_key` (e.g. `proxy.api_key:
+  // ""` hand-edited into config) to `None`. Without this the
+  // fail-closed backstop (`api_key.is_none()`) and the auth layer
+  // (`ProxyAuth` treats a blank key as no auth) would disagree, and a
+  // blank key on a non-loopback host would bind an *unauthenticated*
+  // LAN proxy while skipping the refusal. Treating blank as "no key"
+  // makes the backstop refuse (or the CLI provision a real key).
+  if opts
+    .proxy
+    .api_key
+    .as_deref()
+    .is_some_and(|k| k.trim().is_empty())
+  {
+    opts.proxy.api_key = None;
   }
   // Ollama-compat: OR of (config field, `--ollama-compat` CLI flag,
   // `LLAMASTASH_OLLAMA_COMPAT` env var). Any one of the three enables
@@ -760,6 +944,7 @@ mod tests {
 
   #[test]
   fn build_options_threads_config_proxy_block_into_daemon_options() {
+    let _env = crate::cli::test_lock::serialize();
     // Regression: before this wiring landed, config.proxy.port was
     // parsed and validated but `build_options` never copied it onto
     // DaemonOptions.proxy. The daemon silently ran with
@@ -774,10 +959,14 @@ mod tests {
         fallback_enabled: true,
         header_read_timeout_secs: 45,
         idle_ttl_secs: 1800,
+        host: None,
+        api_key: None,
+        insecure_no_auth: false,
       },
       ..Config::default()
     };
-    let opts = build_options(None, None, false, false, &cli, &config).expect("build_options");
+    let opts =
+      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
     assert_eq!(
       opts.proxy.port,
       Some(22222),
@@ -791,6 +980,7 @@ mod tests {
 
   #[test]
   fn build_options_proxy_port_cli_overrides_config_value() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config {
       proxy: crate::config::loader::ProxyConfig {
@@ -800,11 +990,15 @@ mod tests {
         fallback_enabled: true,
         header_read_timeout_secs: 30,
         idle_ttl_secs: 1800,
+        host: None,
+        api_key: None,
+        insecure_no_auth: false,
       },
       ..Config::default()
     };
     // The CLI override (Some(8080)) beats config.proxy.port.
-    let opts = build_options(None, Some(8080), false, false, &cli, &config).expect("build_options");
+    let opts = build_options(None, Some(8080), false, false, None, false, &cli, &config)
+      .expect("build_options");
     assert_eq!(opts.proxy.port, Some(8080), "CLI flag overrides config");
     assert_eq!(opts.proxy.effective_port(), 8080);
     // Other proxy fields still come from config (not reset).
@@ -814,12 +1008,14 @@ mod tests {
 
   #[test]
   fn build_options_no_cli_override_falls_back_to_config_then_default() {
+    let _env = crate::cli::test_lock::serialize();
     // Defaults all the way down: no CLI override, no proxy block in
     // config → daemon uses ProxyConfig::default(), which resolves to
     // 11435 (default mode) when nothing pins `port` explicitly.
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts = build_options(None, None, false, false, &cli, &config).expect("build_options");
+    let opts =
+      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
     assert_eq!(opts.proxy.port, None);
     assert_eq!(opts.proxy.effective_port(), 11435);
     assert!(!opts.proxy.ollama_compat);
@@ -827,9 +1023,11 @@ mod tests {
 
   #[test]
   fn build_options_ollama_compat_cli_flag_flips_mode_and_default_port() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    let opts = build_options(None, None, true, false, &cli, &config).expect("build_options");
+    let opts =
+      build_options(None, None, true, false, None, false, &cli, &config).expect("build_options");
     assert!(opts.proxy.ollama_compat);
     // Port stays None at the schema level — the CLI flag drives the
     // mode bool, and `effective_port()` derives the runtime port.
@@ -839,6 +1037,7 @@ mod tests {
 
   #[test]
   fn build_options_ollama_compat_or_combines_config_cli_env() {
+    let _env = crate::cli::test_lock::serialize();
     // Config-only: config says compat=true, CLI flag off → enabled.
     let cli = parse_cli(&["daemon", "start"]);
     let config_compat = Config {
@@ -848,38 +1047,331 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts_config =
-      build_options(None, None, false, false, &cli, &config_compat).expect("build_options");
+    let opts_config = build_options(None, None, false, false, None, false, &cli, &config_compat)
+      .expect("build_options");
     assert!(opts_config.proxy.ollama_compat);
 
     // CLI-only: config has compat=false, CLI flag on → enabled.
     let config_off = Config::default();
-    let opts_cli =
-      build_options(None, None, true, false, &cli, &config_off).expect("build_options");
+    let opts_cli = build_options(None, None, true, false, None, false, &cli, &config_off)
+      .expect("build_options");
     assert!(opts_cli.proxy.ollama_compat);
 
     // Both off (neither config nor CLI) → disabled.
-    let opts_neither =
-      build_options(None, None, false, false, &cli, &config_off).expect("build_options");
+    let opts_neither = build_options(None, None, false, false, None, false, &cli, &config_off)
+      .expect("build_options");
     assert!(!opts_neither.proxy.ollama_compat);
   }
 
   #[test]
+  fn build_options_proxy_host_cli_overrides_config() {
+    let _env = crate::cli::test_lock::serialize();
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        host: Some("1.2.3.4".parse().unwrap()),
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let cli_host: std::net::IpAddr = "9.9.9.9".parse().unwrap();
+    let opts = build_options(
+      None,
+      None,
+      false,
+      false,
+      Some(cli_host),
+      false,
+      &cli,
+      &config,
+    )
+    .expect("build_options");
+    assert_eq!(
+      opts.proxy.host,
+      Some(cli_host),
+      "CLI host must win over config"
+    );
+    assert_eq!(opts.proxy.effective_host(), cli_host);
+  }
+
+  #[test]
+  fn build_options_proxy_host_from_config_when_no_cli() {
+    let _env = crate::cli::test_lock::serialize();
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        host: Some("0.0.0.0".parse().unwrap()),
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let opts =
+      build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
+    assert_eq!(opts.proxy.host, Some("0.0.0.0".parse().unwrap()));
+    assert!(!opts.proxy.effective_host().is_loopback());
+  }
+
+  #[test]
+  fn build_options_insecure_no_auth_or_combines_config_cli() {
+    let _env = crate::cli::test_lock::serialize();
+    let cli = parse_cli(&["daemon", "start"]);
+    // CLI flag on, config off → on.
+    let opts_cli = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      true,
+      &cli,
+      &Config::default(),
+    )
+    .expect("build_options");
+    assert!(opts_cli.proxy.insecure_no_auth);
+    // Config on, CLI off → on.
+    let config_insecure = Config {
+      proxy: crate::config::loader::ProxyConfig {
+        insecure_no_auth: true,
+        ..crate::config::loader::ProxyConfig::default()
+      },
+      ..Config::default()
+    };
+    let opts_config = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &config_insecure,
+    )
+    .expect("build_options");
+    assert!(opts_config.proxy.insecure_no_auth);
+    // Both off → off (the safe default).
+    let opts_off = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &Config::default(),
+    )
+    .expect("build_options");
+    assert!(!opts_off.proxy.insecure_no_auth);
+  }
+
+  #[test]
+  fn build_options_proxy_host_and_key_from_env() {
+    let _env = crate::cli::test_lock::serialize();
+    let prev_host = std::env::var_os("LLAMASTASH_PROXY_HOST");
+    let prev_key = std::env::var_os("LLAMASTASH_PROXY_API_KEY");
+    std::env::set_var("LLAMASTASH_PROXY_HOST", "0.0.0.0");
+    std::env::set_var("LLAMASTASH_PROXY_API_KEY", "sk-llamastash-fromenv");
+    let cli = parse_cli(&["daemon", "start"]);
+    let opts = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &Config::default(),
+    );
+    let restore = |k: &str, v: Option<std::ffi::OsString>| match v {
+      Some(v) => std::env::set_var(k, v),
+      None => std::env::remove_var(k),
+    };
+    restore("LLAMASTASH_PROXY_HOST", prev_host);
+    restore("LLAMASTASH_PROXY_API_KEY", prev_key);
+    let opts = opts.expect("build_options");
+    assert_eq!(opts.proxy.host, Some("0.0.0.0".parse().unwrap()));
+    assert_eq!(opts.proxy.api_key.as_deref(), Some("sk-llamastash-fromenv"));
+  }
+
+  /// Build a non-loopback `DaemonOptions` + a `Cli` pinned to
+  /// `config_path` so `provision_proxy_key` reads/writes a temp config.
+  fn non_loopback_opts(config_path: &std::path::Path) -> (DaemonOptions, Cli) {
+    let mut opts = DaemonOptions::from_defaults().expect("defaults");
+    opts.proxy.host = Some("0.0.0.0".parse().unwrap());
+    let cli = parse_cli(&["--config", config_path.to_str().unwrap(), "daemon", "start"]);
+    (opts, cli)
+  }
+
+  #[test]
+  fn build_options_normalizes_blank_api_key_to_none() {
+    // Fail-closed guard: a blank `proxy.api_key` must not count as a
+    // key, or a non-loopback host would bind unauthenticated while the
+    // backstop (is_none) stayed silent.
+    // Serialize + clear the proxy env overrides so a concurrent
+    // env-driven test can't leak a key into this one.
+    let _env = crate::cli::test_lock::serialize();
+    let prev_key = std::env::var_os("LLAMASTASH_PROXY_API_KEY");
+    std::env::remove_var("LLAMASTASH_PROXY_API_KEY");
+    let cli = parse_cli(&["daemon", "start"]);
+    for blank in ["", "   ", "\t\n"] {
+      let config = Config {
+        proxy: crate::config::loader::ProxyConfig {
+          host: Some("0.0.0.0".parse().unwrap()),
+          api_key: Some(blank.to_string()),
+          ..crate::config::loader::ProxyConfig::default()
+        },
+        ..Config::default()
+      };
+      let opts =
+        build_options(None, None, false, false, None, false, &cli, &config).expect("build_options");
+      assert_eq!(
+        opts.proxy.api_key, None,
+        "blank api_key {blank:?} must normalize to None"
+      );
+      assert!(!opts.proxy.auth_enforced());
+    }
+    if let Some(v) = prev_key {
+      std::env::set_var("LLAMASTASH_PROXY_API_KEY", v);
+    }
+  }
+
+  #[test]
+  fn provision_generates_persists_and_sets_key_for_lan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    assert!(opts.proxy.api_key.is_none());
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
+    let key = opts.proxy.api_key.clone().expect("key set on opts");
+    assert!(key.starts_with("sk-llamastash-"), "unexpected key: {key}");
+    let written = std::fs::read_to_string(&cfg).expect("config written");
+    assert!(written.contains(&key), "key not persisted: {written}");
+    assert!(written.contains("api_key"));
+  }
+
+  #[test]
+  fn provision_is_idempotent_when_key_already_set() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    provision_proxy_key(&mut opts, &cli, false).expect("first");
+    let first = opts.proxy.api_key.clone().unwrap();
+    let first_file = std::fs::read_to_string(&cfg).unwrap();
+    // Second call: key already present → no regeneration, no rewrite.
+    provision_proxy_key(&mut opts, &cli, false).expect("second");
+    assert_eq!(opts.proxy.api_key.as_deref(), Some(first.as_str()));
+    assert_eq!(std::fs::read_to_string(&cfg).unwrap(), first_file);
+  }
+
+  #[test]
+  fn provision_insecure_generates_no_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    opts.proxy.insecure_no_auth = true;
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
+    assert!(
+      opts.proxy.api_key.is_none(),
+      "insecure must not generate a key"
+    );
+    assert!(!cfg.exists(), "insecure must not write config");
+  }
+
+  #[test]
+  fn provision_loopback_is_noop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    // host stays None → loopback default.
+    let mut opts = DaemonOptions::from_defaults().expect("defaults");
+    let cli = parse_cli(&["--config", cfg.to_str().unwrap(), "daemon", "start"]);
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
+    assert!(opts.proxy.api_key.is_none());
+    assert!(!cfg.exists(), "loopback must not write config");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn provision_detached_errors_when_key_cannot_persist() {
+    // Detached daemon re-reads the key from config; if the write fails
+    // the child can't see the key, hits the backstop, and drops the
+    // proxy. provision must refuse to start rather than print a dead
+    // key. Force a write failure with a symlink config target (the
+    // writer refuses to follow symlinks).
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let victim = dir.path().join("victim.dat");
+    std::fs::write(&victim, b"x").unwrap();
+    symlink(&victim, &cfg).unwrap();
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    let err = provision_proxy_key(&mut opts, &cli, false).expect_err("must refuse to start");
+    assert!(
+      err.to_string().contains("could not save"),
+      "error must explain the unpersisted key: {err}"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn provision_foreground_tolerates_persist_failure() {
+    // Same write failure, but a --foreground daemon is the same process
+    // that holds the key, so it works for this run. provision keeps the
+    // key on opts and returns Ok (the banner flags it as unsaved).
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    let victim = dir.path().join("victim.dat");
+    std::fs::write(&victim, b"x").unwrap();
+    symlink(&victim, &cfg).unwrap();
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    provision_proxy_key(&mut opts, &cli, true).expect("foreground tolerates write failure");
+    assert!(
+      opts
+        .proxy
+        .api_key
+        .as_deref()
+        .is_some_and(|k| k.starts_with("sk-llamastash-")),
+      "key must still be set on opts for the in-process run"
+    );
+  }
+
+  #[test]
+  fn provision_preserves_existing_proxy_keys_in_config() {
+    // A recursive merge must keep the user's other proxy settings.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = dir.path().join("config.yaml");
+    std::fs::write(&cfg, "proxy:\n  port: 18080\n  ollama_compat: true\n").unwrap();
+    let (mut opts, cli) = non_loopback_opts(&cfg);
+    provision_proxy_key(&mut opts, &cli, false).expect("provision");
+    let written = std::fs::read_to_string(&cfg).unwrap();
+    assert!(
+      written.contains("18080"),
+      "existing port dropped: {written}"
+    );
+    assert!(
+      written.contains("ollama_compat"),
+      "existing flag dropped: {written}"
+    );
+    assert!(written.contains(opts.proxy.api_key.as_ref().unwrap().as_str()));
+  }
+
+  #[test]
   fn build_options_no_proxy_fallback_cli_flag_clears_fallback_enabled() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
     // Default is fallback_enabled = true.
-    let baseline =
-      build_options(None, None, false, false, &cli, &config).expect("build_options baseline");
+    let baseline = build_options(None, None, false, false, None, false, &cli, &config)
+      .expect("build_options baseline");
     assert!(baseline.proxy.fallback_enabled);
     // CLI flag forces it off.
-    let opts =
-      build_options(None, None, false, true, &cli, &config).expect("build_options no-fallback");
+    let opts = build_options(None, None, false, true, None, false, &cli, &config)
+      .expect("build_options no-fallback");
     assert!(!opts.proxy.fallback_enabled);
   }
 
   #[test]
   fn build_options_no_proxy_fallback_or_combines_config_cli() {
+    let _env = crate::cli::test_lock::serialize();
     // Config-only: config has fallback_enabled=false, CLI off → disabled.
     let cli = parse_cli(&["daemon", "start"]);
     let config_off_fallback = Config {
@@ -889,19 +1381,28 @@ mod tests {
       },
       ..Config::default()
     };
-    let opts_config =
-      build_options(None, None, false, false, &cli, &config_off_fallback).expect("build_options");
+    let opts_config = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      &cli,
+      &config_off_fallback,
+    )
+    .expect("build_options");
     assert!(!opts_config.proxy.fallback_enabled);
 
     // CLI-only: config has fallback_enabled=true (default), CLI on → disabled.
     let config_default = Config::default();
-    let opts_cli =
-      build_options(None, None, false, true, &cli, &config_default).expect("build_options");
+    let opts_cli = build_options(None, None, false, true, None, false, &cli, &config_default)
+      .expect("build_options");
     assert!(!opts_cli.proxy.fallback_enabled);
 
     // Both off → fallback_enabled stays true (the default).
-    let opts_neither =
-      build_options(None, None, false, false, &cli, &config_default).expect("build_options");
+    let opts_neither = build_options(None, None, false, false, None, false, &cli, &config_default)
+      .expect("build_options");
     assert!(opts_neither.proxy.fallback_enabled);
   }
 
@@ -1009,13 +1510,14 @@ mod tests {
 
   #[test]
   fn build_options_rejects_disable_scan_with_no_paths() {
+    let _env = crate::cli::test_lock::serialize();
     // The dead-end combo: scanning off, zero user paths anywhere.
     // Today this would leave the catalog empty forever — the
     // validator must turn it into a startup error so the user sees
     // *why* the daemon refused.
     let cli = parse_cli(&["--no-scan", "daemon", "start"]);
     let config = Config::default();
-    let err = build_options(None, None, false, false, &cli, &config)
+    let err = build_options(None, None, false, false, None, false, &cli, &config)
       .expect_err("--no-scan with zero paths must error");
     let msg = format!("{err:#}");
     assert!(
@@ -1026,23 +1528,25 @@ mod tests {
 
   #[test]
   fn build_options_accepts_disable_scan_when_cli_path_supplied() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["--no-scan", "--model-path", "/work/keep", "daemon", "start"]);
     let config = Config::default();
     assert!(
-      build_options(None, None, false, false, &cli, &config).is_ok(),
+      build_options(None, None, false, false, None, false, &cli, &config).is_ok(),
       "--no-scan + --model-path must build cleanly"
     );
   }
 
   #[test]
   fn build_options_accepts_disable_scan_when_config_path_supplied() {
+    let _env = crate::cli::test_lock::serialize();
     let cli = parse_cli(&["--no-scan", "daemon", "start"]);
     let config = Config {
       model_paths: vec![PathBuf::from("/work/cfg")],
       ..Config::default()
     };
     assert!(
-      build_options(None, None, false, false, &cli, &config).is_ok(),
+      build_options(None, None, false, false, None, false, &cli, &config).is_ok(),
       "--no-scan + config model_paths must build cleanly"
     );
   }

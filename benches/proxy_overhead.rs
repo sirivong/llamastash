@@ -230,7 +230,7 @@ async fn wait_for_ready(model: &llamastash::daemon::supervisor::ManagedModel) {
 async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
   let deadline = Instant::now() + budget;
   while Instant::now() < deadline {
-    if let ProxyStatus::Listening { addr } = status.read().unwrap().clone() {
+    if let ProxyStatus::Listening { addr, .. } = status.read().unwrap().clone() {
       return Some(addr);
     }
     tokio::time::sleep(Duration::from_millis(10)).await;

@@ -4,6 +4,7 @@ use std::{
   ffi::OsString,
   fs,
   io::ErrorKind,
+  net::{IpAddr, Ipv4Addr},
   path::{Path, PathBuf},
 };
 
@@ -107,8 +108,11 @@ pub struct Config {
 ///   etc.) that probe `HEAD /` before any `/api/*` call.
 ///
 /// Both modes scan up to port `11440` for a free slot; both speak the
-/// same OpenAI compat + Ollama-discovery surfaces. Host is fixed at
-/// loopback, no auth, no TLS, no fallback tuning.
+/// same OpenAI compat + Ollama-discovery surfaces. The listener binds
+/// loopback (`127.0.0.1`) by default; `host` opts the *proxy data
+/// plane* into LAN exposure, gated behind the `api_key` bearer token
+/// (the control plane and `llama-server` children always stay
+/// loopback). TLS is not yet implemented — LAN mode is plaintext.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct ProxyConfig {
@@ -176,6 +180,38 @@ pub struct ProxyConfig {
   /// treated as durable user intent and stay resident regardless.
   #[serde(default = "ProxyConfig::default_idle_ttl_secs")]
   pub idle_ttl_secs: u64,
+  /// Address the proxy listener binds. `None` (the default) keeps the
+  /// listener on `127.0.0.1` — same loopback-only posture as before.
+  /// Set to a routable address (`0.0.0.0`, a specific NIC IP, or an
+  /// IPv6 address like `::`) to expose the proxy on the LAN. Non-
+  /// loopback binding requires `api_key` unless `insecure_no_auth` is
+  /// set; otherwise the daemon refuses to bind the proxy (the daemon
+  /// itself still runs). Only the proxy moves — the control plane and
+  /// `llama-server` children stay loopback regardless.
+  ///
+  /// CLI override: `--proxy-host <IP>`. Env override:
+  /// `LLAMASTASH_PROXY_HOST`. Precedence: CLI > env > config.
+  #[serde(default)]
+  pub host: Option<IpAddr>,
+  /// Bearer token required on the proxy's data routes (`/v1/*`,
+  /// `/api/*`) when set. `None` (the default) means no auth — the
+  /// loopback-only, same-UID posture. Auto-provisioned and persisted
+  /// here the first time LAN binding is enabled without an existing
+  /// key. Enforced whenever it is `Some`, regardless of bind host.
+  ///
+  /// Env override `LLAMASTASH_PROXY_API_KEY` takes precedence and is
+  /// never written back to disk (containers / secret managers). The
+  /// value is a secret: never log it; status surfaces report only
+  /// whether auth is enforced, never the key.
+  #[serde(default)]
+  pub api_key: Option<String>,
+  /// Allow binding a non-loopback `host` with no `api_key` (no auth on
+  /// the LAN-exposed proxy). Default `false` — the daemon refuses such
+  /// a bind. Set to `true` (or pass `--insecure-no-auth`) only when you
+  /// deliberately want an unauthenticated LAN proxy. A loud warning
+  /// prints either way when the proxy binds a non-loopback address.
+  #[serde(default)]
+  pub insecure_no_auth: bool,
 }
 
 impl ProxyConfig {
@@ -189,6 +225,19 @@ impl ProxyConfig {
     self
       .port
       .unwrap_or(if self.ollama_compat { 11434 } else { 11435 })
+  }
+
+  /// Address the listener binds. Falls back to loopback
+  /// (`127.0.0.1`) when `host` is unset — the historical default.
+  pub fn effective_host(&self) -> IpAddr {
+    self.host.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+  }
+
+  /// Whether bearer auth is enforced on the proxy's data routes. True
+  /// iff an `api_key` is configured; enforcement is independent of the
+  /// bind host (a configured key is honored even on loopback).
+  pub fn auth_enforced(&self) -> bool {
+    self.api_key.is_some()
   }
 
   fn default_header_read_timeout_secs() -> u64 {
@@ -213,6 +262,9 @@ impl Default for ProxyConfig {
       fallback_enabled: Self::default_fallback_enabled(),
       header_read_timeout_secs: Self::default_header_read_timeout_secs(),
       idle_ttl_secs: Self::default_idle_ttl_secs(),
+      host: None,
+      api_key: None,
+      insecure_no_auth: false,
     }
   }
 }
@@ -950,6 +1002,55 @@ proxy:
     assert!(!loaded.config.proxy.ollama_compat);
     assert_eq!(loaded.config.proxy.port, Some(22222));
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn proxy_host_and_auth_round_trip_through_yaml() {
+    let dir = temp_test_dir("proxy-lan-auth");
+    let path = dir.join("config.yaml");
+    fs::write(
+      &path,
+      "proxy:\n  host: 0.0.0.0\n  api_key: sk-llamastash-testkey\n  insecure_no_auth: true\n",
+    )
+    .expect("write failed");
+
+    let loaded = load_config_from_path(&path);
+
+    assert!(loaded.warning.is_none(), "valid config should not warn");
+    let p = &loaded.config.proxy;
+    assert_eq!(p.host, Some("0.0.0.0".parse().unwrap()));
+    assert_eq!(p.effective_host(), "0.0.0.0".parse::<IpAddr>().unwrap());
+    assert!(!p.effective_host().is_loopback());
+    assert_eq!(p.api_key.as_deref(), Some("sk-llamastash-testkey"));
+    assert!(p.auth_enforced());
+    assert!(p.insecure_no_auth);
+    fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn proxy_host_accepts_ipv6() {
+    let dir = temp_test_dir("proxy-ipv6");
+    let path = dir.join("config.yaml");
+    fs::write(&path, "proxy:\n  host: \"::\"\n").expect("write failed");
+
+    let loaded = load_config_from_path(&path);
+
+    assert!(loaded.warning.is_none());
+    assert_eq!(loaded.config.proxy.host, Some("::".parse().unwrap()));
+    fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn proxy_host_and_auth_default_to_loopback_no_key() {
+    // Absent host/api_key keep the historical loopback, keyless
+    // posture — an old config (no new keys) is unchanged.
+    let p = ProxyConfig::default();
+    assert_eq!(p.host, None);
+    assert_eq!(p.effective_host(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    assert!(p.effective_host().is_loopback());
+    assert_eq!(p.api_key, None);
+    assert!(!p.auth_enforced());
+    assert!(!p.insecure_no_auth);
   }
 
   #[test]

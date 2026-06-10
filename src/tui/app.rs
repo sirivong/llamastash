@@ -133,10 +133,16 @@ pub struct ProxyInfo {
   pub enabled: bool,
   /// Attempted bind address. `None` only when `enabled == false`.
   pub listen: Option<String>,
-  /// One of `disabled` / `listening` / `port_in_use` / `unbound`.
+  /// One of `disabled` / `listening` / `port_in_use` / `unbound` /
+  /// `refused_insecure`.
   pub status: String,
-  /// OS-level cause when `status == "unbound"`; `None` otherwise.
+  /// OS-level cause when `status == "unbound"`; the fix hint when
+  /// `status == "refused_insecure"`; `None` otherwise.
   pub bind_error: Option<String>,
+  /// Auth posture: `"enforced"` (a bearer key is required on the data
+  /// routes), `"none"`, or `"required"` (the `refused_insecure` case).
+  /// `None` when an older daemon omits the field.
+  pub auth: Option<String>,
 }
 
 /// Per-frame cache of the screen rectangles that mouse-focus needs
@@ -802,6 +808,13 @@ impl App {
           let listen = cur_listen.as_deref().unwrap_or("?");
           self.show_toast(format!(
             "proxy: port {listen} already in use; daemon continues without the OpenAI-compat router"
+          ));
+        }
+        let was_refused = matches!(self.last_proxy_status.as_deref(), Some("refused_insecure"));
+        if status == "refused_insecure" && !was_refused {
+          let listen = cur_listen.as_deref().unwrap_or("?");
+          self.show_toast(format!(
+            "proxy: refused to expose {listen} without auth; set proxy.api_key or pass --insecure-no-auth"
           ));
         }
         self.last_proxy_status = Some(status);
@@ -1740,11 +1753,13 @@ fn parse_proxy_info(v: &Value) -> Option<ProxyInfo> {
     .get("bind_error")
     .and_then(Value::as_str)
     .map(String::from);
+  let auth = obj.get("auth").and_then(Value::as_str).map(String::from);
   Some(ProxyInfo {
     enabled,
     listen,
     status,
     bind_error,
+    auth,
   })
 }
 

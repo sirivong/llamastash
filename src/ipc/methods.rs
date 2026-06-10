@@ -628,26 +628,51 @@ fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
     ProxyStatus::Disabled => json!({
       "enabled": false,
       "listen": Value::Null,
+      "host": Value::Null,
       "status": "disabled",
+      "auth": "none",
       "bind_error": Value::Null,
     }),
-    ProxyStatus::Listening { addr } => json!({
+    ProxyStatus::Listening {
+      addr,
+      auth_enforced,
+    } => json!({
       "enabled": true,
       "listen": addr.to_string(),
+      "host": addr.ip().to_string(),
       "status": "listening",
+      "auth": if auth_enforced { "enforced" } else { "none" },
       "bind_error": Value::Null,
     }),
     ProxyStatus::PortInUse { addr } => json!({
       "enabled": true,
       "listen": addr.to_string(),
+      "host": addr.ip().to_string(),
       "status": "port_in_use",
+      "auth": "none",
       "bind_error": Value::Null,
     }),
     ProxyStatus::Unbound { addr, bind_error } => json!({
       "enabled": true,
       "listen": addr.to_string(),
+      "host": addr.ip().to_string(),
       "status": "unbound",
+      "auth": "none",
       "bind_error": bind_error,
+    }),
+    // Refused to expose a non-loopback proxy without auth. The daemon
+    // is healthy; the proxy just didn't bind. `auth` reports
+    // `"required"` so a client can distinguish this from a plain bind
+    // failure and surface the fix.
+    ProxyStatus::RefusedInsecure { addr } => json!({
+      "enabled": true,
+      "listen": addr.to_string(),
+      "host": addr.ip().to_string(),
+      "status": "refused_insecure",
+      "auth": "required",
+      "bind_error":
+        "refused to bind a non-loopback proxy without authentication; \
+         set proxy.api_key or pass --insecure-no-auth",
     }),
   }
 }
@@ -2194,15 +2219,61 @@ mod tests {
     use std::net::SocketAddr;
     let addr: SocketAddr = "127.0.0.1:11434".parse().unwrap();
     let cell = proxy::server::new_status_cell();
-    *cell.write().unwrap() = proxy::ProxyStatus::Listening { addr };
+    *cell.write().unwrap() = proxy::ProxyStatus::Listening {
+      addr,
+      auth_enforced: false,
+    };
     let c = MethodContext::new(ShutdownToken::new()).with_proxy_status(cell);
     let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
     let body = resp.result.expect("status result");
     let proxy = body.get("proxy").expect("proxy block present");
     assert_eq!(proxy["enabled"], json!(true));
     assert_eq!(proxy["listen"], json!("127.0.0.1:11434"));
+    assert_eq!(proxy["host"], json!("127.0.0.1"));
     assert_eq!(proxy["status"], json!("listening"));
+    assert_eq!(proxy["auth"], json!("none"));
     assert_eq!(proxy["bind_error"], Value::Null);
+  }
+
+  #[tokio::test]
+  async fn status_listening_reports_auth_enforced_and_lan_host() {
+    use crate::proxy;
+    use std::net::SocketAddr;
+    let addr: SocketAddr = "0.0.0.0:11434".parse().unwrap();
+    let cell = proxy::server::new_status_cell();
+    *cell.write().unwrap() = proxy::ProxyStatus::Listening {
+      addr,
+      auth_enforced: true,
+    };
+    let c = MethodContext::new(ShutdownToken::new()).with_proxy_status(cell);
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let proxy = resp.result.expect("status result");
+    let proxy = proxy.get("proxy").expect("proxy block present");
+    assert_eq!(proxy["host"], json!("0.0.0.0"));
+    assert_eq!(proxy["auth"], json!("enforced"));
+  }
+
+  #[tokio::test]
+  async fn status_emits_proxy_refused_insecure_block() {
+    use crate::proxy;
+    use std::net::SocketAddr;
+    let addr: SocketAddr = "0.0.0.0:11434".parse().unwrap();
+    let cell = proxy::server::new_status_cell();
+    *cell.write().unwrap() = proxy::ProxyStatus::RefusedInsecure { addr };
+    let c = MethodContext::new(ShutdownToken::new()).with_proxy_status(cell);
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let proxy = resp.result.expect("status result");
+    let proxy = proxy.get("proxy").expect("proxy block present");
+    assert_eq!(proxy["status"], json!("refused_insecure"));
+    assert_eq!(proxy["auth"], json!("required"));
+    assert_eq!(proxy["host"], json!("0.0.0.0"));
+    assert!(
+      proxy["bind_error"]
+        .as_str()
+        .unwrap()
+        .contains("--insecure-no-auth"),
+      "refused_insecure must explain the fix: {proxy}"
+    );
   }
 
   #[tokio::test]

@@ -58,12 +58,24 @@ fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
     Some(info) => {
       let listen = info.listen.as_deref().unwrap_or("");
       match info.status.as_str() {
-        "listening" => (format!("listening {listen}"), palette.success_style()),
+        "listening" => {
+          // Flag a LAN-exposed, authenticated listener so the operator
+          // sees auth is on; keyless loopback renders unchanged.
+          let mut body = format!("listening {listen}");
+          if info.auth.as_deref() == Some("enforced") {
+            body.push_str(" (auth)");
+          }
+          (body, palette.success_style())
+        }
         "port_in_use" => (format!("port_in_use {listen}"), palette.error_style()),
         "unbound" => {
           let cause = info.bind_error.as_deref().unwrap_or("bind failed");
           (format!("unbound {listen} ({cause})"), palette.error_style())
         }
+        "refused_insecure" => (
+          format!("refused {listen} (no auth; set a key or --insecure-no-auth)"),
+          palette.error_style(),
+        ),
         "disabled" => ("disabled".to_string(), palette.muted_style()),
         other => (format!("{other} {listen}"), palette.muted_style()),
       }
@@ -885,6 +897,7 @@ mod tests {
         listen: Some("127.0.0.1:11434".into()),
         status: "listening".into(),
         bind_error: None,
+        auth: None,
       }),
       ..Default::default()
     };
@@ -896,6 +909,63 @@ mod tests {
     assert!(
       proxy_row.contains("listening 127.0.0.1:11434"),
       "expected `listening 127.0.0.1:11434`: {proxy_row:?}"
+    );
+    // Keyless loopback must not gain an auth marker.
+    assert!(
+      !proxy_row.contains("(auth)"),
+      "unexpected auth marker: {proxy_row:?}"
+    );
+  }
+
+  #[test]
+  fn proxy_row_flags_auth_on_lan_listener() {
+    use crate::tui::app::ProxyInfo;
+    let mut app = App::new(AppOptions::default());
+    app.daemon_info = DaemonInfo {
+      proxy: Some(ProxyInfo {
+        enabled: true,
+        listen: Some("0.0.0.0:11434".into()),
+        status: "listening".into(),
+        bind_error: None,
+        auth: Some("enforced".into()),
+      }),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let proxy_row = rows
+      .iter()
+      .find(|r| r.contains("proxy"))
+      .expect("proxy row");
+    assert!(
+      proxy_row.contains("listening 0.0.0.0:11434") && proxy_row.contains("(auth)"),
+      "expected LAN listener with auth marker: {proxy_row:?}"
+    );
+  }
+
+  #[test]
+  fn proxy_row_renders_refused_insecure() {
+    use crate::tui::app::ProxyInfo;
+    let mut app = App::new(AppOptions::default());
+    app.daemon_info = DaemonInfo {
+      proxy: Some(ProxyInfo {
+        enabled: true,
+        listen: Some("0.0.0.0:11434".into()),
+        status: "refused_insecure".into(),
+        bind_error: Some("refused".into()),
+        auth: Some("required".into()),
+      }),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let proxy_row = rows
+      .iter()
+      .find(|r| r.contains("proxy"))
+      .expect("proxy row");
+    // The row is width-limited; it shows the state + cause. The full
+    // fix hint (set a key / --insecure-no-auth) rides the toast.
+    assert!(
+      proxy_row.contains("refused") && proxy_row.contains("no auth"),
+      "refused_insecure row must flag the missing auth: {proxy_row:?}"
     );
   }
 
@@ -909,6 +979,7 @@ mod tests {
         listen: Some("127.0.0.1:11434".into()),
         status: "port_in_use".into(),
         bind_error: None,
+        auth: None,
       }),
       ..Default::default()
     };
@@ -949,6 +1020,7 @@ mod tests {
         listen: None,
         status: "disabled".into(),
         bind_error: None,
+        auth: None,
       }),
       ..Default::default()
     };
@@ -971,6 +1043,7 @@ mod tests {
         listen: Some("127.0.0.1:11434".into()),
         status: "listening".into(),
         bind_error: None,
+        auth: None,
       }),
       ..Default::default()
     };

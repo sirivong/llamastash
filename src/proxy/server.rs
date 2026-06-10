@@ -55,7 +55,13 @@ pub enum ProxyStatus {
   /// `proxy.enabled: false` in config; no listener was attempted.
   Disabled,
   /// Listener bound successfully and is accepting connections.
-  Listening { addr: SocketAddr },
+  /// `auth_enforced` is `true` when a bearer key is configured (the
+  /// data routes require `Authorization: Bearer`), `false` for the
+  /// keyless loopback default.
+  Listening {
+    addr: SocketAddr,
+    auth_enforced: bool,
+  },
   /// `EADDRINUSE` — the configured port is held by another process.
   /// Status surface reports the *attempted* address.
   PortInUse { addr: SocketAddr },
@@ -66,6 +72,13 @@ pub enum ProxyStatus {
     addr: SocketAddr,
     bind_error: String,
   },
+  /// A non-loopback bind was requested with no `api_key` and without
+  /// `insecure_no_auth`, so the daemon refused to expose the proxy
+  /// unauthenticated. The daemon and control plane keep running; `addr`
+  /// is the address it would have bound. Resolve by setting a key (the
+  /// CLI auto-provisions one on `daemon start --proxy-host`) or pass
+  /// `--insecure-no-auth` to opt into an unauthenticated LAN proxy.
+  RefusedInsecure { addr: SocketAddr },
 }
 
 /// Cheap-to-clone handle to the proxy's current status. The proxy
@@ -221,8 +234,18 @@ pub async fn serve_with_options(
   // Re-resolve the bound address (the kernel may have promoted a 0
   // port — useful in tests, harmless in production).
   let bound = listener.local_addr().unwrap_or(addr);
-  write_status(&status, ProxyStatus::Listening { addr: bound });
-  log::info!("proxy listener bound on http://{bound}");
+  let auth_enforced = state.auth.enforced();
+  write_status(
+    &status,
+    ProxyStatus::Listening {
+      addr: bound,
+      auth_enforced,
+    },
+  );
+  log::info!(
+    "proxy listener bound on http://{bound} (auth {})",
+    if auth_enforced { "enforced" } else { "off" }
+  );
 
   let tracker = Arc::new(ConnectionTracker {
     active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -330,11 +353,20 @@ fn write_status(cell: &StatusCell, next: ProxyStatus) {
   *guard = next;
 }
 
-/// Build the canonical loopback `SocketAddr` from a port. The host
-/// is fixed at `127.0.0.1` per the plan's Scope Boundaries (no LAN
-/// binding in v1).
+/// Build the `SocketAddr` the proxy listener binds from a `host` and
+/// `port`. `127.0.0.1` keeps the loopback-only posture; a routable
+/// address (`0.0.0.0`, a NIC IP, or IPv6) opts the proxy data plane
+/// into LAN exposure — gated by the bearer key in the daemon wiring,
+/// not here. The port-scan in `bind_with_scan` carries this host
+/// through unchanged.
+pub fn listen_addr(host: IpAddr, port: u16) -> SocketAddr {
+  SocketAddr::new(host, port)
+}
+
+/// Loopback `SocketAddr` for a port — `listen_addr(127.0.0.1, port)`.
+/// Retained for tests and callers that always bind loopback.
 pub fn loopback_addr(port: u16) -> SocketAddr {
-  SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+  listen_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
 }
 
 #[cfg(test)]
@@ -342,6 +374,21 @@ mod tests {
   use super::*;
   use crate::ipc::methods::MethodContext;
   use std::time::Duration;
+
+  #[test]
+  fn listen_addr_builds_from_host_and_port() {
+    // loopback wrapper keeps the historical address.
+    assert_eq!(
+      loopback_addr(11435),
+      SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 11435)
+    );
+    // A routable IPv4 host is carried through verbatim.
+    let v4: IpAddr = "0.0.0.0".parse().unwrap();
+    assert_eq!(listen_addr(v4, 11435), SocketAddr::new(v4, 11435));
+    // IPv6 too.
+    let v6: IpAddr = "::".parse().unwrap();
+    assert_eq!(listen_addr(v6, 8080), SocketAddr::new(v6, 8080));
+  }
 
   /// Spin up the proxy on an ephemeral port and return the bound
   /// address + shutdown token + the JoinHandle. The caller drives
@@ -371,6 +418,95 @@ mod tests {
     (bound, token, status, handle)
   }
 
+  /// Like [`spawn_proxy_on_ephemeral_port`] but with bearer auth
+  /// enforced on the data routes via `api_key`.
+  async fn spawn_proxy_with_key(
+    api_key: &str,
+  ) -> (SocketAddr, ShutdownToken, StatusCell, JoinHandle<()>) {
+    let ctx = MethodContext::new(ShutdownToken::new());
+    let state = ProxyState::from_context_with_auth(&ctx, false, true, Some(api_key.to_string()));
+    let token = ctx.shutdown.clone();
+    let status = new_status_cell();
+    let status_for_task = Arc::clone(&status);
+    let token_for_task = token.clone();
+    let bind_addr = loopback_addr(0);
+    let handle = tokio::spawn(async move {
+      serve(state, bind_addr, token_for_task, status_for_task)
+        .await
+        .expect("proxy serve returns Ok even on bind failure");
+    });
+    let bound = wait_for_listening(&status, Duration::from_secs(2))
+      .await
+      .expect("proxy must reach Listening within 2s");
+    (bound, token, status, handle)
+  }
+
+  /// One-shot GET with an optional `Authorization` header on a fresh
+  /// `Connection: close` socket — keeps the auth assertions free of
+  /// keep-alive bookkeeping.
+  async fn http_get_auth(addr: SocketAddr, path: &str, auth: Option<&str>) -> (u16, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut sock = tokio::net::TcpStream::connect(addr)
+      .await
+      .expect("connect to proxy");
+    let host = addr.to_string();
+    let auth_line = match auth {
+      Some(v) => format!("Authorization: {v}\r\n"),
+      None => String::new(),
+    };
+    let req =
+      format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n{auth_line}Connection: close\r\n\r\n");
+    sock.write_all(req.as_bytes()).await.expect("write");
+    let mut buf = Vec::with_capacity(512);
+    let mut tmp = [0u8; 1024];
+    loop {
+      let n = sock.read(&mut tmp).await.expect("read");
+      if n == 0 {
+        break;
+      }
+      buf.extend_from_slice(&tmp[..n]);
+      if let Some(body) = extract_body_when_complete(&buf) {
+        return body;
+      }
+    }
+    extract_body_when_complete(&buf).unwrap_or((0, buf))
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn auth_gates_data_routes_but_not_health_or_identity() {
+    let key = "sk-llamastash-testkey123";
+    let (addr, shutdown, _status, handle) = spawn_proxy_with_key(key).await;
+
+    // Liveness / identity probes stay open with no Authorization.
+    assert_eq!(http_get_auth(addr, "/", None).await.0, 200, "GET / exempt");
+    assert_eq!(
+      http_get_auth(addr, "/health", None).await.0,
+      200,
+      "GET /health exempt"
+    );
+
+    // Data route with no bearer → 401 + OpenAI auth envelope.
+    let (status, body) = http_get_auth(addr, "/v1/models", None).await;
+    assert_eq!(status, 401, "no bearer → 401");
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    assert_eq!(parsed["error"]["code"], "invalid_api_key");
+
+    // Wrong bearer → 401.
+    assert_eq!(
+      http_get_auth(addr, "/v1/models", Some("Bearer wrong"))
+        .await
+        .0,
+      401,
+      "wrong bearer → 401"
+    );
+
+    // Correct bearer passes the gate and the route runs (200 + list).
+    let (ok_status, _) = http_get_auth(addr, "/v1/models", Some(&format!("Bearer {key}"))).await;
+    assert_eq!(ok_status, 200, "correct bearer → 200");
+
+    shutdown_proxy(shutdown, handle).await;
+  }
+
   /// Trigger shutdown and join the serve task with a generous budget.
   /// Catches the failure mode where a serve loop never exits — without
   /// this, `drop(handle)` would silently leave a detached task and the
@@ -388,7 +524,7 @@ mod tests {
   async fn wait_for_listening(status: &StatusCell, budget: Duration) -> Option<SocketAddr> {
     let deadline = std::time::Instant::now() + budget;
     while std::time::Instant::now() < deadline {
-      if let ProxyStatus::Listening { addr } = status.read().unwrap().clone() {
+      if let ProxyStatus::Listening { addr, .. } = status.read().unwrap().clone() {
         return Some(addr);
       }
       tokio::time::sleep(Duration::from_millis(20)).await;
@@ -576,7 +712,7 @@ mod tests {
     // a few ms across a few syscalls on a loaded box.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let bound_addr = loop {
-      if let ProxyStatus::Listening { addr } = status.read().unwrap().clone() {
+      if let ProxyStatus::Listening { addr, .. } = status.read().unwrap().clone() {
         break addr;
       }
       if std::time::Instant::now() > deadline {

@@ -87,8 +87,9 @@ pub fn extract_bearer(header_value: &str) -> Option<&str> {
 
 /// Constant-time byte slice comparison. Length-aware early-exit is
 /// deliberate (the slot is the secret length, not the secret itself
-/// — leaking it via timing or a fast path is acceptable).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// — leaking it via timing or a fast path is acceptable). Shared with
+/// the proxy's bearer key (`crate::proxy::auth::ProxyApiKey`).
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
   if a.len() != b.len() {
     return false;
   }

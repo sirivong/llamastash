@@ -6,7 +6,7 @@
 //! `docs/plans/2026-05-13-001-feat-llamatui-v1-launcher-plan.md` (R35) —
 //! handlers are stubbed until their respective implementation units land.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, net::IpAddr, path::PathBuf};
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
@@ -243,6 +243,26 @@ pub enum DaemonAction {
     /// disables the fallback.
     #[arg(long)]
     no_proxy_fallback: bool,
+    /// Address the OpenAI-compat proxy listener binds. Default
+    /// `127.0.0.1` (loopback only). Pass a routable address
+    /// (`0.0.0.0`, a specific NIC IP, or an IPv6 address like `::`) to
+    /// expose the proxy on the LAN. Overrides `proxy.host` in
+    /// `config.yaml` and the `LLAMASTASH_PROXY_HOST` env var
+    /// (precedence: CLI > env > config). A non-loopback bind requires a
+    /// bearer key: llamastash auto-generates and prints one on first
+    /// use unless you pass `--insecure-no-auth`. Only the proxy is
+    /// exposed — the control plane and `llama-server` children stay
+    /// loopback.
+    #[arg(long, value_name = "IP")]
+    proxy_host: Option<IpAddr>,
+    /// Bind a non-loopback `--proxy-host` with NO authentication. By
+    /// default llamastash refuses to expose the proxy on the LAN
+    /// without a bearer key; this flag opts out of that safety check
+    /// and serves the proxy unauthenticated. Anyone who can reach the
+    /// address can drive your models. Only use it on a trusted,
+    /// firewalled network. A loud warning prints regardless.
+    #[arg(long)]
+    insecure_no_auth: bool,
   },
   /// Stop the running daemon. Running models keep running.
   Stop {
@@ -1331,12 +1351,16 @@ mod tests {
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
+        proxy_host,
+        insecure_no_auth,
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
         assert!(proxy_port.is_none());
         assert!(!ollama_compat);
         assert!(!no_proxy_fallback);
+        assert!(proxy_host.is_none());
+        assert!(!insecure_no_auth);
       }
       other => panic!("expected daemon start, got {other:?}"),
     }
@@ -1372,12 +1396,16 @@ mod tests {
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
+        proxy_host,
+        insecure_no_auth,
       })) => {
         assert!(!foreground);
         assert_eq!(state_dir, Some(PathBuf::from("/tmp/llamastash-test-state")));
         assert!(proxy_port.is_none());
         assert!(!ollama_compat);
         assert!(!no_proxy_fallback);
+        assert!(proxy_host.is_none());
+        assert!(!insecure_no_auth);
       }
       other => panic!("expected daemon start with paths, got {other:?}"),
     }
@@ -1390,12 +1418,16 @@ mod tests {
         proxy_port,
         ollama_compat,
         no_proxy_fallback,
+        proxy_host,
+        insecure_no_auth,
       })) => {
         assert!(!foreground);
         assert!(state_dir.is_none());
         assert_eq!(proxy_port, Some(8080));
         assert!(!ollama_compat);
         assert!(!no_proxy_fallback);
+        assert!(proxy_host.is_none());
+        assert!(!insecure_no_auth);
       }
       other => panic!("expected daemon start --proxy-port 8080, got {other:?}"),
     }
@@ -1423,6 +1455,28 @@ mod tests {
         assert!(proxy_port.is_none());
       }
       other => panic!("expected daemon start --ollama-compat, got {other:?}"),
+    }
+
+    // --proxy-host parses an IP (LAN opt-in) and --insecure-no-auth
+    // flips the auth waiver; build_options applies precedence + the
+    // key-provision / backstop logic downstream.
+    let cli_lan = parse(&[
+      "daemon",
+      "start",
+      "--proxy-host",
+      "0.0.0.0",
+      "--insecure-no-auth",
+    ]);
+    match cli_lan.command {
+      Some(Command::Daemon(DaemonAction::Start {
+        proxy_host,
+        insecure_no_auth,
+        ..
+      })) => {
+        assert_eq!(proxy_host, Some("0.0.0.0".parse().unwrap()));
+        assert!(insecure_no_auth);
+      }
+      other => panic!("expected daemon start --proxy-host, got {other:?}"),
     }
 
     // --no-proxy-fallback flips the disable bool; build_options OR-merges

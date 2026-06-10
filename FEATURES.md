@@ -167,7 +167,7 @@ Pin HF downloads to a specific commit for agent and CI workflows. Threaded into 
 
 ### OpenAI-compatible endpoint
 
-LlamaStash ships a built-in OpenAI-compatible proxy at `http://127.0.0.1:11435/v1` (default mode) so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), Cline, llm-cli, the OpenAI SDKs — drives every discovered model through one stable URL. Point the client at the base URL, send `body.model: "<discovered-name>"` (substring + fuzzy match, same rules as `llamastash start <ref>`), and any value as the API key — the proxy ignores auth and is loopback-only.
+LlamaStash ships a built-in OpenAI-compatible proxy at `http://127.0.0.1:11435/v1` (default mode) so any agent that speaks the OpenAI REST shape — OpenCode, Pi (pi.dev), Cline, llm-cli, the OpenAI SDKs — drives every discovered model through one stable URL. Point the client at the base URL and send `body.model: "<discovered-name>"` (substring + fuzzy match, same rules as `llamastash start <ref>`). On the default loopback bind the proxy ignores auth, so any value works as the API key; once you expose it on the LAN (see [Auth posture](#auth-posture)) it requires a real bearer key.
 
 The default port is `11435` (one above Ollama's well-known `11434`) so a llamastash daemon and an Ollama install can co-exist without colliding. If `11435` is also taken, the listener walks `11435..=11440` and binds the first free slot — `llamastash status` (and the TUI's Daemon info pane) shows the chosen address under `proxy.listen`. Pin a different base via `proxy.port` in `config.yaml` or `--proxy-port N` on the CLI; the same six-port scan window applies.
 
@@ -197,13 +197,21 @@ When the goal is "a tool that natively speaks Ollama just works against llamasta
 
 ### Auth posture
 
-The proxy has **no authentication**. This is intentional for the local-machine single-user threat model — anyone with localhost access on your box can issue requests. Don't bind to a LAN address (the proxy refuses anyway: host is hard-coded to `127.0.0.1`); don't expose loopback to other UIDs you don't trust; don't run the daemon on a shared host.
+By default the proxy binds `127.0.0.1` and has **no authentication** — intentional for the local-machine, single-user threat model where anyone with localhost access can already issue requests. Don't expose loopback to other UIDs you don't trust, and don't run the daemon on a shared host.
+
+To reach your models from another machine, opt into LAN mode with `--proxy-host 0.0.0.0` (a specific NIC IP or an IPv6 address like `::` work too) or `proxy.host` in `config.yaml`. Because an open proxy on the network would hand your GPU to anyone who can reach it, LAN mode is **gated behind a bearer key**:
+
+- On the first LAN-enabled `daemon start`, llamastash generates an `sk-llamastash-…` key, saves it to `proxy.api_key` in your config (atomic write, mode `0600`), and prints it once. Send it as `Authorization: Bearer <key>` and any OpenAI client works as-is.
+- The daemon **refuses** to bind a non-loopback address with no key. Pass `--insecure-no-auth` (or `proxy.insecure_no_auth: true`) to deliberately run an unauthenticated LAN proxy — a loud warning prints either way.
+- A configured key is enforced on every data route (`/v1/*`, `/api/*`) regardless of bind host; the liveness probes (`GET /`, `GET /health`) stay open. `LLAMASTASH_PROXY_API_KEY` overrides the config key for the process and is never written back.
+
+TLS is not yet implemented, so LAN mode is plaintext HTTP — keep it on a trusted network or put a TLS-terminating reverse proxy in front. Only the proxy data plane is ever exposed: the control plane and `llama-server` children always stay loopback (`--host 127.0.0.1`, enforced by the `extras` denylist).
 
 ## Built to be safe to run
 
 ### Bearer-token loopback control plane
 
-Only your own UID can drive the daemon. The control plane is a 127.0.0.1 HTTP listener fronted by a per-daemon-start bearer token; the URL + token live in `runtime.json` under the state dir (`chmod 0600` on Unix, Protected-DACL owner-only on Windows). No off-host surface, no LAN binding, no long-lived secret — the token rotates by construction on every restart. The OpenAI-compat proxy is a separate listener that intentionally has no auth (local same-UID threat model).
+Only your own UID can drive the daemon. The control plane is a 127.0.0.1 HTTP listener fronted by a per-daemon-start bearer token; the URL + token live in `runtime.json` under the state dir (`chmod 0600` on Unix, Protected-DACL owner-only on Windows). No off-host surface, no LAN binding, no long-lived secret — the token rotates by construction on every restart, and the control plane has no host knob so it can never be moved off loopback. The OpenAI-compat proxy is a separate listener: keyless on the default loopback bind, and bearer-authenticated when exposed on the LAN (see [Auth posture](#auth-posture)).
 
 ### Hardened fetch substrate
 
