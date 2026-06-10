@@ -53,11 +53,14 @@ pub struct LemonadeBackend {
 
 impl LemonadeBackend {
   pub fn new() -> Self {
-    // lemond is driven by a model name, not llama.cpp launch knobs, so no
-    // typed-knob fields are honored yet (R6: drop + surface). See
-    // KnobCapability::none.
+    // lemond is driven by a model name plus a small load-options surface
+    // (`POST /api/v1/load`): `ctx_size` maps onto the `Ctx` knob, and the
+    // free-form extras ride the recipe-scoped `*_args` string (a separate
+    // channel from the typed-knob IR). No other typed knob is honored —
+    // notably `-ngl` is on lemond's exclusion list, so offload knobs can
+    // never pass through (R6: drop + hide).
     Self {
-      capabilities: KnobCapability::none(),
+      capabilities: KnobCapability::of(&[crate::launch::flag_aliases::KnobField::Ctx]),
     }
   }
 
@@ -293,12 +296,18 @@ mod tests {
   }
 
   #[test]
-  fn capabilities_are_empty() {
+  fn capabilities_cover_exactly_ctx() {
+    // `ctx` maps onto lemond's `ctx_size` load option; everything else in
+    // the typed-knob IR is llama.cpp-process vocabulary lemond either owns
+    // itself (offload) or doesn't expose. Extras ride a separate channel
+    // (`*_args`), not the knob IR.
     let b = LemonadeBackend::new();
     for spec in knob_specs() {
-      assert!(
-        !b.capabilities().supports(spec.field),
-        "lemonade should not honor {:?} yet",
+      let expected = spec.field == crate::launch::flag_aliases::KnobField::Ctx;
+      assert_eq!(
+        b.capabilities().supports(spec.field),
+        expected,
+        "lemonade capability for {:?}",
         spec.field
       );
     }

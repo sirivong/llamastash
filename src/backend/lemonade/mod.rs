@@ -14,7 +14,7 @@ pub use backend::{
   registry_name_from_path, resolve_lemond_binary, umbrella_port_available, umbrella_process_spec,
   LemonadeBackend, LEMONADE_BACKEND_ID, LEMONADE_PATH_SCHEME,
 };
-pub use client::{LemonadeClient, LemonadeError, ModelEntry};
+pub use client::{LemonadeClient, LemonadeError, LoadOptions, ModelEntry};
 pub use orchestrate::{
   delegated_launch_id, delegated_model_name, ensure_umbrella, umbrella_launch_id,
 };

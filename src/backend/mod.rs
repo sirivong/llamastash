@@ -245,6 +245,14 @@ impl KnobCapability {
     }
   }
 
+  /// Exactly `fields` honored — for backends with a narrow, evidenced
+  /// surface (Lemonade honors `ctx` via `/api/v1/load`'s `ctx_size`).
+  pub fn of(fields: &[KnobField]) -> Self {
+    Self {
+      supported: fields.iter().copied().collect(),
+    }
+  }
+
   /// Whether this backend honors `field`. Phase 2 backends that honor
   /// only a subset of the IR will construct a narrower set here; the
   /// subset constructor lands with that first real consumer.

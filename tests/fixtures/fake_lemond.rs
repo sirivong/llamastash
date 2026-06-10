@@ -68,9 +68,9 @@ fn route(raw: &str) -> (String, String) {
       };
       ok(&format!(r#"{{"status":"ok","model_loaded":{model}}}"#))
     }
-    ("GET", "/api/v1/models") => {
-      ok(r#"{"object":"list","data":[{"id":"Qwen2.5-0.5B-Instruct"},{"id":"Llama-3.1-8B"}]}"#)
-    }
+    ("GET", "/api/v1/models") => ok(
+      r#"{"object":"list","data":[{"id":"Qwen2.5-0.5B-Instruct","recipe":"llamacpp"},{"id":"Llama-3.1-8B","recipe":"llamacpp"}]}"#,
+    ),
     ("POST", "/api/v1/load") => {
       let name = body_model_name(raw).unwrap_or_else(|| "unknown".to_string());
       *LOADED.lock().unwrap() = Some(name);

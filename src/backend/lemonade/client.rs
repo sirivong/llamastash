@@ -62,6 +62,10 @@ pub struct ModelEntry {
   pub labels: Vec<String>,
   #[serde(default)]
   pub size: Option<f64>,
+  /// Serving engine (`llamacpp`, `whispercpp`, `flm`, …). Names the
+  /// `*_args` load-option field that engine reads.
+  #[serde(default)]
+  pub recipe: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +92,33 @@ struct StatusResponse {
   status: String,
   #[serde(default)]
   message: String,
+}
+
+/// Launch options forwarded on `POST /api/v1/load` beyond the model
+/// name — the subset of llamastash launch params lemond honors.
+#[derive(Debug, Clone, Default)]
+pub struct LoadOptions {
+  /// Context-size override; lemond's `ctx_size` field.
+  pub ctx_size: Option<u32>,
+  /// Recipe-scoped passthrough args: the JSON field name
+  /// (`llamacpp_args` / `whispercpp_args` / `flm_args` — named after the
+  /// model's recipe) and the space-joined argument string lemond passes
+  /// to that engine. lemond strips flags it owns (`-m`, `--port`,
+  /// `--ctx-size`, `-ngl`, …) on its side.
+  pub recipe_args: Option<(String, String)>,
+}
+
+/// Build the `/api/v1/load` request body. Pure so the wire shape is
+/// unit-testable without a live `lemond`.
+fn load_body(model_name: &str, opts: &LoadOptions) -> serde_json::Value {
+  let mut body = serde_json::json!({ "model_name": model_name });
+  if let Some(ctx) = opts.ctx_size {
+    body["ctx_size"] = ctx.into();
+  }
+  if let Some((field, value)) = &opts.recipe_args {
+    body[field.as_str()] = serde_json::Value::String(value.clone());
+  }
+  body
 }
 
 /// A loopback client bound to one `lemond` instance.
@@ -171,19 +202,33 @@ impl LemonadeClient {
   /// `POST /api/v1/load {model_name}` — preload a model into memory.
   /// Optional (chat autoloads); use it to avoid first-request latency.
   pub async fn load(&self, model_name: &str) -> Result<(), LemonadeError> {
-    self.post_model_action("load", model_name).await
+    self.load_with(model_name, &LoadOptions::default()).await
+  }
+
+  /// `POST /api/v1/load` with the launch options lemond honors beyond
+  /// the model name. See [`LoadOptions`].
+  pub async fn load_with(&self, model_name: &str, opts: &LoadOptions) -> Result<(), LemonadeError> {
+    self
+      .post_model_action("load", load_body(model_name, opts))
+      .await
   }
 
   /// `POST /api/v1/unload {model_name}` — unload a model from memory.
   pub async fn unload(&self, model_name: &str) -> Result<(), LemonadeError> {
-    self.post_model_action("unload", model_name).await
+    self
+      .post_model_action("unload", serde_json::json!({ "model_name": model_name }))
+      .await
   }
 
-  async fn post_model_action(&self, action: &str, model_name: &str) -> Result<(), LemonadeError> {
+  async fn post_model_action(
+    &self,
+    action: &str,
+    body: serde_json::Value,
+  ) -> Result<(), LemonadeError> {
     let resp = self
       .http
       .post(format!("{}/api/v1/{action}", self.base))
-      .json(&serde_json::json!({ "model_name": model_name }))
+      .json(&body)
       .send()
       .await
       .map_err(transport)?;
@@ -295,6 +340,37 @@ mod tests {
     let req = rx.recv().await.expect("fake saw a request");
     assert_eq!(req.line, "POST /api/v1/load HTTP/1.1");
     assert_eq!(req.body, r#"{"model_name":"Qwen2.5-7B"}"#);
+  }
+
+  #[tokio::test]
+  async fn load_with_sends_ctx_size_and_recipe_args() {
+    let (port, mut rx) =
+      spawn_fake(200, r#"{"status":"success","message":"Loaded model: M"}"#).await;
+    let client = LemonadeClient::new(port).unwrap();
+    client
+      .load_with(
+        "qwen3.5-4b-FLM",
+        &LoadOptions {
+          ctx_size: Some(8192),
+          recipe_args: Some(("flm_args".to_string(), "--foo bar".to_string())),
+        },
+      )
+      .await
+      .unwrap();
+    let req = rx.recv().await.expect("fake saw a request");
+    assert_eq!(req.line, "POST /api/v1/load HTTP/1.1");
+    let body: serde_json::Value = serde_json::from_str(&req.body).expect("json body");
+    assert_eq!(body["model_name"], "qwen3.5-4b-FLM");
+    assert_eq!(body["ctx_size"], 8192);
+    assert_eq!(body["flm_args"], "--foo bar");
+  }
+
+  #[test]
+  fn load_body_omits_unset_options() {
+    // Default options must keep the legacy minimal body — lemond treats an
+    // explicit field as an override worth persisting/merging.
+    let body = load_body("M", &LoadOptions::default());
+    assert_eq!(body, serde_json::json!({"model_name": "M"}));
   }
 
   #[tokio::test]

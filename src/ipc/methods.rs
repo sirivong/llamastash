@@ -1854,12 +1854,15 @@ async fn start_delegated_lemonade(
   let serving_port = umbrella.port();
 
   // Preload the model so an explicit launch makes it resident (chat would
-  // autoload too). Best-effort: a load failure (e.g. a non-registry name
-  // from a GGUF+override launch) is logged but does not fail the umbrella
+  // autoload too), forwarding the launch params lemond honors: `ctx_size`
+  // plus the free-form extras as the recipe-scoped `*_args` string.
+  // Best-effort: a load failure (e.g. a non-registry name from a
+  // GGUF+override launch) is logged but does not fail the umbrella
   // start — the umbrella is up and real registry models autoload on chat.
   match LemonadeClient::new(serving_port) {
     Ok(client) => {
-      if let Err(e) = client.load(&spec.model.name).await {
+      let opts = lemonade_load_options(&client, &spec.model.name, &params).await;
+      if let Err(e) = client.load_with(&spec.model.name, &opts).await {
         log::warn!(
           "lemonade: preload of `{}` failed (umbrella is up; chat will autoload): {e}",
           spec.model.name
@@ -1897,6 +1900,50 @@ async fn start_delegated_lemonade(
     model: umbrella,
     log_path,
   })
+}
+
+/// Project the launch params onto lemond's load-option surface: `ctx`
+/// (when the user set one) becomes `ctx_size`; non-empty extras become
+/// the recipe-scoped args string (`llamacpp_args` / `whispercpp_args` /
+/// `flm_args` — lemond names the field after the model's recipe, read
+/// from the umbrella's own model list). Extras are dropped with a
+/// warning when the recipe can't be resolved — guessing the field would
+/// silently feed flags to the wrong engine.
+async fn lemonade_load_options(
+  client: &crate::backend::lemonade::LemonadeClient,
+  name: &str,
+  params: &LaunchParams,
+) -> crate::backend::lemonade::LoadOptions {
+  let recipe_args = if params.extras.is_empty() {
+    None
+  } else {
+    let joined = params
+      .extras
+      .iter()
+      .map(|s| s.to_string_lossy())
+      .collect::<Vec<_>>()
+      .join(" ");
+    let recipe = client
+      .list_model_entries()
+      .await
+      .ok()
+      .and_then(|entries| entries.into_iter().find(|e| e.id == name))
+      .and_then(|e| e.recipe);
+    match recipe {
+      Some(recipe) => Some((format!("{recipe}_args"), joined)),
+      None => {
+        log::warn!(
+          "lemonade: dropping extras for `{name}` — could not resolve its recipe \
+           from the umbrella's model list"
+        );
+        None
+      }
+    }
+  };
+  crate::backend::lemonade::LoadOptions {
+    ctx_size: params.ctx,
+    recipe_args,
+  }
 }
 
 fn spawn_last_params_recorder(
