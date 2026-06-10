@@ -272,6 +272,12 @@ pub struct App {
   pub running_view_scroll: Cell<u16>,
   pub toast: Option<(String, Instant)>,
   pub daemon_connected: bool,
+  /// Why the startup auto-spawn refused to bring a daemon up (the
+  /// backend fail-fast precheck: missing `llama-server`, missing
+  /// `lemond`, umbrella port held by a foreign process). One failure
+  /// per line. Rendered in the Daemon panel's server row while no
+  /// daemon is connected; cleared the moment any daemon responds.
+  pub daemon_start_error: Option<String>,
   /// Snapshot of the daemon-side metadata block from the most recent
   /// `status` response. Populated by [`Self::ingest_status`].
   pub daemon_info: DaemonInfo,
@@ -435,6 +441,7 @@ impl App {
       running_view_scroll: Cell::new(0),
       toast: None,
       daemon_connected: false,
+      daemon_start_error: None,
       daemon_info: DaemonInfo::default(),
       host_metrics: HostMetricsSnapshot::default(),
       device_catalog: Vec::new(),

@@ -2267,26 +2267,34 @@ fn handle_event(app: &mut App, evt: Event, writer_tx: &mpsc::Sender<WriterCmd>) 
   }
 }
 
+/// A daemon answered an RPC: flip the connected flag and drop any
+/// startup auto-spawn refusal — a live daemon supersedes the stale
+/// "couldn't start one" message in the Daemon panel.
+fn mark_daemon_connected(app: &mut App) {
+  app.daemon_connected = true;
+  app.daemon_start_error = None;
+}
+
 fn apply_refresh(app: &mut App, tick: RefreshTick) {
   match tick {
     RefreshTick::Catalog(body) => {
-      app.daemon_connected = true;
+      mark_daemon_connected(app);
       app.ingest_list_models(&body);
     }
     RefreshTick::Status(body) => {
-      app.daemon_connected = true;
+      mark_daemon_connected(app);
       app.ingest_status(&body);
     }
     RefreshTick::Favorites(body) => {
-      app.daemon_connected = true;
+      mark_daemon_connected(app);
       app.ingest_favorites(&body);
     }
     RefreshTick::LastParams(body) => {
-      app.daemon_connected = true;
+      mark_daemon_connected(app);
       app.ingest_last_params(&body);
     }
     RefreshTick::Logs { launch_id, lines } => {
-      app.daemon_connected = true;
+      mark_daemon_connected(app);
       // Replace the buffer only when the snapshot matches the
       // launch the user currently has focused. Otherwise the poll
       // raced a focus change; drop on the floor.
@@ -2400,6 +2408,7 @@ pub fn refresh_apply(app: &mut App, tick: RefreshTick) {
 /// loaded config and a connected (or-not-yet-connected) daemon
 /// socket. Splitting it out keeps the binary entry small and the
 /// call testable.
+#[allow(clippy::too_many_arguments)]
 pub async fn launch(
   theme: crate::theme::ThemeName,
   custom_palette: Option<crate::theme::Palette>,
@@ -2408,14 +2417,19 @@ pub async fn launch(
   mouse_focus: bool,
   socket: &Path,
   daemon_opts: Option<crate::daemon::DaemonOptions>,
+  daemon_start_error: Option<String>,
 ) -> Result<()> {
-  let app = App::new(crate::tui::app::AppOptions {
+  let mut app = App::new(crate::tui::app::AppOptions {
     theme,
     custom_palette,
     keymap,
     offline,
     mouse_focus,
   });
+  // Startup auto-spawn refused (backend fail-fast precheck) — the TUI
+  // runs daemon-less and the Daemon panel explains why. Cleared by
+  // `mark_daemon_connected` if a daemon comes up later.
+  app.daemon_start_error = daemon_start_error;
   run(app, socket.to_path_buf(), daemon_opts).await
 }
 

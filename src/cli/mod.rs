@@ -194,9 +194,24 @@ fn report(result: CliResult) -> i32 {
 pub(crate) async fn handle_tui(cli: &Cli, config: &crate::config::Config) -> CliResult {
   // Ensure the daemon is up. The TUI's writer task reconnects per
   // command, so we don't hold the connection past startup priming.
-  let mut client = client::connect_or_spawn(cli, config).await?;
+  //
+  // A failure here does NOT abort the TUI: the backend fail-fast
+  // precheck refuses to auto-spawn a degraded daemon (missing
+  // `llama-server`, blocked Lemonade umbrella port, …), and dying on
+  // stderr before the UI exists would hide that. Launch daemon-less
+  // instead and surface the refusal in the Daemon panel's server row;
+  // if a daemon comes up later the refresher clears it.
+  let (client, daemon_start_error) = match client::connect_or_spawn(cli, config).await {
+    Ok(c) => (Some(c), None),
+    Err(e) => {
+      let msg = e
+        .message
+        .unwrap_or_else(|| "daemon: failed to start".to_string());
+      (None, Some(msg))
+    }
+  };
   if cli.render {
-    return render_snapshot(cli, config, &mut client).await;
+    return render_snapshot(cli, config, client, daemon_start_error).await;
   }
   drop(client);
   // Phase A of the Windows+HTTP-IPC plan: TUI attaches via the HTTP
@@ -232,6 +247,7 @@ pub(crate) async fn handle_tui(cli: &Cli, config: &crate::config::Config) -> Cli
     mouse_focus,
     &socket,
     daemon_opts,
+    daemon_start_error,
   )
   .await
   {
@@ -280,7 +296,8 @@ fn resolve_custom_palette(config: &crate::config::Config) -> Option<crate::theme
 async fn render_snapshot(
   cli: &Cli,
   config: &crate::config::Config,
-  client: &mut crate::ipc::Client,
+  client: Option<crate::ipc::Client>,
+  daemon_start_error: Option<String>,
 ) -> CliResult {
   use crate::tui::app::{App, AppOptions};
   use ratatui::backend::TestBackend;
@@ -302,28 +319,35 @@ async fn render_snapshot(
     offline: crate::init::fetch::offline_requested(false),
     mouse_focus: cli.mouse_focus || config.mouse_focus,
   });
-  if let Ok(body) = client.call("list_models", None).await {
-    app.ingest_list_models(&body);
-  }
+  // Auto-spawn refused (backend precheck) — snapshot the daemon-less
+  // frame so `--render` shows exactly what the interactive TUI would:
+  // the refusal in the Daemon panel. No daemon will appear, so the
+  // status-priming wait below is skipped.
+  app.daemon_start_error = daemon_start_error;
+  if let Some(mut client) = client {
+    if let Ok(body) = client.call("list_models", None).await {
+      app.ingest_list_models(&body);
+    }
 
-  // Poll `status` for up to ~1.5s so the host-metrics sampler's
-  // first 1 Hz tick has landed before we draw. Without this wait
-  // the snapshot would always show `backend unsampled` and a 0%
-  // CPU bar, which is correct but unhelpful as a debug tool.
-  let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
-  loop {
-    if let Ok(body) = client.call("status", None).await {
-      app.daemon_connected = true;
-      app.ingest_status(&body);
-      let primed =
-        app.host_metrics.gpu_backend != "unsampled" && app.host_metrics.ram_total_bytes > 0;
-      if primed || std::time::Instant::now() >= deadline {
+    // Poll `status` for up to ~1.5s so the host-metrics sampler's
+    // first 1 Hz tick has landed before we draw. Without this wait
+    // the snapshot would always show `backend unsampled` and a 0%
+    // CPU bar, which is correct but unhelpful as a debug tool.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    loop {
+      if let Ok(body) = client.call("status", None).await {
+        app.daemon_connected = true;
+        app.ingest_status(&body);
+        let primed =
+          app.host_metrics.gpu_backend != "unsampled" && app.host_metrics.ram_total_bytes > 0;
+        if primed || std::time::Instant::now() >= deadline {
+          break;
+        }
+      } else if std::time::Instant::now() >= deadline {
         break;
       }
-    } else if std::time::Instant::now() >= deadline {
-      break;
+      tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
   }
 
   let backend = TestBackend::new(width, height);

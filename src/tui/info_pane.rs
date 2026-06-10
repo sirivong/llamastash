@@ -135,6 +135,17 @@ fn parse_port_from_url(url: &str) -> Option<u16> {
 }
 
 fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a> {
+  // Startup auto-spawn was refused (backend fail-fast precheck) and no
+  // daemon has answered since: this row carries the explanation. Takes
+  // precedence over the stale `daemon_info` paths below — with no
+  // daemon, `server_path` is `None` and the generic "Not found" hint
+  // would mask the real, actionable failure.
+  if !app.daemon_connected {
+    if let Some(err) = app.daemon_start_error.as_deref() {
+      return server_error_row(err, budget, palette);
+    }
+  }
+
   // When the cursor sits on a model running on a *non-default*
   // `llama-server` binary, swap the row to that binary and paint it in
   // the success colour so it's obvious the hovered launch is on a
@@ -189,6 +200,70 @@ fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a>
       ])
     }
   }
+}
+
+/// Render the daemon-start refusal in the server row. `err` carries
+/// one single-line failure per backend (the precheck joins them with
+/// `\n`); every backend shares the row with an **equal** per-entry
+/// budget, each middle-truncated so a long lemonade message can't
+/// push a llama.cpp failure off-screen entirely.
+fn server_error_row<'a>(err: &str, budget: usize, palette: &'a Palette) -> Line<'a> {
+  let entries: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
+  let mut spans = vec![Span::styled(LABEL_SERVER, palette.label_style())];
+  if entries.is_empty() {
+    return Line::from(spans);
+  }
+  const SEP: &str = " · ";
+  let sep_total = SEP.width() * (entries.len() - 1);
+  let per_entry = budget.saturating_sub(sep_total) / entries.len();
+  for (i, entry) in entries.iter().enumerate() {
+    if i > 0 {
+      spans.push(Span::styled(SEP, palette.muted_style()));
+    }
+    spans.push(Span::styled(
+      middle_ellipsise(entry, per_entry),
+      palette.error_style(),
+    ));
+  }
+  Line::from(spans)
+}
+
+/// Truncate `s` to fit `budget` terminal columns by dropping the
+/// **middle**, keeping head and tail around a single `…`. The
+/// daemon-start failure messages lead with the backend name and end
+/// with the fix (`--force` / the config knob); middle truncation keeps
+/// both visible where left- or right-truncation would sacrifice one.
+fn middle_ellipsise(s: &str, budget: usize) -> String {
+  if budget == 0 {
+    return String::new();
+  }
+  if s.width() <= budget {
+    return s.to_string();
+  }
+  if budget == 1 {
+    return "…".to_string();
+  }
+  let keep = budget - 1; // reserve the `…` cell
+  let head = take_head_by_width(s, keep.div_ceil(2));
+  let tail = take_tail_by_width(s, keep / 2);
+  format!("{head}…{tail}")
+}
+
+/// Take the longest prefix of `s` whose display width is `<= budget`.
+/// Mirrors [`take_tail_by_width`]; iterates forward so a wide
+/// character that wouldn't fit is dropped rather than split.
+fn take_head_by_width(s: &str, budget: usize) -> String {
+  let mut acc_w = 0usize;
+  let mut out = String::new();
+  for ch in s.chars() {
+    let w = ch.to_string().width();
+    if acc_w + w > budget {
+      break;
+    }
+    out.push(ch);
+    acc_w += w;
+  }
+  out
 }
 
 /// Right-truncate `s` to fit `budget` terminal columns, appending
@@ -884,6 +959,114 @@ mod tests {
     assert!(
       !server_row.contains('('),
       "flavor must be suppressed when binary is unresolved: {server_row:?}"
+    );
+  }
+
+  #[test]
+  fn middle_ellipsise_keeps_head_and_tail() {
+    assert_eq!(middle_ellipsise("short", 10), "short");
+    let s = "lemonade umbrella port 127.0.0.1:13305 is already in use — use --force";
+    let out = middle_ellipsise(s, 30);
+    assert!(out.width() <= 30, "width {} > 30: {out:?}", out.width());
+    assert!(out.contains('…'), "expected middle ellipsis: {out:?}");
+    assert!(
+      out.starts_with("lemonade"),
+      "head must survive middle truncation: {out:?}"
+    );
+    assert!(
+      out.ends_with("--force"),
+      "tail (the fix hint) must survive middle truncation: {out:?}"
+    );
+  }
+
+  #[test]
+  fn middle_ellipsise_handles_tiny_budgets() {
+    assert_eq!(middle_ellipsise("abcdef", 0), "");
+    assert_eq!(middle_ellipsise("abcdef", 1), "…");
+    let out = middle_ellipsise("abcdef", 3);
+    assert!(out.width() <= 3, "{out:?}");
+    assert!(out.contains('…'), "{out:?}");
+  }
+
+  #[test]
+  fn server_row_shows_daemon_start_error_when_disconnected() {
+    // Auto-spawn refused by the backend precheck: the server row
+    // carries the refusal (middle-truncated), not the generic
+    // "Not found. Set LLAMASTASH_LLAMA_SERVER…" hint that would
+    // otherwise render for the empty daemon_info.
+    let mut app = App::new(AppOptions::default());
+    app.daemon_connected = false;
+    app.daemon_start_error =
+      Some("llama-server binary not found — install one or pass --force.".into());
+    let rows = render_lines(&app);
+    let server_row = rows.iter().find(|r| r.contains("server")).unwrap();
+    assert!(
+      server_row.contains("llama-server"),
+      "head of the failure must render: {server_row:?}"
+    );
+    assert!(
+      server_row.contains("--force"),
+      "tail (the fix hint) must render: {server_row:?}"
+    );
+    assert!(
+      !server_row.contains("Not found. Set"),
+      "generic binary hint must not mask the precheck failure: {server_row:?}"
+    );
+  }
+
+  #[test]
+  fn server_row_splits_budget_equally_across_backend_failures() {
+    // Two backends failed (one precheck line each): both must stay
+    // visible on the single row, equally truncated — a long lemonade
+    // message can't evict the llama.cpp one.
+    let mut app = App::new(AppOptions::default());
+    app.daemon_connected = false;
+    app.daemon_start_error = Some(
+      "llama-A-head xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx tail-A\n\
+       lemon-B-head yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy tail-B"
+        .into(),
+    );
+    let rows = render_lines(&app);
+    let server_row = rows.iter().find(|r| r.contains("server")).unwrap();
+    assert!(
+      server_row.contains("llama-A") && server_row.contains("lemon-B"),
+      "both backend heads must survive: {server_row:?}"
+    );
+    assert!(
+      server_row.contains("tail-A") && server_row.contains("tail-B"),
+      "both backend tails must survive: {server_row:?}"
+    );
+    assert_eq!(
+      server_row.matches('…').count(),
+      2,
+      "each entry middle-truncates exactly once: {server_row:?}"
+    );
+    assert!(
+      server_row.contains(" · "),
+      "entries must be separated: {server_row:?}"
+    );
+  }
+
+  #[test]
+  fn server_row_ignores_start_error_once_daemon_connected() {
+    // A live daemon supersedes the startup refusal: the row goes back
+    // to the normal binary-path rendering.
+    let mut app = App::new(AppOptions::default());
+    app.daemon_connected = true;
+    app.daemon_start_error = Some("stale refusal".into());
+    app.daemon_info = DaemonInfo {
+      server_path: Some("/usr/bin/llama-server".into()),
+      ..Default::default()
+    };
+    let rows = render_lines(&app);
+    let server_row = rows.iter().find(|r| r.contains("server")).unwrap();
+    assert!(
+      server_row.contains("/usr/bin/llama-server"),
+      "expected normal server path: {server_row:?}"
+    );
+    assert!(
+      !server_row.contains("stale refusal"),
+      "refusal must not render once connected: {server_row:?}"
     );
   }
 
