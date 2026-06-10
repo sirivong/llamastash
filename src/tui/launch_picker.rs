@@ -60,7 +60,7 @@ const LLAMACPP_BACKEND_CHOICES: &[BackendChoice] = &[BackendChoice::Auto, Backen
 
 /// Backend choices for a Lemonade-registry model: `Auto` resolves to Lemonade.
 /// The chooser row is surfaced so the user sees the model launches via the
-/// managed-multiplexer (and why the llama.cpp knobs below are greyed).
+/// managed-multiplexer (and why only ctx + extras render below).
 const LEMONADE_BACKEND_CHOICES: &[BackendChoice] = &[BackendChoice::Auto, BackendChoice::Lemonade];
 
 impl PickerField {
@@ -307,10 +307,11 @@ impl LaunchPickerState {
     self.backend.label()
   }
 
-  /// Whether the resolved active backend honors `field` (R6). The Settings
-  /// editor greys rows the active backend can't honor. llama.cpp honors every
-  /// typed knob; Lemonade (managed-multiplexer) honors none. `Auto` resolves
-  /// to the model's own backend first.
+  /// Whether the resolved active backend honors `field` (R6).
+  /// [`Self::field_visible`] hides rows the active backend can't honor.
+  /// llama.cpp honors every typed knob; Lemonade honors `ctx` only
+  /// (lemond's `ctx_size` load option). `Auto` resolves to the model's
+  /// own backend first.
   pub fn knob_supported(&self, field: KnobField) -> bool {
     use crate::backend::lemonade::LemonadeBackend;
     use crate::backend::llama_cpp::LlamaCppBackend;
@@ -466,15 +467,17 @@ impl LaunchPickerState {
 
   /// Whether a row is currently shown / navigable. The Multi-GPU
   /// placement knobs (`device`, `tensor_split`, `main_gpu`,
-  /// `split_mode`) are gated on [`Self::multi_device`]; everything
-  /// else is always shown. Delegates to the single-source group table.
+  /// `split_mode`) are gated on [`Self::multi_device`]; knobs the
+  /// active backend can't honor are hidden outright (R6) — a Lemonade
+  /// model shows just Backend, ctx, and extras rather than a column of
+  /// dead rows. Delegates to the single-source group table.
   pub fn field_visible(&self, field: PickerField) -> bool {
     match field {
       // Backend chooser only when it adds information — i.e. the focused
       // model's backend isn't the default direct llama.cpp (R17). A GGUF row
       // hides + skips it; a Lemonade registry row surfaces it.
       PickerField::Backend => self.backend_choice_available(),
-      PickerField::Knob(k) => knob_row_visible(k, self.multi_device()),
+      PickerField::Knob(k) => self.knob_supported(k) && knob_row_visible(k, self.multi_device()),
       PickerField::Extras => true,
     }
   }
@@ -849,7 +852,7 @@ mod tests {
   }
 
   #[test]
-  fn lemonade_model_shows_backend_row_and_greys_knobs() {
+  fn lemonade_model_shows_only_backend_ctx_and_extras() {
     let mut s = LaunchPickerState::for_model("Qwen2.5-7B");
     s.model_backend = BackendChoice::Lemonade;
     assert!(
@@ -861,9 +864,23 @@ mod tests {
       &[BackendChoice::Auto, BackendChoice::Lemonade]
     );
     assert!(s.field_visible(PickerField::Backend));
-    // Under Auto a Lemonade model resolves to Lemonade, which honors no
-    // llama.cpp knobs — the editor greys them.
-    assert!(!s.knob_supported(KnobField::Ctx));
+    // Under Auto a Lemonade model resolves to Lemonade, which honors
+    // `ctx` (lemond's `ctx_size` load option) and the free-form extras
+    // (`*_args`) — every other llama.cpp knob row is hidden outright.
+    let visible: Vec<PickerField> = PickerField::all()
+      .iter()
+      .copied()
+      .filter(|f| s.field_visible(*f))
+      .collect();
+    assert_eq!(
+      visible,
+      vec![
+        PickerField::Backend,
+        PickerField::Knob(KnobField::Ctx),
+        PickerField::Extras,
+      ],
+      "lemonade picker is Backend + ctx + extras, nothing else"
+    );
     assert_eq!(s.active_backend_id(), "lemonade");
   }
 

@@ -205,19 +205,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         if let Some(err) = &picker_view.inline_edit.error {
           lines.push(inline_warning_row(err, palette));
         }
-      } else if !picker_view.knob_supported(field) {
-        // R6: the active backend can't honor this knob — label it instead
-        // of showing an editable value. (Dormant with llama.cpp, which
-        // honors every knob; live once a narrower backend is chosen.)
-        lines.push(kv_focused(
-          knob_label(field),
-          format!("not supported by {}", picker_view.active_backend_id()),
-          None,
-          focused,
-          false,
-          palette,
-          show_source,
-        ));
       } else {
         let value = format_knob_value(picker_view, field);
         let source = picker_view.source_for(field).label();
