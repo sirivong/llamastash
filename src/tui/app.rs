@@ -1705,6 +1705,7 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
     "huggingface" => ModelSource::HuggingFace,
     "ollama" => ModelSource::Ollama,
     "lm-studio" => ModelSource::LmStudio,
+    "lemonade" => ModelSource::Lemonade,
     _ => ModelSource::UserPath,
   };
   let metadata = row.get("metadata").and_then(|md| {
@@ -1933,6 +1934,49 @@ mod tests {
     assert_eq!(
       parsed.split_siblings[0],
       PathBuf::from("/m/m-00002-of-00002.gguf")
+    );
+  }
+
+  #[test]
+  fn parse_list_models_row_maps_lemonade_source() {
+    // Regression: the parser's source match had no "lemonade" arm, so
+    // registry rows fell through to `UserPath`. Downstream that seeded
+    // the launch picker with `model_backend = LlamaCpp` — the full
+    // llama.cpp knob set rendered and the Backend chooser hid, even
+    // though the daemon routes the launch to Lemonade.
+    let row = json!({
+      "path": "lemonade://qwen3.5-4b-FLM",
+      "parent": "lemonade://",
+      "source": "lemonade",
+      "display_label": "qwen3.5-4b-FLM",
+    });
+    let parsed = parse_list_models_row(&row).expect("row parses");
+    assert_eq!(parsed.source, ModelSource::Lemonade);
+    assert_eq!(parsed.source.backend_id(), "lemonade");
+  }
+
+  #[test]
+  fn build_default_picker_seeds_lemonade_backend_from_focused_row() {
+    // Live-flow companion to the picker's own
+    // `lemonade_model_shows_only_backend_ctx_and_extras`: that test sets
+    // `model_backend` by hand; this one walks the real seeding path from
+    // a catalog row, which is where the missing source arm broke it.
+    use crate::tui::launch_picker::PickerField;
+    let mut app = App::new(AppOptions::default());
+    let mut row = fake("lemonade://qwen3.5-4b-FLM", "lemonade://");
+    row.source = ModelSource::Lemonade;
+    row.display_label = Some("qwen3.5-4b-FLM".into());
+    app.models = vec![row];
+    app.list_cursor = 2;
+    assert!(app.focused_path().is_some(), "cursor must sit on the row");
+    let picker = app.build_default_picker().expect("picker builds");
+    assert_eq!(
+      picker.model_backend,
+      crate::launch::params::BackendChoice::Lemonade
+    );
+    assert!(
+      picker.field_visible(PickerField::Backend),
+      "lemonade row must surface the Backend chooser"
     );
   }
 
