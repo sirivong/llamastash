@@ -602,7 +602,7 @@ async fn proxy_state_with_models_and_registry(
   ProxyState::from_context(&ctx, false, true)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_ps_returns_ready_supervisor_with_documented_fields() {
   let dir = unique_temp_dir("ps-ready");
   let log_dir = dir.join("logs");
@@ -657,7 +657,7 @@ async fn api_ps_returns_ready_supervisor_with_documented_fields() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn digest_is_stable_across_tags_and_ps_for_same_model() {
   // Cross-endpoint invariant: /api/tags and /api/ps emit the same
   // `digest` value for the same model. Clients that pin tags-to-ps

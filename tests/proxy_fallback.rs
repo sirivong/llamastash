@@ -283,7 +283,7 @@ async fn stop_all(ctx: &MethodContext, extras: &[ManagedModel]) {
 
 // ---- Scenario 6: launch fails + matching-arch Ready model exists -------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fallback_to_matching_arch_running_model_emits_headers() {
   let dir = unique_temp("match");
   let log_dir = dir.join("logs");
@@ -337,7 +337,7 @@ async fn fallback_to_matching_arch_running_model_emits_headers() {
 
 // ---- Scenario 7: launch fails + only different-arch Ready exists ------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fallback_to_different_arch_model_when_no_family_match() {
   // Family preference is a *soft* preference (not a requirement)
   // per R155. With no family match available, any-MRU still
@@ -381,7 +381,7 @@ async fn fallback_to_different_arch_model_when_no_family_match() {
 
 // ---- Scenario 8: requested model has no arch metadata -----------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_arch_requested_falls_back_to_any_mru() {
   // R155 unknown-arch fallthrough: when the requested model row
   // has no `general.architecture`, the family-prefer step is
@@ -426,7 +426,7 @@ async fn unknown_arch_requested_falls_back_to_any_mru() {
 
 // ---- Scenario 10: per-request retry — no caching of the failure ------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_request_after_launch_failure_falls_back_independently() {
   // R155: per-request retry — no caching of the failure. After a
   // failed auto-start, a subsequent request must independently
@@ -474,7 +474,7 @@ async fn second_request_after_launch_failure_falls_back_independently() {
 
 // ---- Scenario 11: fallback disabled — 503 instead of cross-model serve
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fallback_disabled_returns_503_instead_of_picking_other_model() {
   // When the operator sets `ProxyConfig::fallback_enabled = false`
   // (via config, `--no-proxy-fallback`, or the env var), a failed

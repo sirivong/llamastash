@@ -391,7 +391,7 @@ async fn wait_for_proxy(addr: SocketAddr) {
   }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn end_to_end_proxy_models_matches_discovery_catalog() {
   // Spin up the daemon with a scan root containing two minimal
   // GGUFs. Once discovery finishes, `/v1/models` must return both

@@ -325,7 +325,7 @@ async fn run_dispatch_at(state_dir: Option<&Path>, model_dir: &Path, command: Co
   code
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_script_round_trip_list_start_status_logs_stop() {
   let h = spawn_daemon_with_model("happy", "m.gguf", "llama").await;
   let model_path = h.model_dir.join("m.gguf");
@@ -438,7 +438,7 @@ async fn agent_script_round_trip_list_start_status_logs_stop() {
   h.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_filter_and_unknown_ref_exit_codes() {
   let h = spawn_daemon_with_model("filter", "qwen.gguf", "qwen2").await;
 
@@ -477,7 +477,7 @@ async fn list_filter_and_unknown_ref_exit_codes() {
   h.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn presets_save_list_delete_round_trip() {
   let h = spawn_daemon_with_model("presets", "m.gguf", "llama").await;
 
@@ -565,7 +565,7 @@ async fn presets_save_list_delete_round_trip() {
   h.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn favorites_round_trip_through_dispatcher() {
   let h = spawn_daemon_with_model("favs", "m.gguf", "llama").await;
 
@@ -661,7 +661,7 @@ async fn spawn_daemon_with_model_wide_range(
   }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn presets_list_json_emits_array_for_agents() {
   let h = spawn_daemon_with_model("plj", "m.gguf", "llama").await;
 
@@ -713,7 +713,7 @@ async fn presets_list_json_emits_array_for_agents() {
   h.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_preset_chain_seeds_supervisor_with_saved_params() {
   let h = spawn_daemon_with_model("pchain", "m.gguf", "llama").await;
 
@@ -784,7 +784,7 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
   h.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
   let h = spawn_daemon_with_model_wide_range("dup", "m.gguf", "llama").await;
 
@@ -860,7 +860,7 @@ async fn start_ctx_above_native_succeeds_and_duplicate_launch_uses_new_port() {
   h.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn logs_follow_returns_daemon_unreachable_when_daemon_dies() {
   let mut h = spawn_daemon_with_model_wide_range("logsdrop", "m.gguf", "llama").await;
 

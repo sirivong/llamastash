@@ -122,7 +122,7 @@ fn parse(buf: &[u8]) -> (u16, Vec<u8>) {
   (status, body)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_starts_with_proxy_enabled_and_health_returns_ok() {
   let dir = unique_temp_dir("health-shape");
   let mut opts = DaemonOptions::rooted_at(dir.clone());
@@ -165,7 +165,7 @@ async fn daemon_starts_with_proxy_enabled_and_health_returns_ok() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_starts_without_proxy_when_disabled() {
   let dir = unique_temp_dir("disabled");
   let mut opts = DaemonOptions::rooted_at(dir.clone());
@@ -196,7 +196,7 @@ async fn daemon_starts_without_proxy_when_disabled() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_keeps_running_when_proxy_port_already_in_use() {
   let dir = unique_temp_dir("port-in-use");
   // Camp on a port first using std (synchronous) so the daemon
@@ -229,7 +229,7 @@ async fn daemon_keeps_running_when_proxy_port_already_in_use() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http11_keep_alive_serves_two_health_requests_on_one_connection() {
   let dir = unique_temp_dir("keepalive");
   let mut opts = DaemonOptions::rooted_at(dir.clone());

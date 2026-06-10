@@ -254,7 +254,7 @@ fn parse_response(buf: &[u8]) -> (u16, Vec<(String, String)>, Vec<u8>) {
 
 // --- happy paths --------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_completion_streams_back_byte_identical() {
   let dir = unique_temp("chat");
   let catalog_path = "/fixture/qwen3.gguf";
@@ -324,7 +324,7 @@ async fn chat_completion_streams_back_byte_identical() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embeddings_endpoint_round_trips_json() {
   let dir = unique_temp("embed");
   let catalog_path = "/fixture/nomic-embed.gguf";
@@ -359,7 +359,7 @@ async fn embeddings_endpoint_round_trips_json() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rerank_endpoint_forwards() {
   let dir = unique_temp("rerank");
   let catalog_path = "/fixture/bge-rerank.gguf";
@@ -394,7 +394,7 @@ async fn rerank_endpoint_forwards() {
 
 // --- error paths --------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_model_name_returns_404_model_not_found() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(
@@ -422,7 +422,7 @@ async fn unknown_model_name_returns_404_model_not_found() {
   shutdown_listener(shutdown, listener_handle).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ambiguous_substring_returns_400_with_candidates() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(
@@ -451,7 +451,7 @@ async fn ambiguous_substring_returns_400_with_candidates() {
   shutdown_listener(shutdown, listener_handle).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_model_field_returns_400_model_required() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
@@ -466,7 +466,7 @@ async fn missing_model_field_returns_400_model_required() {
   shutdown_listener(shutdown, listener_handle).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_model_string_returns_400_model_required() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
@@ -480,7 +480,7 @@ async fn empty_model_string_returns_400_model_required() {
   shutdown_listener(shutdown, listener_handle).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catalog_match_without_running_supervisor_returns_launch_failed() {
   // Catalog row exists but no supervisor is Ready *and* the path
   // points at a non-existent file → Unit 4's auto-start fails at
@@ -506,7 +506,7 @@ async fn catalog_match_without_running_supervisor_returns_launch_failed() {
   shutdown_listener(shutdown, listener_handle).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn body_exceeding_two_mib_returns_413() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
@@ -527,7 +527,7 @@ async fn body_exceeding_two_mib_returns_413() {
   shutdown_listener(shutdown, listener_handle).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_json_body_returns_400() {
   let registry = SupervisorRegistry::new();
   let state = proxy_state_with(Vec::new(), registry).await;
@@ -542,7 +542,7 @@ async fn malformed_json_body_returns_400() {
 
 // --- hop-by-hop header handling -----------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hop_by_hop_headers_dont_break_forwarding() {
   // A client sending `Connection: close` (plus the upstream sending
   // `Connection: close` back) should still produce a clean 200 with
@@ -601,7 +601,7 @@ async fn hop_by_hop_headers_dont_break_forwarding() {
 
 // --- upstream 500 pass-through ------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upstream_400_passes_through_as_400() {
   // The fake fixture's failure-injection knob: query string
   // `?fail=400` OR a magic marker `__TEST_INJECT_FAIL_400__` in the
@@ -634,7 +634,7 @@ async fn upstream_400_passes_through_as_400() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upstream_unreachable_after_stop_returns_structured_error() {
   // R-14: lock the error envelope shape when the supervisor we
   // picked dies before forwarding completes. Two valid responses:
@@ -677,7 +677,7 @@ async fn upstream_unreachable_after_stop_returns_structured_error() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partial_request_closes_within_header_read_timeout() {
   // R-03 regression test: assert the inbound `header_read_timeout`
   // wired into hyper::server::conn::http1::Builder actually fires.

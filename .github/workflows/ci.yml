@@ -83,13 +83,24 @@ jobs:
         # constraint (Unit 4 of the Windows+HTTP-IPC plan) but pinning
         # /tmp is still cheap and avoids any other long-path surprise.
         # Windows uses the runner's default temp dir (no TMPDIR override).
+        # `test_args` caps libtest's per-binary parallelism on the
+        # slower / fewer-core macOS and Windows runners. Each daemon /
+        # proxy integration test boots a full daemon (control plane +
+        # proxy listener + supervised tasks); running several at once on
+        # a 3-4 core runner oversubscribes the box and starves a listener
+        # past its fixed readiness deadline — the flaky timeouts that
+        # only surface off-Linux. ubuntu has the cores + fast threads to
+        # run unconstrained.
         include:
           - os: ubuntu-latest
             tmpdir_override: /tmp
+            test_args: ""
           - os: macos-latest
             tmpdir_override: /tmp
+            test_args: "-- --test-threads=2"
           - os: windows-latest
             tmpdir_override: ""
+            test_args: "-- --test-threads=2"
     runs-on: ${{ matrix.os }}
     needs: prepare
     steps:
@@ -97,7 +108,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
-        run: cargo test --features ${{ matrix.features }} --workspace
+        run: cargo test --features ${{ matrix.features }} --workspace ${{ matrix.test_args }}
         env:
           RUST_BACKTRACE: 1
           TMPDIR: ${{ matrix.tmpdir_override }}

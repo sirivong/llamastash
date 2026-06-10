@@ -211,7 +211,7 @@ async fn stop_all(ctx: &MethodContext) {
 
 // ---- Scenario 1: happy path — dormant model auto-starts ---------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dormant_model_auto_starts_and_forwards_without_fallback_headers() {
   let dir = unique_temp("happy");
   let log_dir = dir.join("logs");
@@ -253,7 +253,7 @@ async fn dormant_model_auto_starts_and_forwards_without_fallback_headers() {
 
 // ---- Scenario 2: slow start — request blocks for window then succeeds -
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_start_blocks_then_succeeds() {
   // The `--health-delay-ms` fixture knob makes /health return 503
   // until N ms after process start. We can't pass extra argv from
@@ -297,7 +297,7 @@ async fn slow_start_blocks_then_succeeds() {
 
 // ---- Scenario 11: launch + Ready transition observed simultaneously ---
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_state_visible_to_registry_after_auto_start() {
   // The proxy's auto-start uses the same code path as IPC's
   // `start_model`. After Ready, the supervisor registry must
@@ -346,7 +346,7 @@ async fn supervisor_state_visible_to_registry_after_auto_start() {
 // target for the lifetime of the stream. We document the contract
 // via the smaller "snapshot is taken at decision time" test below.
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_request_for_same_model_skips_relaunch() {
   // After the first request succeeds, a second request for the
   // same model must observe the now-Ready supervisor on the hot
@@ -388,7 +388,7 @@ async fn second_request_for_same_model_skips_relaunch() {
 // whose disk file *does* exist but whose canonical path won't
 // resolve to a launchable binary signal — see
 // `tests/proxy_fallback.rs` for the richer failure path.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_start_failure_with_no_ready_models_returns_launch_failed() {
   let dir = unique_temp("fail");
   let log_dir = dir.join("logs");

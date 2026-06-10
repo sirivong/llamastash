@@ -208,7 +208,7 @@ async fn stop_all(ctx: &MethodContext) {
 
 // ---- Scenario 3: two concurrent requests for the same dormant model ---
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_concurrent_requests_for_same_model_share_one_launch() {
   let dir = unique_temp("same");
   let log_dir = dir.join("logs");
@@ -252,7 +252,7 @@ async fn two_concurrent_requests_for_same_model_share_one_launch() {
 
 // ---- Scenario 4: three concurrent requests for three different models -
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_concurrent_requests_for_distinct_models_each_launch() {
   let dir = unique_temp("distinct");
   let log_dir = dir.join("logs");

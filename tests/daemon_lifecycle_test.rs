@@ -232,7 +232,7 @@ async fn start_detached_honours_caller_supplied_paths() {
 /// daemon is told to shut down must complete within the drain
 /// timeout, not be dropped on the floor.
 #[cfg(feature = "test-fixtures")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_drains_in_flight_request_within_budget() {
   let dir = unique_temp_dir("drain-completes");
   let opts = opts_for(&dir);

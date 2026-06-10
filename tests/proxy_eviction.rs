@@ -119,7 +119,7 @@ async fn build_state(registry: SupervisorRegistry, log_dir: &Path) -> Arc<ProxyS
   ProxyState::from_context(&ctx, false, true)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sweep_evicts_idle_auto_start_supervisor() {
   let dir = unique_temp("autostart-idle");
   let log_dir = dir.join("logs");
@@ -153,7 +153,7 @@ async fn sweep_evicts_idle_auto_start_supervisor() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sweep_skips_manual_launched_supervisor() {
   let dir = unique_temp("manual-skip");
   let log_dir = dir.join("logs");
@@ -178,7 +178,7 @@ async fn sweep_skips_manual_launched_supervisor() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sweep_skips_auto_start_with_inflight_request() {
   let dir = unique_temp("inflight-skip");
   let log_dir = dir.join("logs");
@@ -224,7 +224,7 @@ async fn sweep_skips_auto_start_with_inflight_request() {
   std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sweep_skips_auto_start_within_ttl() {
   let dir = unique_temp("within-ttl");
   let log_dir = dir.join("logs");
