@@ -1526,6 +1526,18 @@ fn require_events_tx(app: &App, op: &'static str) -> Option<mpsc::Sender<Event>>
   tx
 }
 
+/// The model name to put on an OpenAI request against a managed row's
+/// port. Lemonade rows carry the registry name in their synthetic path —
+/// `model_display_name`'s `file_stem` would mangle dotted names
+/// (`lemonade://qwen3.5-4b-FLM` → `qwen3`), and the umbrella resolves
+/// by exact registry name.
+fn served_model_name(path: &std::path::Path) -> String {
+  match crate::backend::lemonade::registry_name_from_path(path) {
+    Some(name) => name.to_string(),
+    None => crate::util::paths::model_display_name(path),
+  }
+}
+
 /// Trigger an OpenAI streaming chat completion against the focused
 /// Ready model. Stashes the receiver on `app.chat` so the render
 /// loop can drain it without blocking input.
@@ -1538,7 +1550,7 @@ fn apply_send_chat(app: &mut App) {
     return;
   }
   let prompt = app.chat.prompt.buffer().to_string();
-  let model_name = crate::util::paths::model_display_name(&managed.path);
+  let model_name = served_model_name(&managed.path);
   app.chat.reset_for_send();
   if let Some(tx) = require_events_tx(app, "chat submit") {
     spawn_chat_stream(managed.port, model_name, prompt, tx);
@@ -1557,7 +1569,7 @@ fn apply_embed_submit(app: &mut App) {
     return;
   }
   let input = app.embed.input.buffer().to_string();
-  let model_name = crate::util::paths::model_display_name(&managed.path);
+  let model_name = served_model_name(&managed.path);
   app.embed.busy = true;
   let port = managed.port;
   if let Some(events_tx) = require_events_tx(app, "embed submit") {
@@ -1618,7 +1630,7 @@ fn apply_rerank_submit(app: &mut App) {
   }
   let query = app.rerank.query.buffer().to_string();
   let candidates = app.rerank.candidates.clone();
-  let model_name = crate::util::paths::model_display_name(&managed.path);
+  let model_name = served_model_name(&managed.path);
   app.rerank.busy = true;
   let port = managed.port;
   if let Some(events_tx) = require_events_tx(app, "rerank submit") {
@@ -1801,7 +1813,7 @@ fn build_yank_text(app: &App, action: Action) -> Option<String> {
     Action::YankCurl => {
       let m = app.focused_managed()?;
       let url = format!("http://127.0.0.1:{}/v1", m.port);
-      let model_name = crate::util::paths::model_display_name(&m.path);
+      let model_name = served_model_name(&m.path);
       Some(format!(
         "curl -s -H 'Content-Type: application/json' -d '{{\"model\":\"{}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hello\"}}]}}' {}/chat/completions",
         model_name,

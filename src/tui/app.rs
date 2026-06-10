@@ -119,6 +119,20 @@ pub struct DaemonInfo {
   /// `None` when talking to a pre-Unit-5 daemon that omits the
   /// field — info_pane renders the proxy row as `proxy   —` in that case.
   pub proxy: Option<ProxyInfo>,
+  /// One entry per *enabled* backend whose `status.backends` row
+  /// carries a resolved `binary` path. The Daemon panel's server row
+  /// renders every non-llamacpp entry alongside the default
+  /// `llama-server` (llamacpp's binary already rides `server_path`),
+  /// tagged with the backend id — new backends appear with no
+  /// per-backend TUI code.
+  pub backend_binaries: Vec<BackendBinary>,
+}
+
+/// One backend's resolved binary from the `status.backends` array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendBinary {
+  pub id: String,
+  pub binary: String,
 }
 
 /// Wire shape of the proxy listener block surfaced via the IPC
@@ -781,6 +795,27 @@ impl App {
       // (`body["proxy"]`) but on the same daemon-info struct so the
       // info_pane can render both in one block.
       let proxy = body.get("proxy").and_then(parse_proxy_info);
+      // The backends rows (also a sibling field): every enabled
+      // backend's resolved binary, for the server row. A row with no
+      // `enabled` field counts as enabled (llamacpp has no off switch);
+      // an explicit `enabled: false` (e.g. lemonade without
+      // `--lemonade`) is dropped.
+      let backend_binaries: Vec<BackendBinary> = body
+        .get("backends")
+        .and_then(Value::as_array)
+        .map(|rows| {
+          rows
+            .iter()
+            .filter(|r| r.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+            .filter_map(|r| {
+              Some(BackendBinary {
+                id: r.get("id").and_then(Value::as_str)?.to_string(),
+                binary: r.get("binary").and_then(Value::as_str)?.to_string(),
+              })
+            })
+            .collect()
+        })
+        .unwrap_or_default();
       self.daemon_info = DaemonInfo {
         pid: daemon.get("pid").and_then(Value::as_u64).map(|n| n as u32),
         uptime_seconds: daemon.get("uptime_seconds").and_then(Value::as_u64),
@@ -797,6 +832,7 @@ impl App {
           .and_then(Value::as_str)
           .map(String::from),
         proxy,
+        backend_binaries,
       };
       // First-observation toast on `port_in_use`. Only fires when the
       // last *observed* status was something other than `port_in_use`
@@ -1429,6 +1465,19 @@ impl App {
     self.toast.as_ref().map(|(s, _)| s.as_str())
   }
 
+  /// The catalog mode hint for `path`, defaulting to chat when the row
+  /// is missing or carries no metadata (the historical default for the
+  /// right pane's mode surface).
+  fn mode_hint_for(&self, path: &std::path::Path) -> crate::gguf::metadata::ModeHint {
+    self
+      .models
+      .iter()
+      .find(|m| m.path.as_path() == path)
+      .and_then(|m| m.metadata.as_ref())
+      .map(|md| md.mode_hint)
+      .unwrap_or(crate::gguf::metadata::ModeHint::Chat)
+  }
+
   /// Tabs the right pane should expose for the currently focused
   /// model. The rule is binary: a *running* selection (Launching /
   /// Loading / Ready) gets Logs + the mode-appropriate input tab +
@@ -1449,17 +1498,29 @@ impl App {
       Some(m) => m,
       None => return vec![RightTab::Settings],
     };
-    match managed.state {
-      SurfaceState::Ready => {
-        let mode = self
-          .models
-          .iter()
-          .find(|m| m.path == managed.path)
-          .and_then(|m| m.metadata.as_ref())
-          .map(|md| md.mode_hint)
-          .unwrap_or(crate::gguf::metadata::ModeHint::Chat);
-        tabs_for_mode(mode)
+    // The lemonade umbrella row is infrastructure, not a model: it has
+    // no launch params to edit and chatting with the bare umbrella is
+    // meaningless. Its log tail is the one useful surface.
+    if managed.launch_id == crate::backend::lemonade::umbrella_launch_id().as_str() {
+      return vec![RightTab::Logs];
+    }
+    // A delegated lemonade model (resident in the umbrella): the umbrella
+    // honors no launch knobs, so Settings is dropped; the mode surface
+    // (Chat / Embed / Rerank) stays — requests ride the umbrella's
+    // OpenAI-compat port directly — and Logs tails the shared `lemond`
+    // log. A model with no mode surface (e.g. Whisper transcription,
+    // hint `Unknown`) gets Logs alone.
+    if crate::backend::lemonade::delegated_model_name(&managed.launch_id).is_some() {
+      if managed.state != SurfaceState::Ready {
+        return vec![RightTab::Logs];
       }
+      return tabs_for_mode(self.mode_hint_for(&managed.path))
+        .into_iter()
+        .filter(|t| *t != RightTab::Settings)
+        .collect();
+    }
+    match managed.state {
+      SurfaceState::Ready => tabs_for_mode(self.mode_hint_for(&managed.path)),
       // Process alive but not yet serving — Settings stays the
       // canonical first stop so the user can still tweak relaunch
       // params, Logs sits next so the startup pipeline is one
@@ -2607,6 +2668,109 @@ mod tests {
     assert!(
       app.launch_picker.is_none(),
       "scrolling to a different model must clear the stale picker"
+    );
+  }
+
+  #[test]
+  fn umbrella_row_offers_only_logs_tab() {
+    // The lemonade umbrella is infrastructure: no launch params to
+    // edit, chat against the bare umbrella is meaningless — only its
+    // log tail is useful.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/a.gguf", "/m")];
+    app.managed = vec![ManagedRow {
+      launch_id: "lemonade-umbrella".into(),
+      path: PathBuf::from("/usr/bin/lemond"),
+      port: 13305,
+      state: SurfaceState::Ready,
+      device: None,
+      rss_bytes: None,
+      cpu_pct: None,
+    }];
+    // Rows: [TableHeader, Header(▶ Running), umbrella, …] — cursor on it.
+    app.list_cursor = 2;
+    assert_eq!(app.available_right_tabs(), vec![RightTab::Logs]);
+    // A Ready tab choice from a previous focus must snap back to Logs.
+    app.right_tab = RightTab::Chat;
+    app.ensure_right_tab_reachable();
+    assert_eq!(app.right_tab, RightTab::Logs);
+  }
+
+  #[test]
+  fn delegated_lemonade_row_drops_settings_and_follows_mode() {
+    // A resident lemonade model: no Settings (the umbrella honors no
+    // launch knobs); the mode surface + Logs remain. A model with no
+    // llamastash mode surface (Whisper → Unknown) gets Logs alone.
+    let mut app = App::new(AppOptions::default());
+    let mut chat_model = fake("lemonade://qwen-FLM", "lemonade://");
+    chat_model.display_label = Some("qwen-FLM".into());
+    let mut whisper = fake("lemonade://Whisper-Tiny", "lemonade://");
+    whisper.metadata.as_mut().unwrap().mode_hint = ModeHint::Unknown;
+    whisper.display_label = Some("Whisper-Tiny".into());
+    app.models = vec![chat_model, whisper];
+    app.managed = vec![
+      ManagedRow {
+        launch_id: "lemonade:qwen-FLM".into(),
+        path: PathBuf::from("lemonade://qwen-FLM"),
+        port: 13305,
+        state: SurfaceState::Ready,
+        device: None,
+        rss_bytes: None,
+        cpu_pct: None,
+      },
+      ManagedRow {
+        launch_id: "lemonade:Whisper-Tiny".into(),
+        path: PathBuf::from("lemonade://Whisper-Tiny"),
+        port: 13305,
+        state: SurfaceState::Ready,
+        device: None,
+        rss_bytes: None,
+        cpu_pct: None,
+      },
+    ];
+    // Rows: [TableHeader, Header(▶ Running), qwen, whisper, …].
+    app.list_cursor = 2;
+    assert_eq!(
+      app.available_right_tabs(),
+      vec![RightTab::Logs, RightTab::Chat],
+      "chat-mode delegated row: mode surface without Settings"
+    );
+    app.list_cursor = 3;
+    app.clear_rows_cache();
+    assert_eq!(
+      app.available_right_tabs(),
+      vec![RightTab::Logs],
+      "transcription model has no mode surface: logs only"
+    );
+  }
+
+  #[test]
+  fn ingest_status_collects_enabled_backend_binaries() {
+    let mut app = App::new(AppOptions::default());
+    app.ingest_status(&json!({
+      "daemon": {"pid": 1},
+      "backends": [
+        // No `enabled` field → counts as enabled (llamacpp).
+        {"id": "llamacpp", "binary": "/usr/bin/llama-server"},
+        {"id": "lemonade", "enabled": true, "binary": "/usr/bin/lemond"},
+        // Disabled rows drop out even with a binary.
+        {"id": "future", "enabled": false, "binary": "/usr/bin/future"},
+        // No binary resolved → no entry.
+        {"id": "ghost", "enabled": true},
+      ],
+    }));
+    assert_eq!(
+      app.daemon_info.backend_binaries,
+      vec![
+        BackendBinary {
+          id: "llamacpp".into(),
+          binary: "/usr/bin/llama-server".into()
+        },
+        BackendBinary {
+          id: "lemonade".into(),
+          binary: "/usr/bin/lemond".into()
+        },
+      ]
     );
   }
 
