@@ -1,4 +1,4 @@
- LlamaStash v0.0.2 · ● daemon · ◐ macchiato                             ?:help · ↹/⇧↹:panes · P:pull · t:theme · q:quit
+ LlamaStash v0.0.3 · ● daemon · ◐ macchiato                             ?:help · ↹/⇧↹:panes · P:pull · t:theme · q:quit
 ┌ Host ─────────────────┐┌ Daemon ─────────────────────────────────────────────────────────────────────────┐┌──────────┐
 │CPU  ███░░░░ 48% 54°C  ││port    48134  pid 4242  up 3h12m                                                ││  ▉    ▉  │
 │RAM  ██░░░░░ 11/32G    ││server  /usr/local/bin/llama-server (cuda)                                       ││  █▃██▃█  │

@@ -4,6 +4,8 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+## [0.0.3] — 2026-06-11
+
 ### Added
 
 - Multimodal (vision/audio) models — LlamaStash auto-detects an mmproj projector sitting beside a model, loads it with `--mmproj`, and flags vision/audio after the model title in the TUI. (#15, #27)
