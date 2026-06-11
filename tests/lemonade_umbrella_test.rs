@@ -245,14 +245,17 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
     state == "loading" || state == "ready",
     "in-flight preload surfaces as loading (or ready if it already landed), got {state}"
   );
-  let deadline = Instant::now() + Duration::from_secs(5);
+  let deadline = Instant::now() + Duration::from_secs(15);
   loop {
     let body = status(&ctx, 3).await;
-    let (state, _) = row_state(&body, "Qwen-slow").expect("row stays emitted");
+    let (state, cause) = row_state(&body, "Qwen-slow").expect("row stays emitted");
     if state == "ready" {
       break;
     }
-    assert!(Instant::now() < deadline, "slow preload never became ready");
+    assert!(
+      Instant::now() < deadline,
+      "slow preload never became ready (state {state}, cause {cause:?})"
+    );
     tokio::time::sleep(Duration::from_millis(50)).await;
   }
 
@@ -268,7 +271,7 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
   )
   .await;
   resp.result.expect("start_model dispatches the preload");
-  let deadline = Instant::now() + Duration::from_secs(5);
+  let deadline = Instant::now() + Duration::from_secs(15);
   let cause = loop {
     let body = status(&ctx, 5).await;
     let (state, cause) = row_state(&body, "Broken-fail").expect("failed row stays emitted");

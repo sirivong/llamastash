@@ -38,9 +38,7 @@ async fn main() {
       break;
     };
     tokio::spawn(async move {
-      let mut buf = vec![0u8; 4096];
-      let n = sock.read(&mut buf).await.unwrap_or(0);
-      let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+      let raw = read_request(&mut sock).await;
       let (status, body) = route(&raw).await;
       let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -106,6 +104,41 @@ async fn route(raw: &str) -> (String, String) {
       r#"{"detail":"not found"}"#.to_string(),
     ),
   }
+}
+
+/// Read a full HTTP/1.1 request: headers through `\r\n\r\n`, then
+/// `Content-Length` body bytes. A single `read()` is not enough — the
+/// client may deliver headers and body in separate packets (seen on the
+/// coverage-instrumented CI lane), and routing on headers alone made the
+/// fixture answer `/api/v1/load` before the body's model name arrived,
+/// then close the socket mid-upload — resetting the client's request.
+async fn read_request(sock: &mut tokio::net::TcpStream) -> String {
+  let mut buf = Vec::with_capacity(4096);
+  let mut chunk = [0u8; 4096];
+  let header_end = loop {
+    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+      break pos + 4;
+    }
+    match sock.read(&mut chunk).await {
+      Ok(0) | Err(_) => return String::from_utf8_lossy(&buf).into_owned(),
+      Ok(n) => buf.extend_from_slice(&chunk[..n]),
+    }
+  };
+  let content_length = String::from_utf8_lossy(&buf[..header_end])
+    .lines()
+    .find_map(|l| {
+      let lower = l.to_ascii_lowercase();
+      let value = lower.strip_prefix("content-length:")?;
+      value.trim().parse::<usize>().ok()
+    })
+    .unwrap_or(0);
+  while buf.len() < header_end + content_length {
+    match sock.read(&mut chunk).await {
+      Ok(0) | Err(_) => break,
+      Ok(n) => buf.extend_from_slice(&chunk[..n]),
+    }
+  }
+  String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Build a `(status, body)` pair for a 200 response.
