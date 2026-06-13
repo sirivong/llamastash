@@ -22,7 +22,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::theme::Palette;
-use crate::tui::app::App;
+use crate::tui::app::{App, ToastKind};
 use crate::tui::keybindings::{Action, Focus};
 use crate::tui::{
   confirm_overlay, help_bar, help_overlay, host_stats_pane, info_pane, list_pane, logo_pane,
@@ -182,13 +182,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
 /// Draw a single-line floating toast near the bottom of `area`,
 /// centered horizontally. No-op when no toast is set. The line is
-/// painted on the accent background so it pops over whatever panel
-/// it lands on; `Clear` wipes the underlying cells first so the
-/// panel borders don't bleed through.
+/// painted on the accent background (or `palette.error` for an error
+/// toast) so it pops over whatever panel it lands on; `Clear` wipes
+/// the underlying cells first so the panel borders don't bleed
+/// through.
 fn render_toast(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let Some(msg) = app.toast_message() else {
     return;
   };
+  let kind = app.toast_kind().unwrap_or_default();
   // Truncate aggressively rather than wrap — a multi-line toast
   // would push the body content visibly upward. Reserve 4 cells of
   // margin so the bar never butts against the edges.
@@ -209,8 +211,12 @@ fn render_toast(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette)
   let y = area.y + area.height.saturating_sub(2);
   let rect = Rect::new(x, y, w, 1);
   frame.render_widget(Clear, rect);
+  let bg = match kind {
+    ToastKind::Error => palette.error,
+    ToastKind::Info => palette.accent,
+  };
   let style = Style::default()
-    .bg(palette.accent)
+    .bg(bg)
     .fg(palette.on_accent)
     .add_modifier(Modifier::BOLD);
   frame.render_widget(Paragraph::new(text).style(style), rect);

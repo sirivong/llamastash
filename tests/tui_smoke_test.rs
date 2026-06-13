@@ -741,6 +741,76 @@ fn show_toast_paints_visible_bar_near_bottom() {
   );
 }
 
+/// Render one frame and return the set of distinct background colours
+/// found on cells whose symbol is part of `needle`. Lets a test prove
+/// the toast bar paints on the expected palette slot rather than only
+/// that the glyphs landed.
+fn toast_bar_bg_colors(app: &mut App, needle: &str) -> Vec<ratatui::style::Color> {
+  let backend = TestBackend::new(130, 24);
+  let mut terminal = Terminal::new(backend).expect("test terminal");
+  terminal.draw(|f| render(f, app)).expect("render");
+  let buf = terminal.backend().buffer();
+  // The toast paints ` {msg} ` on a filled bar; sample the bg of every
+  // cell on rows that contain the message text.
+  let mut rows_with_msg = std::collections::BTreeSet::new();
+  for y in 0..buf.area.height {
+    let mut row = String::new();
+    for x in 0..buf.area.width {
+      row.push_str(buf[(x, y)].symbol());
+    }
+    if row.contains(needle) {
+      rows_with_msg.insert(y);
+    }
+  }
+  let mut colors = Vec::new();
+  for y in rows_with_msg {
+    for x in 0..buf.area.width {
+      let cell = &buf[(x, y)];
+      if cell.symbol().trim().is_empty() {
+        continue;
+      }
+      if !colors.contains(&cell.bg) {
+        colors.push(cell.bg);
+      }
+    }
+  }
+  colors
+}
+
+#[test]
+fn error_toast_paints_on_error_slot_not_accent() {
+  // An error toast (writer offline, clipboard failure, port in use)
+  // must read as red, not ride the neutral accent the way success /
+  // refusal toasts do — otherwise a failure masquerades as a positive
+  // confirmation. Pin the bar's background to `palette.error` and
+  // prove a neutral toast still uses `palette.accent`.
+  let palette = llamastash::theme::palette_for(ThemeName::Macchiato);
+
+  let mut app = App::new(AppOptions::default());
+  app.show_error_toast("clipboard unavailable: no backend");
+  let err_colors = toast_bar_bg_colors(&mut app, "clipboard unavailable");
+  assert!(
+    err_colors.contains(&palette.error),
+    "error toast must paint on palette.error, saw {err_colors:?}"
+  );
+  assert!(
+    !err_colors.contains(&palette.accent),
+    "error toast must not ride the accent slot, saw {err_colors:?}"
+  );
+
+  let mut app = App::new(AppOptions::default());
+  app.show_toast("copied logs (12 lines)");
+  let ok_colors = toast_bar_bg_colors(&mut app, "copied logs");
+  assert!(
+    ok_colors.contains(&palette.accent),
+    "neutral toast must keep the accent slot, saw {ok_colors:?}"
+  );
+  assert!(
+    !ok_colors.contains(&palette.error),
+    "neutral toast must not paint red, saw {ok_colors:?}"
+  );
+}
+
 #[test]
 fn narrow_terminal_truncates_long_model_names_with_ellipsis() {
   // Plan edge case: a name wider than the list pane should render

@@ -770,7 +770,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
           let text = lines.join("\n");
           match clipboard::write(&text) {
             Ok(_) => app.show_toast(format!("copied logs ({n} lines)")),
-            Err(e) => app.show_toast(format!("clipboard unavailable: {e}")),
+            Err(e) => app.show_error_toast(format!("clipboard unavailable: {e}")),
           }
         }
         return;
@@ -794,7 +794,7 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
             } else {
               text
             };
-            app.show_toast(format!("clipboard unavailable: {e}; {preview}"));
+            app.show_error_toast(format!("clipboard unavailable: {e}; {preview}"));
           }
         }
       } else {
@@ -1372,7 +1372,7 @@ fn apply_confirmed(app: &mut App, action: ConfirmAction, writer: Option<&mpsc::S
         }
         app.show_toast(format!("deleted {display_name}"));
       }
-      Err(e) => app.show_toast(format!("delete failed: {e}")),
+      Err(e) => app.show_error_toast(format!("delete failed: {e}")),
     },
     ConfirmAction::CancelDownload { .. } => {
       use crate::tui::download_strip::CancelOutcome;
@@ -1418,9 +1418,9 @@ fn dispatch_writer(
   match writer {
     Some(tx) => match tx.try_send(cmd) {
       Ok(()) => app.show_toast(ok_msg),
-      Err(_) => app.show_toast(err_msg.to_string()),
+      Err(_) => app.show_error_toast(err_msg.to_string()),
     },
-    None => app.show_toast(no_writer_msg),
+    None => app.show_error_toast(no_writer_msg),
   }
 }
 
@@ -1670,7 +1670,7 @@ fn apply_toggle_favorite(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>
       } else {
         app.favorites.push(p);
       }
-      app.show_toast("favorite toggle failed — writer offline");
+      app.show_error_toast("favorite toggle failed — writer offline");
       return;
     }
   }
@@ -1778,14 +1778,14 @@ fn dispatch_launch(
         app.close_launch_picker();
       }
       Err(_) => {
-        app.show_toast("launch failed — writer offline");
+        app.show_error_toast("launch failed — writer offline");
       }
     },
     None => {
       // No daemon attached (headless test backend, dry run, etc.).
       // Keep the picker open so the user can retry once a writer is
       // wired up rather than silently swallowing the keypress.
-      app.show_toast("launch unavailable — no daemon writer attached");
+      app.show_error_toast("launch unavailable — no daemon writer attached");
     }
   }
 }
@@ -2316,7 +2316,7 @@ fn apply_refresh(app: &mut App, tick: RefreshTick) {
       app.daemon_connected = false;
     }
     RefreshTick::WriterError { method, message } => {
-      app.show_toast(writer_error_toast(method, &message));
+      app.show_error_toast(writer_error_toast(method, &message));
     }
   }
 }

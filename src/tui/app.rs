@@ -27,6 +27,19 @@ use crate::tui::tabs::{tabs_for_mode, RightTab};
 /// transient yank confirmations from sticking around forever.
 const TOAST_TTL: Duration = Duration::from_secs(3);
 
+/// Severity of a transient toast. Drives the colour the bar paints
+/// in: `Info` rides the theme accent (neutral confirmations like
+/// "copied logs", refusal guards like "nothing to copy"), while
+/// `Error` paints on `palette.error` so genuine failures (clipboard
+/// unavailable, writer offline, port in use) read as red rather than
+/// masquerading as a positive accent confirmation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToastKind {
+  #[default]
+  Info,
+  Error,
+}
+
 /// Body width (cells) at which the dashboard flips from wide-pane
 /// to compact-pane mode. At ≥ 100 cells both panes render side by
 /// side (current 65/35 layout). Below 100 cells the right pane is
@@ -284,7 +297,7 @@ pub struct App {
   /// `max_scroll`. Same pattern as
   /// [`LaunchPickerState::scroll_offset`].
   pub running_view_scroll: Cell<u16>,
-  pub toast: Option<(String, Instant)>,
+  pub toast: Option<(String, Instant, ToastKind)>,
   pub daemon_connected: bool,
   /// Why the startup auto-spawn refused to bring a daemon up (the
   /// backend fail-fast precheck: missing `llama-server`, missing
@@ -849,14 +862,14 @@ impl App {
         let was_port_in_use = matches!(self.last_proxy_status.as_deref(), Some("port_in_use"));
         if status == "port_in_use" && !was_port_in_use {
           let listen = cur_listen.as_deref().unwrap_or("?");
-          self.show_toast(format!(
+          self.show_error_toast(format!(
             "proxy: port {listen} already in use; daemon continues without the OpenAI-compat router"
           ));
         }
         let was_refused = matches!(self.last_proxy_status.as_deref(), Some("refused_insecure"));
         if status == "refused_insecure" && !was_refused {
           let listen = cur_listen.as_deref().unwrap_or("?");
-          self.show_toast(format!(
+          self.show_error_toast(format!(
             "proxy: refused to expose {listen} without auth; set proxy.api_key or pass --insecure-no-auth"
           ));
         }
@@ -1447,14 +1460,22 @@ impl App {
     self.clamp_cursor();
   }
 
-  /// Apply a transient toast.
+  /// Apply a transient neutral toast (theme accent). Use for
+  /// confirmations and refusal guards.
   pub fn show_toast(&mut self, msg: impl Into<String>) {
-    self.toast = Some((msg.into(), Instant::now()));
+    self.toast = Some((msg.into(), Instant::now(), ToastKind::Info));
+  }
+
+  /// Apply a transient error toast (red). Use only for genuine
+  /// failures — an attempted operation that did not complete — so the
+  /// red bar stays meaningful.
+  pub fn show_error_toast(&mut self, msg: impl Into<String>) {
+    self.toast = Some((msg.into(), Instant::now(), ToastKind::Error));
   }
 
   /// Drop the toast if it's older than `TOAST_TTL`.
   pub fn expire_toast(&mut self) {
-    if let Some((_, at)) = &self.toast {
+    if let Some((_, at, _)) = &self.toast {
       if at.elapsed() > TOAST_TTL {
         self.toast = None;
       }
@@ -1462,7 +1483,13 @@ impl App {
   }
 
   pub fn toast_message(&self) -> Option<&str> {
-    self.toast.as_ref().map(|(s, _)| s.as_str())
+    self.toast.as_ref().map(|(s, _, _)| s.as_str())
+  }
+
+  /// Severity of the active toast, for the renderer to pick the bar
+  /// colour. `None` when no toast is showing.
+  pub fn toast_kind(&self) -> Option<ToastKind> {
+    self.toast.as_ref().map(|(_, _, kind)| *kind)
   }
 
   /// The catalog mode hint for `path`, defaulting to chat when the row
@@ -2927,7 +2954,7 @@ mod tests {
     app.show_toast("yanked");
     assert!(app.toast_message().is_some());
     // Backdate the toast to force expiry.
-    if let Some((_, ref mut at)) = app.toast {
+    if let Some((_, ref mut at, _)) = app.toast {
       *at = Instant::now() - Duration::from_secs(10);
     }
     app.expire_toast();
