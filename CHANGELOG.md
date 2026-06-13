@@ -11,10 +11,12 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - New config options with `LLAMASTASH_*` env overrides: `default_launch_mode` (`auto`|`inherited`), `fit_ctx_floor` (default 16384), `strict_fit`.
 - TUI host pane, init banner, and help legend rename `RAM`/`RAM*` to `MEM`/`MEM*` so unified-memory machines stop reading as roughly twice their physical memory.
 - `doctor` gained a hardware section (CPU, memory, GPU pool composition, classification source), a memory-drift finding, and a GTT-cap hint; `status --json` reports the fit-resolved context as `resolved_ctx` once a model is up.
+- Hardware reporting now uses one consistent vocabulary across `status`, `doctor`, `init`, and the TUI: the GPU is named by vendor (`AMD`/`NVIDIA`/`Apple`), memory always prints `GiB`, a unified APU pool reads `unified`/`MEM*` rather than `VRAM`, and `doctor` is the superset (it adds CPU instruction sets and an OS line). `doctor` and `status` now print the same one-line GPU summary, e.g. `AMD · 124.5 GiB (carve signature)`.
 
 ### Fixed
 
 - `--flash-attn auto` no longer leaves a dangling positional token in the argv tail.
+- `status` no longer reports `GPU: CPU only` during the daemon's first second (before the metrics sampler ticks); it reads the live host snapshot like the TUI, and the pre-sample window reads `detecting`.
 
 ## [0.0.3] — 2026-06-11
 
