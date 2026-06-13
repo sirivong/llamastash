@@ -271,6 +271,7 @@ mod tests {
       params: None,
       latest_rss_bytes: None,
       latest_cpu_pct: None,
+      resolved_ctx: None,
     }]
   }
 

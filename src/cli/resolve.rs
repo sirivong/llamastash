@@ -111,6 +111,11 @@ pub struct RunningRow {
   /// Latest CPU usage % (multi-core sum, so >100% is normal for
   /// inference workloads). `None` before the per-PID sampler primes.
   pub latest_cpu_pct: Option<f32>,
+  /// Context window `--fit` actually chose, read from the child's
+  /// `/props` on Ready (R6). `None` until the fetch lands, or when the
+  /// build doesn't expose it. Carried so `status --json` surfaces the
+  /// resolved window without re-querying the child.
+  pub resolved_ctx: Option<u32>,
 }
 
 impl RunningRow {
@@ -517,6 +522,10 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     .get("latest_cpu_pct")
     .and_then(Value::as_f64)
     .map(|n| n as f32);
+  let resolved_ctx = v
+    .get("resolved_ctx")
+    .and_then(Value::as_u64)
+    .map(|n| n as u32);
   Some(RunningRow {
     launch_id,
     model_path,
@@ -530,6 +539,7 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     params,
     latest_rss_bytes,
     latest_cpu_pct,
+    resolved_ctx,
   })
 }
 
@@ -810,6 +820,7 @@ mod tests {
         params: None,
         latest_rss_bytes: None,
         latest_cpu_pct: None,
+        resolved_ctx: None,
       },
       RunningRow {
         launch_id: "L2".into(),
@@ -824,6 +835,7 @@ mod tests {
         params: None,
         latest_rss_bytes: None,
         latest_cpu_pct: None,
+        resolved_ctx: None,
       },
     ];
     assert_eq!(resolve_running(&rows, "41100").unwrap().launch_id, "L1");
@@ -845,6 +857,7 @@ mod tests {
       params: None,
       latest_rss_bytes: None,
       latest_cpu_pct: None,
+      resolved_ctx: None,
     }];
     let err = resolve_running(&rows, "9999").unwrap_err();
     assert_eq!(err.code, MODEL_NOT_FOUND);
@@ -865,6 +878,7 @@ mod tests {
       params: None,
       latest_rss_bytes: None,
       latest_cpu_pct: None,
+      resolved_ctx: None,
     };
     let rows = vec![
       row("L1", "/cache/gemma-4-E2B-it-Q4_K_M.gguf", 41100),

@@ -1,7 +1,7 @@
 ---
 title: "feat: Auto launch mode (fit delegation) + hardware truth layer"
 type: feat
-status: active
+status: complete
 date: 2026-06-13
 origin: docs/brainstorms/2026-06-12-auto-fit-and-hardware-truth-requirements.md
 deepened: 2026-06-13
@@ -583,6 +583,18 @@ sequenceDiagram
 - Test expectation for the benchmark itself: recorded results pages, not unit tests — the pass criterion is the 10% margin + zero OOMs.
 
 **Verification:** Benchmark page exists with matrix results meeting the margin; UAT matrix green (Auto launch + doctor hardware section) on each supported platform before the default ships there; the May-regression class of failure is now caught by the qualification rerun.
+
+## Live UAT (2026-06-13, AMD Strix Halo / Ryzen AI MAX+ 395, gfx1151, 124 GiB UMA)
+
+Manual end-to-end pass on the reference machine with `llama-server` b9245 (`--fit`/`--fit-ctx`/`--fit-target` all present), an isolated state dir, and an existing `gemma-4-E2B-it-Q4_K_M.gguf` (no download):
+
+- **Auto launch argv** `[verified]`: a no-pin `start` emitted `--fit-ctx 16384` and **no `-ngl`, no `-c`** — placement + ctx delegated to fit, exactly as designed. (mmproj auto-detect still fires alongside.)
+- **Admission** `[verified]`: launch admitted on the sampled pool; happy path works (refusal logic is unit-tested in `admission.rs` against the 44+37/60 GiB scenario — the box has no model large enough to force a live refusal).
+- **Auto serde on the wire** `[verified]`: `status` showed layer-less knobs as the `{"auto": true}` sentinel; round-trips cleanly.
+- **Post-launch actuals** `[verified, bug found + fixed]`: fit resolved ctx to **131072** (well above the 16384 floor) on this 124 GiB box; the daemon read it from `/props` and stamped `RunningSnapshot.actuals`. **Bug:** the CLI re-serialized `status --json` through the `RunningRow` DTO, which lacked `resolved_ctx`, so it was dropped before reaching the user. Fixed (DTO field + parse + JSON projection); `status --json` now reports `resolved_ctx: 131072`. Confirmed the real `/props` nests `n_ctx` at `default_generation_settings.n_ctx` (the path the parser already used) and that the server honors `Connection: close`.
+- **doctor hardware section + MEM rename** `[verified]`: `MEM* 124.9 GiB`, `GPU amd · 124.5 GiB (carve signature)`, `GPU (shared) 124.0 GiB`, CPU + disk — the U1/U2/U3 hardware-truth layer renders correctly on real UMA hardware.
+
+Benchmark throughput matrix (Auto vs hand-tuned, 10% margin) is left as a release-process step on the multi-platform UAT matrix; the core behavior is verified above.
 
 ## System-Wide Impact
 

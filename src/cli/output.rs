@@ -633,6 +633,9 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
         serde_json::json!(r.latest_rss_bytes),
       );
       obj.insert("latest_cpu_pct".into(), serde_json::json!(r.latest_cpu_pct));
+      // Fit-resolved context window (R6), null until the post-Ready
+      // `/props` fetch lands.
+      obj.insert("resolved_ctx".into(), serde_json::json!(r.resolved_ctx));
       Value::Object(obj)
     })
     .collect();
@@ -1055,6 +1058,7 @@ mod tests {
         params: None,
         latest_rss_bytes: Some(4_500_000_000),
         latest_cpu_pct: Some(312.0),
+        resolved_ctx: None,
       }],
       external: vec![ExternalRow {
         pid: 999,
@@ -1158,6 +1162,7 @@ mod tests {
       params: None,
       latest_rss_bytes: None,
       latest_cpu_pct: None,
+      resolved_ctx: None,
     }
   }
 
