@@ -164,13 +164,41 @@ enum BindOutcome {
   },
 }
 
+/// A bind error that should advance the scan to the next candidate
+/// port rather than abort the whole listener.
+///
+/// - `AddrInUse`: something already holds this port.
+/// - `PermissionDenied`: on Windows this is `WSAEACCES` (os error
+///   10013), which a *specific* port returns when it falls inside an
+///   OS-reserved/excluded TCP range — Hyper-V / WSL2 / Docker Desktop
+///   carve out random dynamic ranges, and a port in one fails to bind
+///   even though nothing is listening. The reservation is per-port, so
+///   the next candidate usually binds fine. (On Unix EACCES is the
+///   privileged-port case, but the scan window is all > 1024, so this
+///   only meaningfully changes Windows; advancing is harmless either
+///   way because an exhausted scan still reports the error.)
+fn is_retriable_bind_error(e: &std::io::Error) -> bool {
+  matches!(
+    e.kind(),
+    std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+  )
+}
+
 /// Walk `[port, port + max_offset]` looking for a free slot.
-/// `AddrInUse` advances to the next port; any other error is fatal
-/// (no point pretending the next port will fare better than e.g.
-/// EACCES on a privileged range). A zero `max_offset` collapses to a
-/// single bind attempt — same shape as the v0 code path.
+/// Retriable bind errors (see [`is_retriable_bind_error`]) advance to
+/// the next port; any other error is fatal (no point retrying e.g. an
+/// invalid-address error on the next port). A zero `max_offset`
+/// collapses to a single bind attempt — same shape as the v0 code
+/// path.
+///
+/// If the whole window is exhausted by retriable errors, the outcome
+/// distinguishes a pure `AddrInUse` sweep ([`BindOutcome::AllPortsInUse`]
+/// → `PortInUse` status) from one where a `PermissionDenied`
+/// (Windows excluded-range) miss occurred ([`BindOutcome::Failed`] →
+/// `Unbound` status), so the user sees the accurate cause.
 async fn bind_with_scan(base: SocketAddr, max_offset: u16) -> BindOutcome {
   let mut last_addr = base;
+  let mut last_denied: Option<(SocketAddr, std::io::Error)> = None;
   for offset in 0..=max_offset {
     let Some(port) = base.port().checked_add(offset) else {
       break;
@@ -179,7 +207,12 @@ async fn bind_with_scan(base: SocketAddr, max_offset: u16) -> BindOutcome {
     last_addr = candidate;
     match TcpListener::bind(&candidate).await {
       Ok(l) => return BindOutcome::Bound(l),
-      Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+      Err(e) if is_retriable_bind_error(&e) => {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+          last_denied = Some((candidate, e));
+        }
+        continue;
+      }
       Err(error) => {
         return BindOutcome::Failed {
           addr: candidate,
@@ -188,7 +221,12 @@ async fn bind_with_scan(base: SocketAddr, max_offset: u16) -> BindOutcome {
       }
     }
   }
-  BindOutcome::AllPortsInUse { last_addr }
+  // The window is exhausted. A permission denial is a more actionable
+  // cause than "port in use", so surface it when one occurred.
+  match last_denied {
+    Some((addr, error)) => BindOutcome::Failed { addr, error },
+    None => BindOutcome::AllPortsInUse { last_addr },
+  }
 }
 
 /// `serve` plus per-listener tuning knobs. Same semantics as
@@ -225,8 +263,16 @@ pub async fn serve_with_options(
       );
       // Cap the bind_error string so a pathological OS message cannot
       // bloat the IPC status payload. 256 chars is roomy for typical
-      // io::Error strings ("permission denied", etc.).
-      let bind_error: String = error.to_string().chars().take(256).collect();
+      // io::Error strings ("permission denied", etc.). A Windows
+      // excluded-range denial (WSAEACCES) gets an actionable hint
+      // appended, since the raw OS text doesn't tell the user the port
+      // is reserved or how to move off it.
+      let mut bind_error: String = error.to_string().chars().take(256).collect();
+      if error.kind() == std::io::ErrorKind::PermissionDenied {
+        bind_error.push_str(
+          "; port is reserved by the OS (often Hyper-V/WSL2/Docker on Windows) — set a different proxy.port",
+        );
+      }
       write_status(&status, ProxyStatus::Unbound { addr, bind_error });
       return Ok(());
     }
@@ -388,6 +434,30 @@ mod tests {
     // IPv6 too.
     let v6: IpAddr = "::".parse().unwrap();
     assert_eq!(listen_addr(v6, 8080), SocketAddr::new(v6, 8080));
+  }
+
+  #[test]
+  fn retriable_bind_errors_advance_the_scan() {
+    use std::io::{Error, ErrorKind};
+    // Both an occupied port and a Windows excluded-range denial
+    // (WSAEACCES, surfaced as PermissionDenied) must advance the scan.
+    assert!(is_retriable_bind_error(&Error::from(ErrorKind::AddrInUse)));
+    assert!(is_retriable_bind_error(&Error::from(
+      ErrorKind::PermissionDenied
+    )));
+    // The raw Windows code path: os error 10013 classifies as
+    // PermissionDenied, so a synthetic one is retriable too.
+    let wsaeacces = Error::from_raw_os_error(10013);
+    if wsaeacces.kind() == ErrorKind::PermissionDenied {
+      assert!(is_retriable_bind_error(&wsaeacces));
+    }
+    // Errors that won't fare better on the next port stay fatal.
+    assert!(!is_retriable_bind_error(&Error::from(
+      ErrorKind::AddrNotAvailable
+    )));
+    assert!(!is_retriable_bind_error(&Error::from(
+      ErrorKind::InvalidInput
+    )));
   }
 
   /// Spin up the proxy on an ephemeral port and return the bound
