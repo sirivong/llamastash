@@ -352,6 +352,7 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
           PathBuf::from(format!("lemonade://{name}")),
           LaunchMode::Chat,
         ),
+        actuals: Default::default(),
       })
     })
     .await;

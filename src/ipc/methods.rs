@@ -423,6 +423,11 @@ fn respond(id: Value, result: Result<Value, ErrorObject>) -> Response {
 /// `status` is read-only; never triggers any state-machine transitions.
 async fn status_response(ctx: &MethodContext) -> Value {
   let snap = ctx.supervisors.snapshot().await;
+  // Post-launch actuals (R6) live on the persisted running snapshot
+  // (stamped by the recorder on Ready); the live status row is built
+  // from the supervisor, so cross-reference by (id, port) to surface
+  // the resolved context.
+  let running = ctx.state.snapshot().await.running;
   let mut models: Vec<Value> = Vec::with_capacity(snap.len());
   for (launch_id, model) in snap {
     let state = model.state().await;
@@ -458,6 +463,10 @@ async fn status_response(ctx: &MethodContext) -> Value {
     let latest = model.latest_resource().await;
     let latest_rss_bytes = latest.as_ref().map(|r| r.rss_bytes);
     let latest_cpu_pct = latest.as_ref().map(|r| r.cpu_percent);
+    let resolved_ctx = running
+      .iter()
+      .find(|r| r.port == model.port())
+      .and_then(|r| r.actuals.resolved_ctx);
     let row = json!({
       "launch_id": launch_id,
       "id": model.id(),
@@ -469,6 +478,9 @@ async fn status_response(ctx: &MethodContext) -> Value {
       "params": params_json,
       "latest_rss_bytes": latest_rss_bytes,
       "latest_cpu_pct": latest_cpu_pct,
+      // Resolved context window `--fit` chose (R6); null until the
+      // post-Ready `/props` fetch lands or when the build omits it.
+      "resolved_ctx": resolved_ctx,
     });
     models.push(row);
   }
@@ -1867,6 +1879,7 @@ pub(crate) async fn start_model_inner(
         port,
         started_at,
         params: launch_params.clone(),
+        actuals: Default::default(),
       });
     })
     .await;
@@ -2029,6 +2042,7 @@ async fn start_delegated_lemonade(
         port: serving_port,
         started_at,
         params: params.clone(),
+        actuals: Default::default(),
       });
     })
     .await;
@@ -2158,6 +2172,24 @@ fn spawn_last_params_recorder(
           state
             .mutate(|s| s.upsert_last_params(id.clone(), params.clone()))
             .await;
+          // Post-launch actuals (R6): read what `--fit` actually chose
+          // from the child's `/props` and stamp it on the running
+          // snapshot so `status` / the TUI Running view / `show` can
+          // render the resolved context. Best-effort — an empty result
+          // (no `/props`, transport error) leaves the row "unavailable".
+          if let Some(port) = params.port {
+            let actuals = crate::daemon::actuals::fetch(port, Duration::from_secs(5)).await;
+            if !actuals.is_empty() {
+              let id = id.clone();
+              state
+                .mutate(move |s| {
+                  if let Some(snap) = s.running.iter_mut().find(|r| r.id == id && r.port == port) {
+                    snap.actuals = actuals;
+                  }
+                })
+                .await;
+            }
+          }
           return;
         }
         ManagedState::Error { .. } | ManagedState::Stopped => return,
@@ -2873,6 +2905,7 @@ mod tests {
         PathBuf::from(format!("lemonade://{name}")),
         LaunchMode::Chat,
       ),
+      actuals: Default::default(),
     }
   }
 

@@ -47,6 +47,11 @@ struct Args {
   port: u16,
   model_path: String,
   ctx: Option<u32>,
+  /// `--fit-ctx <floor>` — when no `-c` pins the window, `/props`
+  /// reports this as the resolved `n_ctx`, emulating fit honoring the
+  /// floor so the daemon's post-launch actuals fetch has something real
+  /// to read.
+  fit_ctx: Option<u32>,
   mode: Mode,
   health_delay_ms: u64,
   trap_sigterm: bool,
@@ -99,6 +104,7 @@ fn parse_args() -> Args {
   let mut port: u16 = 0;
   let mut model_path = String::from("/fixture/unknown.gguf");
   let mut ctx: Option<u32> = None;
+  let mut fit_ctx: Option<u32> = None;
   let mut mode = Mode::Chat;
   let mut health_delay_ms: u64 = 0;
   let mut trap_sigterm = false;
@@ -110,6 +116,7 @@ fn parse_args() -> Args {
       }
       "-m" => model_path = args.next().expect("-m value"),
       "-c" => ctx = args.next().and_then(|v| v.parse().ok()),
+      "--fit-ctx" => fit_ctx = args.next().and_then(|v| v.parse().ok()),
       "--embeddings" => mode = Mode::Embedding,
       "--reranking" => mode = Mode::Rerank,
       "--health-delay-ms" => {
@@ -127,6 +134,7 @@ fn parse_args() -> Args {
     port,
     model_path,
     ctx,
+    fit_ctx,
     mode,
     health_delay_ms,
     trap_sigterm,
@@ -249,6 +257,23 @@ async fn handle(
       } else {
         write_response(&mut wr, 200, "application/json", b"{\"status\":\"ok\"}").await?;
       }
+    }
+    ("GET", "/props") => {
+      // Mirror llama-server's `/props`: the resolved context window the
+      // daemon reads back as post-launch actuals (R6). Reports `-c` when
+      // pinned, else the `--fit-ctx` floor, else a server-ish default.
+      let resolved = args.ctx.or(args.fit_ctx).unwrap_or(4096);
+      let body = serde_json::json!({
+        "default_generation_settings": { "n_ctx": resolved },
+        "total_slots": 1,
+      });
+      write_response(
+        &mut wr,
+        200,
+        "application/json",
+        body.to_string().as_bytes(),
+      )
+      .await?;
     }
     ("GET", "/v1/models") => {
       let body = serde_json::json!({

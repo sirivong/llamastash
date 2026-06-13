@@ -483,7 +483,9 @@ sequenceDiagram
 
 **Verification:** The concurrent regression test passes; on the reference machine the proven 44+37 GiB scenario ends in partial-offload or refusal; refusal messages quote effective numbers + a next action.
 
-- [ ] **Unit 9: post-launch actuals, degradation notice, strict mode**
+- [x] **Unit 9: post-launch actuals** *(focused per scope amendment; degradation notice + strict enforcement deferred)*
+
+> Done (R6 actuals): `src/daemon/actuals.rs` fetches the child's `/props` once on the Ready transition (raw `GET /props` with `Connection: close`, no new HTTP dep; parses resolved `n_ctx` from `default_generation_settings.n_ctx` or top-level, best-effort → empty on any error). Wired into the existing Ready-poller (the last-params recorder), stamped on `RunningSnapshot.actuals` (additive, serde-default), and surfaced in the `status` JSON wire as `resolved_ctx` (cross-referenced by port). `fake_llama_server` gained `GET /props` (+ `--fit-ctx` parsing) and an end-to-end test asserts a no-pin launch surfaces the fit-resolved ctx. **Deferred (documented):** the human `status`/`show`/TUI-Running **column** (would reshape the fixed-width table + goldens — the data is in `status --json`), the `start` one-line summary (start returns at Loading, before actuals land), the degradation predicate/notice, and **R19 strict-mode enforcement** (the post-Ready stop + withhold-Ready-response + AutoStart cooldown is exactly the ordering complexity the scope amendment cuts; U8 admission already provides the hard OOM guarantee, so `strict_fit` is a reserved flag pending a follow-up).
 
 **Goal:** After Ready, fetch what fit actually chose, surface it on every relevant surface, and apply the degraded-placement policy (notice, or strict-mode stop with the Ready response withheld).
 

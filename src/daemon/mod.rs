@@ -7,6 +7,7 @@
 //! file to appear before returning. The child is the daemon; no
 //! in-runtime `fork()` is involved, which keeps the tokio runtime safe.
 
+pub mod actuals;
 pub mod auth;
 pub mod control_plane;
 pub mod discovery_task;

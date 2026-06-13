@@ -302,6 +302,7 @@ async fn idle_lemonade_model_is_unloaded_but_umbrella_stays_up() {
             PathBuf::from("lemonade://Qwen2.5-0.5B-Instruct"),
             LaunchMode::Chat,
           ),
+          actuals: Default::default(),
         })
     })
     .await;
