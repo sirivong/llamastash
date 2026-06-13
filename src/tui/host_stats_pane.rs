@@ -1,20 +1,24 @@
-//! Top-left info-row pane: host CPU / RAM / GPU / VRAM bar gauges
+//! Top-left info-row pane: host CPU / MEM / GPU / VRAM bar gauges
 //! plus a backend tag line.
 //!
 //! Layout (32 cols × 5 inner rows by default):
 //!
 //! ```text
 //! CPU  ███████░░░ 58% 71°C
-//! RAM  █████░░░░░ 11.4/32 G
+//! MEM  █████░░░░░ 11.4/32 G
 //! GPU  ██████████ 84% 68°C
 //! VRAM ███████░░░ 14.2/24 G
 //! backend  NVML · 1 GPU
 //! ```
 //!
+//! `MEM` is system RAM; `MEM*` marks unified memory (Apple Silicon,
+//! AMD/Intel UMA APUs) where the GPU draws from that same pool — the
+//! `VRAM` row then shows the GPU's view of that same pool.
+//!
 //! Backend-specific variants:
-//! * Apple Silicon (unified memory): CPU + `RAM*` + a
+//! * Apple Silicon (unified memory): CPU + `MEM*` + a
 //!   `GPU  unified` text row.
-//! * `CpuOnly`: CPU + RAM only, GPU + VRAM rows omitted.
+//! * `CpuOnly`: CPU + MEM only, GPU + VRAM rows omitted.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -72,6 +76,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, host: &HostMetricsSnapshot, pal
       } else {
         lines.push(gpu_util_row(host, bar_width, palette));
       }
+      // The `MEM*` marker on the memory row already flags that the GPU
+      // shares that pool, so the GPU memory keeps its own `VRAM` gauge.
       lines.push(vram_row(host, bar_width, palette));
     }
   }
@@ -121,10 +127,11 @@ fn ram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
       format_bytes_pair(host.ram_used_bytes, host.ram_total_bytes),
     )
   };
-  // `RAM*` flags unified memory (Apple Silicon + AMD/Intel UMA APUs).
+  // `MEM*` flags unified memory (Apple Silicon + AMD/Intel UMA APUs)
+  // where the GPU draws from this same pool; `MEM` is plain system RAM.
   // Sourced from the one `GpuInfo::is_unified` helper init shares, so
   // the marker can't drift between the two render paths.
-  let label = if host.unified { "RAM* " } else { "RAM  " };
+  let label = if host.unified { "MEM* " } else { "MEM  " };
   let bar = bar(pct, bar_width, gauge_color(pct, palette));
   Line::from(vec![
     Span::styled(label, palette.label_style()),
@@ -474,7 +481,7 @@ mod tests {
     let rows = render_lines(snap);
     let body = rows.join("\n");
     assert!(body.contains("CPU"));
-    assert!(body.contains("RAM"));
+    assert!(body.contains("MEM"));
     assert!(!body.contains("GPU"));
     assert!(!body.contains("VRAM"));
     assert!(
@@ -527,7 +534,7 @@ mod tests {
     let rows = render_lines(snap);
     let body = rows.join("\n");
     assert!(body.contains("CPU"));
-    assert!(body.contains("RAM"));
+    assert!(body.contains("MEM"));
     assert!(body.contains("GPU"));
     assert!(body.contains("VRAM"));
     assert!(body.contains("NVML"));
@@ -556,7 +563,7 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(snap);
-    let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
+    let ram_row = rows.iter().find(|r| r.contains("MEM")).unwrap();
     assert!(
       ram_row.contains("—/—"),
       "expected `—/—` placeholder when total is 0, got: {ram_row:?}"
@@ -606,13 +613,13 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(snap);
-    let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
+    let ram_row = rows.iter().find(|r| r.contains("MEM")).unwrap();
     assert!(
       ram_row.contains("71/121G"),
       "RAM row must show the full sysinfo total, not minus UMA-shared, got: {ram_row:?}"
     );
     assert!(
-      ram_row.contains("RAM*"),
+      ram_row.contains("MEM*"),
       "RAM label should flag unified memory with `*`, got: {ram_row:?}"
     );
   }
@@ -633,10 +640,10 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(snap);
-    let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
+    let ram_row = rows.iter().find(|r| r.contains("MEM")).unwrap();
     assert!(ram_row.contains("16/64G"), "RAM row got: {ram_row:?}");
     assert!(
-      !ram_row.contains("RAM*"),
+      !ram_row.contains("MEM*"),
       "discrete GPUs shouldn't carry the unified-memory star, got: {ram_row:?}"
     );
   }
@@ -659,7 +666,7 @@ mod tests {
       ..Default::default()
     };
     let rows = render_lines(snap);
-    let ram_row = rows.iter().find(|r| r.contains("RAM")).unwrap();
+    let ram_row = rows.iter().find(|r| r.contains("MEM")).unwrap();
     let vram_row = rows.iter().find(|r| r.contains("VRAM")).unwrap();
     assert!(
       ram_row.contains("66/121G") && !ram_row.contains("66G/121G"),
@@ -695,7 +702,7 @@ mod tests {
     let rows = render_lines(snap);
     let body = rows.join("\n");
     assert!(body.contains("CPU"));
-    assert!(body.contains("RAM"));
+    assert!(body.contains("MEM"));
     assert!(!body.contains("GPU"));
     assert!(!body.contains("VRAM"));
     assert!(
@@ -717,7 +724,7 @@ mod tests {
     let rows = render_lines(snap);
     let body = rows.join("\n");
     assert!(body.contains("CPU"));
-    assert!(body.contains("RAM"));
+    assert!(body.contains("MEM"));
     assert!(!body.contains("GPU"));
     assert!(!body.contains("VRAM"));
   }

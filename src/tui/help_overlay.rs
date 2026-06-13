@@ -174,15 +174,15 @@ fn build_sections(app: &App) -> Vec<Section> {
 }
 
 /// Static legend explaining glyphs used in panel labels: the `*`
-/// suffix on the Host panel's RAM row (unified memory — Apple Metal /
-/// AMD UMA APUs share the same physical pool with VRAM, so the RAM
-/// total subtracts the GPU-allocated bytes to avoid double-counting),
-/// and the `◉`/`♪` modality glyphs the right-pane title carries when a
-/// model has an auto-detected mmproj projector.
+/// suffix on the Host panel's `MEM` row (unified memory — Apple Metal /
+/// AMD UMA APUs where the GPU draws from the same physical pool, so the
+/// `VRAM` row is the GPU's view of that same memory, not an additional
+/// pool), and the `◉`/`♪` modality glyphs the right-pane title carries
+/// when a model has an auto-detected mmproj projector.
 fn legend_section() -> Section {
   let mut rows = vec![(
-    "RAM*".to_string(),
-    "unified memory (shared with VRAM)".to_string(),
+    "MEM*".to_string(),
+    "unified memory (VRAM is the GPU's view of this pool)".to_string(),
   )];
   for (glyph, desc) in crate::discovery::Multimodal::LEGEND {
     rows.push((glyph.to_string(), desc.to_string()));
@@ -362,16 +362,16 @@ mod tests {
   }
 
   #[test]
-  fn overlay_shows_ram_star_legend() {
-    // The Host panel marks unified-memory machines with `RAM*` — the
+  fn overlay_shows_mem_star_legend() {
+    // The Host panel marks unified-memory machines with `MEM*` — the
     // help overlay's Legend section is the only place that explains
     // what the star means.
     let app = App::new(AppOptions::default());
     let frame = render_to_string(140, 40, &app);
     assert!(frame.contains("Legend"), "Legend section missing:\n{frame}");
     assert!(
-      frame.contains("RAM*") && frame.contains("unified memory"),
-      "RAM* legend row missing:\n{frame}"
+      frame.contains("MEM*") && frame.contains("unified memory"),
+      "MEM* legend row missing:\n{frame}"
     );
   }
 

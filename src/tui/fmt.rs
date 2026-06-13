@@ -52,7 +52,7 @@ pub(crate) fn format_tokens(n: u64) -> String {
 }
 
 /// Format a `used/total` byte pair using one shared unit suffix taken
-/// from `total`, so `RAM` / `VRAM` rows render as `2.5/4.0G` rather
+/// from `total`, so `MEM` / `VRAM` rows render as `2.5/4.0G` rather
 /// than `2.5G/4.0G`. Each value follows the same 1-decimal-under-10
 /// rule as [`format_bytes`].
 pub(crate) fn format_bytes_pair(used: u64, total: u64) -> String {

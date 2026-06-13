@@ -261,7 +261,9 @@ sequenceDiagram
 
 **Verification:** All four surfaces show the same totals on the reference machine; flipping the GTT kernel params produces the drift finding once; `doctor --json` schema version bumped; the doctor hardware section renders on each supported platform reached by the UAT matrix (see U11) — not Linux-only.
 
-- [ ] **Unit 3: MEM/MEM* rename + `GPU (shared)` row**
+- [x] **Unit 3: MEM/MEM* rename + `GPU (shared)` row**
+
+> Done: `RAM`/`RAM*` → `MEM`/`MEM*` across the TUI host pane, help legend, and init banner. The `VRAM` gauge is kept on all hosts (**user preference** — the nested `GPU (shared)` composition row was tried and reverted; the `MEM*` marker already signals the pool is shared, and the legend says "VRAM is the GPU's view of this pool"). Golden regenerated for the `MEM` label. `status` human output had no RAM gauge to rename. Per-model process RSS stays labelled `RAM` (genuinely process resident memory, not the unified-pool double-count R15 targets). Verified live: `MEM* 28/125G` + `VRAM` row on the reference box.
 
 **Goal:** Stop UMA machines reading as 2× physical memory: `RAM`→`MEM`, `RAM*`→`MEM*` everywhere, GPU row labelled `GPU (shared)` as a composition breakdown *of* the `MEM*` pool, one legend meaning for the asterisk. **Absorbed from U2 (R11):** while renaming these surfaces, also wire the init banner / `status` human output / TUI host pane to render the same hardware field set the doctor section already uses (classification source, carve + GTT composition), so all four surfaces show one identical truth.
 

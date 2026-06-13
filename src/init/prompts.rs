@@ -408,7 +408,10 @@ fn format_cpu_segment(hw: &HardwareSnapshot) -> String {
 }
 
 fn format_system_segment(hw: &HardwareSnapshot) -> String {
-  let ram = format!("{} RAM", format_gib(hw.ram_total_bytes));
+  // `MEM*` on unified hosts (the GPU draws from this pool); `MEM` on
+  // discrete. Matches the TUI host pane and doctor hardware section.
+  let mem_label = if hw.gpu.is_unified() { "MEM*" } else { "MEM" };
+  let ram = format!("{} {mem_label}", format_gib(hw.ram_total_bytes));
   let mut parts: Vec<String> = vec![ram];
   if hw.disk_free_bytes > 0 {
     parts.push(format!("{} disk free", format_gib(hw.disk_free_bytes)));
