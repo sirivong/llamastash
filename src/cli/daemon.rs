@@ -16,7 +16,7 @@ use std::{net::IpAddr, path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 
 use crate::cli::cli_args::{Cli, DaemonAction};
-use crate::config::Config;
+use crate::config::{Config, DefaultLaunchMode, DEFAULT_FIT_CTX_FLOOR, MAX_CTX_TOKENS};
 use crate::daemon::discovery_task::DiscoveryOptions;
 use crate::daemon::{
   existing_daemon_pid, run_foreground, runtime_file, start_detached, DaemonOptions, StartOutcome,
@@ -550,6 +550,39 @@ pub(crate) fn build_options(
   opts.port_range = config.port_range;
   opts.probe_timeout_secs = Some(config.probe_timeout_secs);
   opts.arch_defaults = config.arch_defaults.clone();
+
+  // Auto-fit launch options (R1/R7/R19): config layer first, then the
+  // `LLAMASTASH_*` env overrides. A bad env value is logged and ignored
+  // so a typo never blocks daemon startup — the config / factory value
+  // still applies.
+  opts.default_launch_mode = config.default_launch_mode;
+  if let Some(raw) = std::env::var_os("LLAMASTASH_DEFAULT_LAUNCH_MODE") {
+    match raw.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+      "auto" => opts.default_launch_mode = DefaultLaunchMode::Auto,
+      "inherited" => opts.default_launch_mode = DefaultLaunchMode::Inherited,
+      other => log::warn!(
+        "ignoring LLAMASTASH_DEFAULT_LAUNCH_MODE={other:?}: expected `auto` or `inherited`"
+      ),
+    }
+  }
+  opts.fit_ctx_floor = config.fit_ctx_floor;
+  if let Some(raw) = std::env::var_os("LLAMASTASH_FIT_CTX_FLOOR") {
+    let s = raw.to_string_lossy();
+    match s.trim().parse::<u32>() {
+      Ok(v) => opts.fit_ctx_floor = v,
+      Err(_) => log::warn!("ignoring LLAMASTASH_FIT_CTX_FLOOR={s:?}: not a positive integer"),
+    }
+  }
+  if opts.fit_ctx_floor == 0 || opts.fit_ctx_floor > MAX_CTX_TOKENS {
+    log::warn!(
+      "fit_ctx_floor {} out of range (1..={MAX_CTX_TOKENS}); using factory {DEFAULT_FIT_CTX_FLOOR}",
+      opts.fit_ctx_floor
+    );
+    opts.fit_ctx_floor = DEFAULT_FIT_CTX_FLOOR;
+  }
+  // Strict-fit is an opt-in: config OR `LLAMASTASH_STRICT_FIT=1` (the
+  // strict-`"1"` env contract shared with the other boolean envs).
+  opts.strict_fit = config.strict_fit || env_flag_truthy("LLAMASTASH_STRICT_FIT");
   // Proxy: config layer first, then CLI / env overrides. Without this
   // thread-through the daemon silently ignored `proxy:` from the config
   // file and ran with `ProxyConfig::default()` regardless.
@@ -1083,6 +1116,68 @@ mod tests {
     assert_eq!(opts.proxy.header_read_timeout_secs, 45);
     assert!(opts.proxy.enabled);
     assert!(!opts.proxy.ollama_compat);
+  }
+
+  #[test]
+  fn build_options_threads_auto_fit_options_from_config() {
+    let _env = crate::cli::test_lock::serialize();
+    std::env::remove_var("LLAMASTASH_DEFAULT_LAUNCH_MODE");
+    std::env::remove_var("LLAMASTASH_FIT_CTX_FLOOR");
+    std::env::remove_var("LLAMASTASH_STRICT_FIT");
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      default_launch_mode: DefaultLaunchMode::Inherited,
+      fit_ctx_floor: 8192,
+      strict_fit: true,
+      ..Config::default()
+    };
+    let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
+      .expect("build_options");
+    assert_eq!(opts.default_launch_mode, DefaultLaunchMode::Inherited);
+    assert_eq!(opts.fit_ctx_floor, 8192);
+    assert!(opts.strict_fit);
+  }
+
+  #[test]
+  fn build_options_auto_fit_env_overrides_config() {
+    let _env = crate::cli::test_lock::serialize();
+    let cli = parse_cli(&["daemon", "start"]);
+    let config = Config {
+      default_launch_mode: DefaultLaunchMode::Auto,
+      strict_fit: false,
+      ..Config::default()
+    };
+    std::env::set_var("LLAMASTASH_DEFAULT_LAUNCH_MODE", "inherited");
+    std::env::set_var("LLAMASTASH_STRICT_FIT", "1");
+    let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
+      .expect("build_options");
+    std::env::remove_var("LLAMASTASH_DEFAULT_LAUNCH_MODE");
+    std::env::remove_var("LLAMASTASH_STRICT_FIT");
+    assert_eq!(
+      opts.default_launch_mode,
+      DefaultLaunchMode::Inherited,
+      "env overrides config for launch mode"
+    );
+    assert!(opts.strict_fit, "LLAMASTASH_STRICT_FIT=1 enables strict");
+  }
+
+  #[test]
+  fn build_options_fit_ctx_floor_out_of_range_falls_back_to_factory() {
+    let _env = crate::cli::test_lock::serialize();
+    std::env::remove_var("LLAMASTASH_FIT_CTX_FLOOR");
+    let cli = parse_cli(&["daemon", "start"]);
+    for bad in [0u32, 2_000_000] {
+      let config = Config {
+        fit_ctx_floor: bad,
+        ..Config::default()
+      };
+      let opts = build_options(None, None, false, false, None, false, false, &cli, &config)
+        .expect("build_options");
+      assert_eq!(
+        opts.fit_ctx_floor, DEFAULT_FIT_CTX_FLOOR,
+        "out-of-range floor {bad} must fall back to the factory value"
+      );
+    }
   }
 
   #[test]

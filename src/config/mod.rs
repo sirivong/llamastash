@@ -19,5 +19,6 @@ pub mod writer;
 pub use loader::{
   config_path, config_path_from, load_config, load_config_from_path, validate_scan_settings,
   CachePathsConfig, Config, DefaultLaunchMode, KnobValue, KnobValueOpt, LemonadeConfig,
-  LoadedConfig, PortRange, ProxyConfig, ScanSettingsError, TypedKnobs,
+  LoadedConfig, PortRange, ProxyConfig, ScanSettingsError, TypedKnobs, DEFAULT_FIT_CTX_FLOOR,
+  MAX_CTX_TOKENS,
 };

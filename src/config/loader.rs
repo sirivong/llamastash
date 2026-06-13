@@ -19,6 +19,19 @@ use crate::util::paths::user_config_file;
 /// pathological YAML can't OOM the process.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+/// Hard ceiling on any context-window value (`-c`, `knobs.ctx`, the
+/// `fit_ctx_floor` config). 2^20 tokens — far above any real model's
+/// trained window, low enough that a fat-fingered value is caught
+/// before it reaches `llama-server`. Centralised here so the CLI,
+/// daemon admission, and config validation share one bound.
+pub const MAX_CTX_TOKENS: u32 = 1_048_576;
+
+/// Factory `fit_ctx_floor`: the `--fit-ctx` floor llamastash passes so
+/// `--fit` never collapses the window below a usable size on the
+/// unified-memory hosts where its free reading mis-reports (the 4096
+/// upstream floor is too small for real chat sessions).
+pub const DEFAULT_FIT_CTX_FLOOR: u32 = 16384;
+
 /// User-authored YAML config, with sensible defaults via `#[serde(default)]`.
 ///
 /// Every field is optional in the file; missing fields use the built-in
@@ -99,6 +112,27 @@ pub struct Config {
   /// three wins — see `cli::daemon::compose_daemon_options`). llamastash
   /// never installs `lemond`; the user sets it up and points us at it.
   pub lemonade: LemonadeConfig,
+  /// How a knob no layer supplied a value for is seeded at launch
+  /// (R1). `auto` (factory) delegates layer-less knobs to `--fit`;
+  /// `inherited` leaves them unset (pre-Auto behavior). Env override:
+  /// `LLAMASTASH_DEFAULT_LAUNCH_MODE=auto|inherited`.
+  #[serde(default)]
+  pub default_launch_mode: DefaultLaunchMode,
+  /// `--fit-ctx` floor passed to fit-capable `llama-server` so the
+  /// context window never collapses below a usable size (R7). Factory
+  /// [`DEFAULT_FIT_CTX_FLOOR`]; validated `1..=MAX_CTX_TOKENS`. Env
+  /// override: `LLAMASTASH_FIT_CTX_FLOOR`.
+  #[serde(default = "default_fit_ctx_floor")]
+  pub fit_ctx_floor: u32,
+  /// Strict-fit mode (R19): when true, refuse (rather than degrade) a
+  /// launch that fit could not place as requested. Factory `false`.
+  /// Env override: `LLAMASTASH_STRICT_FIT=1`.
+  #[serde(default)]
+  pub strict_fit: bool,
+}
+
+fn default_fit_ctx_floor() -> u32 {
+  DEFAULT_FIT_CTX_FLOOR
 }
 
 /// OpenAI-compat proxy router configuration.
@@ -568,6 +602,9 @@ impl Default for Config {
       arch_defaults: BTreeMap::new(),
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
+      default_launch_mode: DefaultLaunchMode::default(),
+      fit_ctx_floor: DEFAULT_FIT_CTX_FLOOR,
+      strict_fit: false,
     }
   }
 }

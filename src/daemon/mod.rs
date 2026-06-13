@@ -128,6 +128,15 @@ pub struct DaemonOptions {
   /// this only needs to ride through the detached re-exec so the foreground
   /// child skips the same gate the parent already waived.
   pub force: bool,
+  /// Knob seeding mode (R1) from `Config.default_launch_mode`
+  /// (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`). Threaded into `LaunchEnv`.
+  pub default_launch_mode: crate::config::DefaultLaunchMode,
+  /// `--fit-ctx` floor (R7) from `Config.fit_ctx_floor`
+  /// (+ `LLAMASTASH_FIT_CTX_FLOOR`), validated `1..=MAX_CTX_TOKENS`.
+  pub fit_ctx_floor: u32,
+  /// Strict-fit mode (R19) from `Config.strict_fit`
+  /// (+ `LLAMASTASH_STRICT_FIT`).
+  pub strict_fit: bool,
 }
 
 impl DaemonOptions {
@@ -146,6 +155,9 @@ impl DaemonOptions {
       discovery: DiscoveryOptions::new(Vec::new()),
       probe_timeout_secs: None,
       arch_defaults: std::collections::BTreeMap::new(),
+      default_launch_mode: crate::config::DefaultLaunchMode::default(),
+      fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
+      strict_fit: false,
       propagated_cli_args: Vec::new(),
       // Tests using `rooted_at` rarely care about the proxy; bind
       // attempts are best-effort so even a port-collision is silent
@@ -182,6 +194,9 @@ impl DaemonOptions {
       discovery: DiscoveryOptions::new(Vec::new()),
       probe_timeout_secs: None,
       arch_defaults: std::collections::BTreeMap::new(),
+      default_launch_mode: crate::config::DefaultLaunchMode::default(),
+      fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
+      strict_fit: false,
       propagated_cli_args: Vec::new(),
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
@@ -402,6 +417,9 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       probe,
       arch_defaults: opts.arch_defaults.clone(),
       device_catalog,
+      default_launch_mode: opts.default_launch_mode,
+      fit_ctx_floor: opts.fit_ctx_floor,
+      strict_fit: opts.strict_fit,
     });
   } else {
     log::info!(

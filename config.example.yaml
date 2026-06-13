@@ -148,6 +148,35 @@ port_range:
 # Sources — CLI: (none) · Env: (none). Config-only.
 probe_timeout_secs: 120
 
+# ─── Auto-fit launch behaviour ────────────────────────────────────
+#
+# How a knob you never touched (and that no preset / arch-default
+# supplies) is seeded at launch:
+#   - auto      (default): delegate it to llama-server's `--fit`, which
+#               places layers + sizes context for the available memory.
+#   - inherited: leave it unset (pre-Auto behaviour) — llama-server
+#               falls back to its own built-in default.
+# A knob you *did* set (CLI, TUI, preset, arch-default) always wins;
+# this only chooses the seed for the untouched ones.
+#
+# Sources — CLI: (none) · Env: LLAMASTASH_DEFAULT_LAUNCH_MODE=auto|inherited.
+default_launch_mode: auto
+
+# Minimum context window passed to fit-capable llama-server as
+# `--fit-ctx`, so `--fit` never collapses the window below a usable
+# size on unified-memory hosts. A pinned `--ctx` overrides this.
+# Validated to 1..=1048576; out-of-range values fall back to 16384.
+#
+# Sources — CLI: (none) · Env: LLAMASTASH_FIT_CTX_FLOOR=TOKENS.
+fit_ctx_floor: 16384
+
+# Strict-fit mode: when true, refuse a launch that `--fit` could not
+# place as requested rather than letting it run degraded. Off by
+# default (degrade-and-warn).
+#
+# Sources — CLI: (none) · Env: LLAMASTASH_STRICT_FIT=1.
+strict_fit: false
+
 # ─── Mouse focus ──────────────────────────────────────────────────
 #
 # Opt into terminal mouse capture. When enabled:

@@ -330,7 +330,9 @@ sequenceDiagram
 
 **Verification:** Existing installs load with stale pins gone (last_params and running) and presets intact; resolver test matrix covers all five seeding rows plus the `"auto"`-as-value case; no surface still assumes two-state `Option`; the picker no longer renders "Default".
 
-- [ ] **Unit 5: CLI `auto` literal, config/env options, flash-attn fix**
+- [x] **Unit 5: CLI `auto` literal, config/env options, flash-attn fix**
+
+> Done (two commits): **(1)** Every tail-arg knob accepts the literal `auto` (→ `KnobValue::Auto`), including the string knobs where `auto` is a legal upstream value (knob-state wins; literal `auto` to the server goes via `--` extras). `start --ctx auto` via a custom `CtxArg` parser. The latent `--flash-attn auto` dangling-positional bug is fixed (consumed → Auto, nothing leaks to extras); the test that pinned the old behavior is rewritten. **(2)** Three config options — `default_launch_mode` (factory `auto`), `fit_ctx_floor` (factory 16384, validated `1..=MAX_CTX_TOKENS`, out-of-range → factory + warn), `strict_fit` (factory false) — with `LLAMASTASH_DEFAULT_LAUNCH_MODE` / `LLAMASTASH_FIT_CTX_FLOOR` / `LLAMASTASH_STRICT_FIT` env overrides, threaded Config→DaemonOptions→LaunchEnv. `default_launch_mode` is now wired into the seeding (replacing the hardcoded factory default); `fit_ctx_floor`/`strict_fit` ride `LaunchEnv` for U6/U8 to consume. `MAX_CTX_TOKENS` centralised in `config` (was private in `ipc::methods`). `config.example.yaml` + `docs/usage.md` env table updated. **Note:** the per-knob `auto` disambiguation lives in the config comments + usage docs rather than a `knob_flags.rs` per-flag string (help is auto-generated from the spec table; a global note belongs on the docs surface, picked up in U11's doc sweep).
 
 **Goal:** Every knob flag accepts the literal `auto`; the three new options (default launch mode, ctx floor, strict mode) follow the config/env/flag pattern; the `--flash-attn auto` dangling-positional bug is fixed.
 

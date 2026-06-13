@@ -196,6 +196,15 @@ pub struct LaunchEnv {
   /// full set once the probe completes; a launch in that brief window
   /// finds no selector match and falls back to the default `binary`.
   pub device_catalog: Arc<RwLock<Vec<crate::launch::list_devices::LaunchDevice>>>,
+  /// Seed mode for knobs no layer filled (R1). Sourced from
+  /// `Config.default_launch_mode` (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`).
+  pub default_launch_mode: crate::config::DefaultLaunchMode,
+  /// `--fit-ctx` floor (R7). Consumed by `compose` in U6; carried here
+  /// so the launch path reads one resolved value. Validated upstream.
+  pub fit_ctx_floor: u32,
+  /// Strict-fit mode (R19). Consumed by the admission/strict path in
+  /// U8; carried here so it rides the same launch env.
+  pub strict_fit: bool,
 }
 
 impl MethodContext {
@@ -1331,8 +1340,9 @@ fn supported_methods() -> Vec<&'static str> {
 /// Upper bound on `ctx` (token-window) advertised on the IPC. The TUI
 /// picker caps at 131_072 but CLI + direct JSON-RPC callers bypass
 /// that; this stops a buggy or malicious request from sending
-/// `--ctx u32::MAX` straight to llama-server.
-const MAX_CTX_TOKENS: u32 = 1_048_576;
+/// `--ctx u32::MAX` straight to llama-server. Shared with config
+/// validation via [`crate::config::MAX_CTX_TOKENS`].
+use crate::config::MAX_CTX_TOKENS;
 
 /// Output of [`start_model_inner`] — everything the caller needs to
 /// observe the launch from the outside. The IPC handler projects
@@ -1578,12 +1588,12 @@ pub(crate) async fn start_model_inner(
     ),
   ]);
   // Seed knobs no layer filled per the default launch mode (R1): under
-  // the factory `Auto` mode a layer-less knob delegates to `--fit`.
-  // Argv-neutral in this unit (an Auto knob emits nothing, exactly like
-  // the unset slot it replaces) — the fit-flag emission lands in U6 and
-  // the picker rendering in U10. U5 wires the config/env/flag that
-  // selects the mode; until then it is the factory default.
-  crate::launch::params::seed_layerless(&mut resolved, crate::config::DefaultLaunchMode::default());
+  // `Auto` a layer-less knob delegates to `--fit`. Argv-neutral in this
+  // unit (an Auto knob emits nothing, exactly like the unset slot it
+  // replaces) — the fit-flag emission lands in U6 and the picker
+  // rendering in U10. The mode is `Config.default_launch_mode`
+  // (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`), threaded through `LaunchEnv`.
+  crate::launch::params::seed_layerless(&mut resolved, env.default_launch_mode);
   // Project resolved ctx/reasoning back onto the top-level
   // `LaunchParams` fields — `compose` emits them inline (ctx as
   // `-c <N>`, reasoning as the `--jinja --reasoning-format deepseek`
@@ -2972,6 +2982,9 @@ mod tests {
       probe: ProbeOptions::default(),
       arch_defaults: Default::default(),
       device_catalog: Arc::new(RwLock::new(Vec::new())),
+      default_launch_mode: Default::default(),
+      fit_ctx_floor: 16384,
+      strict_fit: false,
     };
 
     // Lemonade enabled but pointed at a binary that does not exist. The

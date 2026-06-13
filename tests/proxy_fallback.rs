@@ -176,6 +176,9 @@ async fn build_state_with_fallback(
     probe: fast_probe(),
     arch_defaults: BTreeMap::new(),
     device_catalog: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+    default_launch_mode: Default::default(),
+    fit_ctx_floor: 16384,
+    strict_fit: false,
   };
   let ctx = MethodContext::with_catalog(token, catalog)
     .with_supervisors(registry)
