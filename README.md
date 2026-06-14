@@ -55,6 +55,15 @@ _Windows: 64-bit Windows 10 1809+ / Windows 11, PowerShell 5.1+, [Windows Termin
 
 Then run `llamastash init` — the interactive wizard installs `llama-server` for your hardware, downloads a starter GGUF, writes a tuned config, and smoke-launches it.
 
+### Supported llama-server version
+
+LlamaStash hands GPU/CPU placement and context sizing to llama.cpp's `--fit` (on by default), so it needs a `llama-server` that has it.
+
+- **Minimum: build `b7410`** (2025-12-15), the first release carrying `--fit` / `--fit-ctx` (llama.cpp [PR #16653](https://github.com/ggml-org/llama.cpp/pull/16653)). Older builds abort on the unknown argument the moment a model launches.
+- **Recommended: a recent build** (`b8500`+, 2026). The May 2026 AMD GPU-stack updates (kernel, amdgpu firmware, ROCm) materially improved `--fit` on unified memory; verified on `b9245`.
+
+llama.cpp has no semantic versioning, no stable branch, and no stability policy ([discussion #16111](https://github.com/ggml-org/llama.cpp/discussions/16111)) — it tags ~10-14 rolling builds a day. So the build number is a floor for *flag existence*, not a behaviour guarantee; LlamaStash's own pre-spawn admission control is what actually prevents out-of-memory launches regardless of build. `llamastash init` installs a known-good build for your hardware.
+
 ## Quickstart
 
 ```bash
