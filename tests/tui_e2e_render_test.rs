@@ -115,6 +115,7 @@ fn seeded_dashboard_app() -> App {
     device: None,
     rss_bytes: Some(4_500_000_000),
     cpu_pct: Some(312.0),
+    ..Default::default()
   }];
   // Park the cursor on the Running launch row so the right pane
   // header carries live launch metadata (port / state / RAM / CPU).

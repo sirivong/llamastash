@@ -75,7 +75,7 @@ const RECENT_LIST_CAP: usize = 5;
 /// In-memory snapshot of one launched model the daemon is
 /// supervising. Mirrors the IPC `status` shape — kept in App so
 /// the right-pane header can show port/state without re-querying.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ManagedRow {
   pub launch_id: String,
   pub path: PathBuf,
@@ -89,6 +89,17 @@ pub struct ManagedRow {
   /// Latest per-PID CPU usage percent (multi-core, may exceed 100%).
   /// `None` until the daemon's per-launch sampler primes.
   pub cpu_pct: Option<f32>,
+  /// Context window `--fit` actually resolved, read from the child's
+  /// `/props` after Ready (R6). `None` until that fetch lands (or when
+  /// the build omits it). The running-launch settings view shows this
+  /// real number instead of the dispatched `auto` sentinel.
+  pub resolved_ctx: Option<u32>,
+  /// The knobs this launch was actually dispatched with (the live
+  /// `status` `params.knobs`), so the running-launch settings view shows
+  /// what the server is *running* with — `auto` for a fit-delegated
+  /// knob, a pinned number when set — rather than the user's saved
+  /// `last_params` delta (which can be empty even for an auto launch).
+  pub knobs: crate::config::TypedKnobs,
 }
 
 /// Persisted "last successful launch params" for one model, fetched
@@ -1839,6 +1850,8 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    resolved_ctx: None,
+    knobs: crate::config::TypedKnobs::default(),
   })
 }
 
@@ -1893,6 +1906,20 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     .and_then(|k| k.get("device"))
     .and_then(Value::as_str)
     .map(|s| s.to_string());
+  let resolved_ctx = row
+    .get("resolved_ctx")
+    .and_then(Value::as_u64)
+    .map(|n| n as u32);
+  // The knobs the launch was dispatched with — `auto` sentinels for
+  // fit-delegated rows, pinned numbers when set. Parsed from the live
+  // `status` row so the running view reflects the server, not the user's
+  // saved `last_params`. A shape mismatch falls back to empty (all rows
+  // then read `default`, the inherited sentinel).
+  let knobs = row
+    .get("params")
+    .and_then(|p| p.get("knobs"))
+    .and_then(|k| serde_json::from_value::<crate::config::TypedKnobs>(k.clone()).ok())
+    .unwrap_or_default();
   Some(ManagedRow {
     launch_id,
     path,
@@ -1901,6 +1928,8 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     device,
     rss_bytes,
     cpu_pct,
+    resolved_ctx,
+    knobs,
   })
 }
 
@@ -2350,6 +2379,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.list_cursor = 2;
     assert!(app.focused_managed().is_some());
@@ -2391,6 +2421,7 @@ mod tests {
       device: device.map(String::from),
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.daemon_info = DaemonInfo {
       server_path: Some(server_path.into()),
@@ -2537,6 +2568,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }
   }
 
@@ -2763,6 +2795,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     // Rows: [TableHeader, Header(▶ Running), umbrella, …] — cursor on it.
     app.list_cursor = 2;
@@ -2794,6 +2827,7 @@ mod tests {
         device: None,
         rss_bytes: None,
         cpu_pct: None,
+        ..Default::default()
       },
       ManagedRow {
         launch_id: "lemonade:Whisper-Tiny".into(),
@@ -2803,6 +2837,7 @@ mod tests {
         device: None,
         rss_bytes: None,
         cpu_pct: None,
+        ..Default::default()
       },
     ];
     // Rows: [TableHeader, Header(▶ Running), qwen, whisper, …].

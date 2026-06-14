@@ -12,8 +12,11 @@
 //! ```
 //!
 //! `MEM` is system RAM; `MEM*` marks unified memory (Apple Silicon,
-//! AMD/Intel UMA APUs) where the GPU draws from that same pool — the
-//! `VRAM` row then shows the GPU's view of that same pool.
+//! AMD/Intel UMA APUs) where the GPU draws from that same pool. On a
+//! discrete card the `VRAM` row reads `used / total`; on unified memory
+//! the denominator is the GPU's *reachable* ceiling given current RAM
+//! pressure (`pool − non-GPU RAM use`), not the static GTT cap — see
+//! `vram_denominator`.
 //!
 //! Backend-specific variants:
 //! * Apple Silicon (unified memory): CPU + `MEM*` + a
@@ -200,11 +203,33 @@ fn gpu_device_rows<'a>(
   lines
 }
 
+/// Effective denominator for the VRAM gauge.
+///
+/// Discrete cards own a dedicated pool, so the gauge is `used / total`.
+/// On unified memory the GPU and CPU share one physical pool: the GPU
+/// can only reach what the rest of the system isn't already holding, so
+/// the honest ceiling is `pool_total − (ram_used − gpu_in_shared)` — the
+/// pool minus *non-GPU* RAM use. Subtracting the bare `ram_used` would
+/// double-count the GPU's own bytes (sysinfo already folds the GTT
+/// allocation into `ram_used`), so we add `gpu_in_shared` back first.
+/// Clamped to `>= used` so the gauge never reads over 100%.
+fn vram_denominator(host: &HostMetricsSnapshot, used: u64, total: u64) -> u64 {
+  if !host.unified {
+    return total;
+  }
+  let gpu_in_shared = host.uma_shared_used_bytes.unwrap_or(used);
+  let other_ram = host.ram_used_bytes.saturating_sub(gpu_in_shared);
+  total.saturating_sub(other_ram).max(used)
+}
+
 fn vram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palette) -> Line<'a> {
   let (pct, value) = match (host.gpu_mem_used_bytes, host.gpu_mem_total_bytes) {
     (Some(used), Some(total)) if total > 0 => {
-      let pct = (used as f64 / total as f64) as f32 * 100.0;
-      (pct.clamp(0.0, 100.0), format_bytes_pair(used, total))
+      // On UMA the denominator is the GPU's reachable ceiling given
+      // current RAM pressure, not the static GTT cap.
+      let avail = vram_denominator(host, used, total);
+      let pct = (used as f64 / avail as f64) as f32 * 100.0;
+      (pct.clamp(0.0, 100.0), format_bytes_pair(used, avail))
     }
     _ => (0.0_f32, "—/—".into()),
   };
@@ -682,6 +707,65 @@ mod tests {
     assert!(
       vram_row.contains("2.5/4.0G") && !vram_row.contains("2.5G/4.0G"),
       "VRAM row should share one `G` suffix, got: {vram_row:?}"
+    );
+  }
+
+  #[test]
+  fn vram_gauge_uses_reachable_ceiling_on_unified_memory() {
+    // UMA: the GPU shares one pool with the CPU, so the gauge
+    // denominator is the reachable ceiling = pool − non-GPU RAM use,
+    // NOT the static GTT cap and NOT the double-counting `pool − ram_used`.
+    // pool 124, ram_used 71 (of which 43 is the GPU's GTT), so non-GPU
+    // RAM = 28 and the GPU can reach 124 − 28 = 96.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 5.0,
+      ram_used_bytes: 71 * GIB,
+      ram_total_bytes: 124 * GIB,
+      gpu_backend: "amd".into(),
+      gpu_util_pct: Some(10.0),
+      gpu_mem_used_bytes: Some(43 * GIB),
+      gpu_mem_total_bytes: Some(124 * GIB),
+      gpu_device_count: 1,
+      uma_shared_total_bytes: Some(123 * GIB),
+      uma_shared_used_bytes: Some(43 * GIB),
+      unified: true,
+      ..Default::default()
+    };
+    let rows = render_lines(snap);
+    let vram_row = rows.iter().find(|r| r.contains("VRAM")).unwrap();
+    assert!(
+      vram_row.contains("43/96G"),
+      "UMA VRAM gauge should read used / reachable-ceiling, got: {vram_row:?}"
+    );
+    assert!(
+      !vram_row.contains("43/53G"),
+      "must not double-count the GPU's own bytes (pool − ram_used), got: {vram_row:?}"
+    );
+  }
+
+  #[test]
+  fn vram_gauge_uses_raw_total_on_discrete() {
+    // Discrete cards keep `used / total` — RAM lives in a separate pool,
+    // so subtracting it would be wrong.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      cpu_pct: 5.0,
+      ram_used_bytes: 50 * GIB,
+      ram_total_bytes: 64 * GIB,
+      gpu_backend: "nvidia".into(),
+      gpu_util_pct: Some(10.0),
+      gpu_mem_used_bytes: Some(14 * GIB),
+      gpu_mem_total_bytes: Some(24 * GIB),
+      gpu_device_count: 1,
+      unified: false,
+      ..Default::default()
+    };
+    let rows = render_lines(snap);
+    let vram_row = rows.iter().find(|r| r.contains("VRAM")).unwrap();
+    assert!(
+      vram_row.contains("14/24G"),
+      "discrete VRAM gauge stays used / total, got: {vram_row:?}"
     );
   }
 

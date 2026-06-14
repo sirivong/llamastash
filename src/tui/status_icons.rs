@@ -14,8 +14,9 @@ use crate::theme::Palette;
 /// `daemon::supervisor::ManagedState` because the TUI also wants to
 /// render rows that have *no* launch (`NotLaunched`) and rows for
 /// external read-only processes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SurfaceState {
+  #[default]
   NotLaunched,
   Launching,
   Loading,

@@ -23,7 +23,10 @@ use tokio::net::TcpStream;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Actuals {
   /// Resolved context window (`n_ctx`) the child loaded with — what
-  /// `--fit` settled on. `None` when `/props` didn't expose it.
+  /// `--fit` settled on. `None` when `/props` didn't expose it. This is
+  /// the one placement value llama-server's HTTP API reports; the rest
+  /// (layers, threads, batch) live only in load-time logs, so the TUI
+  /// shows those as `auto`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub resolved_ctx: Option<u32>,
 }
@@ -36,12 +39,10 @@ impl Actuals {
 }
 
 /// Fetch `/props` from the child on `127.0.0.1:<port>` and extract the
-/// resolved context window. Best-effort: any error → empty `Actuals`.
+/// values `--fit` resolved. Best-effort: any error → empty `Actuals`.
 pub async fn fetch(port: u16, timeout: Duration) -> Actuals {
   match fetch_props_body(port, timeout).await {
-    Ok(body) => Actuals {
-      resolved_ctx: parse_resolved_ctx(&body),
-    },
+    Ok(body) => parse_actuals(&body),
     Err(_) => Actuals::default(),
   }
 }
@@ -76,14 +77,20 @@ async fn fetch_props_body(port: u16, timeout: Duration) -> std::io::Result<Vec<u
 }
 
 /// Split the HTTP response at the header/body boundary and parse the
-/// JSON body for the resolved context window. llama-server has carried
-/// `n_ctx` under `default_generation_settings` and (in some builds) at
-/// the top level — try both so we survive a schema shuffle.
-fn parse_resolved_ctx(response: &[u8]) -> Option<u32> {
-  let split = response.windows(4).position(|w| w == b"\r\n\r\n")?;
+/// JSON body for the resolved context window. llama-server carries
+/// `n_ctx` under `default_generation_settings` (and at the top level in
+/// some builds) — try both so we survive a schema shuffle.
+fn parse_actuals(response: &[u8]) -> Actuals {
+  let Some(split) = response.windows(4).position(|w| w == b"\r\n\r\n") else {
+    return Actuals::default();
+  };
   let body = &response[split + 4..];
-  let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-  extract_n_ctx(&v)
+  let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+    return Actuals::default();
+  };
+  Actuals {
+    resolved_ctx: extract_n_ctx(&v),
+  }
 }
 
 fn extract_n_ctx(v: &serde_json::Value) -> Option<u32> {
@@ -102,32 +109,32 @@ mod tests {
   fn parses_n_ctx_from_default_generation_settings() {
     let resp = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n\
       {\"default_generation_settings\":{\"n_ctx\":16384},\"total_slots\":1}";
-    assert_eq!(parse_resolved_ctx(resp), Some(16384));
+    assert_eq!(parse_actuals(resp).resolved_ctx, Some(16384));
   }
 
   #[test]
   fn falls_back_to_top_level_n_ctx() {
     let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"n_ctx\":8192}";
-    assert_eq!(parse_resolved_ctx(resp), Some(8192));
+    assert_eq!(parse_actuals(resp).resolved_ctx, Some(8192));
   }
 
   #[test]
   fn missing_field_yields_none_not_a_crash() {
-    let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"total_slots\":1}";
-    assert_eq!(parse_resolved_ctx(resp), None);
+    let resp = b"HTTP/1.1 200 OK\r\n\r\n{\"model_path\":\"x\"}";
+    assert_eq!(parse_actuals(resp).resolved_ctx, None);
   }
 
   #[test]
   fn malformed_body_yields_none() {
-    assert_eq!(parse_resolved_ctx(b"HTTP/1.1 200 OK\r\n\r\nnot json"), None);
-    assert_eq!(parse_resolved_ctx(b"no headers no body"), None);
+    assert!(parse_actuals(b"HTTP/1.1 200 OK\r\n\r\nnot json").is_empty());
+    assert!(parse_actuals(b"no headers no body").is_empty());
   }
 
   #[test]
   fn actuals_is_empty_when_unset() {
     assert!(Actuals::default().is_empty());
     assert!(!Actuals {
-      resolved_ctx: Some(4096)
+      resolved_ctx: Some(4096),
     }
     .is_empty());
   }

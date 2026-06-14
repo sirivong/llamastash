@@ -511,6 +511,7 @@ mod tests {
       device: None,
       rss_bytes: Some(4_200_000_000),
       cpu_pct: Some(312.0),
+      ..Default::default()
     }
   }
 
@@ -742,6 +743,7 @@ mod tests {
       device: Some("CUDA1".into()),
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.daemon_info = DaemonInfo {
       server_path: Some("/usr/bin/llama-server".into()),

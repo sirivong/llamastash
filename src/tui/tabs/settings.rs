@@ -30,18 +30,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       // port / state / rss / cpu already render in the header info
       // row above the divider — dropping them here removes the
       // duplication that bloated the running-launch view.
-      let last = app.last_params.get(&m.path);
-      let empty_knobs = crate::config::TypedKnobs::default();
-      let persisted_knobs = last.map(|p| &p.knobs).unwrap_or(&empty_knobs);
-      // `last.ctx` is the *resolved* ctx (top-level `LaunchParams.ctx`)
-      // — covers user-supplied values, last-params recall, *and* the
-      // daemon-side VRAM-aware auto-fit, none of which land in the
-      // user-knobs slot. Falling back to `persisted_knobs.ctx` would
-      // miss all three and render `default` for a running launch that
-      // is actually pinned to a real number.
-      let resolved_ctx = last
-        .and_then(|p| p.ctx)
-        .or(persisted_knobs.ctx.set_value().copied());
+      // A running launch shows what the server is *actually running*
+      // with: the live dispatched knobs (`m.knobs`) — `auto` for a
+      // fit-delegated row, a pinned number when set — not the user's
+      // saved `last_params` delta (which is empty even for an auto
+      // launch). `ctx` is overlaid with the real window `--fit` resolved
+      // (read from `/props`); it's the one placement value llama-server
+      // reports back, so every other row honestly stays `auto`.
+      let dispatched = &m.knobs;
+      let resolved_ctx = m.resolved_ctx.or(dispatched.ctx.set_value().copied());
       for group in knob_display_groups() {
         // Match the editable form: the whole Multi-GPU placement group
         // is hidden on single-GPU / CPU-only hosts.
@@ -53,13 +50,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
           let value = match field {
             KnobField::Ctx => resolved_ctx
               .map(|v| v.to_string())
-              .unwrap_or_else(|| "default".into()),
-            _ => format_persisted_knob_value(persisted_knobs, *field),
+              .unwrap_or_else(|| format_persisted_knob_value(dispatched, KnobField::Ctx)),
+            _ => format_persisted_knob_value(dispatched, *field),
           };
           lines.push(kv(knob_label(*field), value, palette));
         }
       }
-      let extras: String = last
+      let extras: String = app
+        .last_params
+        .get(&m.path)
         .map(|p| p.extras.join(" "))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "(none)".into());
@@ -636,6 +635,75 @@ mod tests {
     }
     assert!(joined.contains("16384"), "{joined}");
     assert!(joined.contains("on"), "{joined}");
+  }
+
+  #[test]
+  fn running_view_shows_resolved_ctx_and_dispatched_auto_knobs() {
+    use crate::config::{KnobValue, TypedKnobs};
+    use crate::tui::app::ManagedRow;
+    use crate::tui::status_icons::SurfaceState;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    let mut app = App::new(AppOptions::default());
+    let path = PathBuf::from("/m/gemma.gguf");
+    app.models = vec![fake_model("/m/gemma.gguf", "/m")];
+    // The managed row carries the *dispatched* knobs (what the server is
+    // running with) — all `auto` for an all-auto launch — plus the ctx
+    // `--fit` actually resolved, read from `/props`. `last_params` is
+    // deliberately left empty to prove the running view reads the live
+    // dispatch, not the saved delta.
+    app.managed = vec![ManagedRow {
+      launch_id: "L1".into(),
+      path: path.clone(),
+      port: 41101,
+      state: SurfaceState::Ready,
+      resolved_ctx: Some(262144),
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Auto),
+        parallel: Some(KnobValue::Auto),
+        threads: Some(KnobValue::Auto),
+        ..Default::default()
+      },
+      ..Default::default()
+    }];
+    // Row 0 header, row 1 `▶ Running`, row 2 the running launch.
+    app.list_cursor = 2;
+    assert!(app.launch_picker.is_none());
+    assert!(
+      app.focused_managed().is_some(),
+      "cursor must land on the launch"
+    );
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(70, 40)).unwrap();
+    term
+      .draw(|f| render(f, Rect::new(0, 0, 70, 40), &app, palette))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+    let mut joined = String::new();
+    for y in 0..buf.area.height {
+      for x in 0..buf.area.width {
+        joined.push_str(buf.cell((x, y)).unwrap().symbol());
+      }
+      joined.push('\n');
+    }
+    // ctx shows the resolved number, NOT `default` and NOT `auto`.
+    assert!(joined.contains("262144"), "resolved ctx missing: {joined}");
+    // A fit-delegated knob reads `auto` (from the dispatched knobs),
+    // never `default` — even though `last_params` is empty.
+    let threads_line = joined.lines().find(|l| l.contains("threads")).unwrap_or("");
+    assert!(
+      threads_line.contains("auto"),
+      "dispatched auto knob should read auto, not default: {threads_line:?}"
+    );
+    let parallel_line = joined
+      .lines()
+      .find(|l| l.contains("parallel"))
+      .unwrap_or("");
+    assert!(
+      parallel_line.contains("auto"),
+      "parallel is fit-delegated and not read back, so it reads auto: {parallel_line:?}"
+    );
   }
 
   #[test]

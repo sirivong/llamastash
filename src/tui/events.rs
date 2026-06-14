@@ -3236,6 +3236,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.go_top();
     pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
@@ -3265,6 +3266,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }];
     app.go_top();
     pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
@@ -4339,6 +4341,7 @@ mod tests {
       device: None,
       rss_bytes: None,
       cpu_pct: None,
+      ..Default::default()
     }
   }
 

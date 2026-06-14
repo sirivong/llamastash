@@ -698,6 +698,7 @@ mod tests {
       device: None,
       rss_bytes: rss,
       cpu_pct: cpu,
+      ..Default::default()
     }
   }
 

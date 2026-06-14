@@ -364,6 +364,7 @@ fn ready_chat_model_exposes_chat_tab_via_cycle() {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    ..Default::default()
   }];
   app.go_top();
   let tabs = app.available_right_tabs();
@@ -458,6 +459,7 @@ fn picker_warns_when_focused_model_already_has_active_instance() {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    ..Default::default()
   }];
   // Row layout: [TableHeader, Header(▶ Running), Model(L1)].
   app.list_cursor = 2;
@@ -508,6 +510,7 @@ fn typing_into_chat_input_extends_prompt_buffer() {
     device: None,
     rss_bytes: None,
     cpu_pct: None,
+    ..Default::default()
   }];
   app.go_top();
   // Shift+C is the canonical jump to the Chat tab (gated on a
