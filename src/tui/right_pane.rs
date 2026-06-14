@@ -120,6 +120,12 @@ fn render_separator(frame: &mut Frame<'_>, area: Rect, palette: &Palette) {
 /// `c` / `u` are intentionally absent from the editable form: the
 /// running URL belongs to the live instance, not to whatever
 /// duplicate the user is staging.
+/// Rank for the `↑↓:scroll` hint. Deliberately higher than every
+/// per-pane action chip so scroll is the first to drop under width
+/// pressure — it's a discoverability nicety, not a primary verb, and
+/// only earns a slot when there is room left over.
+const SCROLL_HINT_RANK: u8 = 90;
+
 pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::RankedChip> {
   use crate::tui::hint_picker::RankedChip;
   use crate::tui::keybindings::{Action, Focus};
@@ -127,6 +133,22 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
   let push = |c: &mut Vec<RankedChip>, rank: u8, h: Option<String>| {
     if let Some(h) = h {
       c.push(RankedChip::new(rank, h));
+    }
+  };
+  // Low-priority ↑↓ scroll chip for a pane whose output scrolls on the
+  // arrow keys (chat/embed composer, the browsing focus on every right
+  // tab, Logs, the read-only running view). No-op when motion is
+  // unbound in `focus` (e.g. the editable Settings form, where ↑↓
+  // cycles fields instead).
+  let push_scroll = |c: &mut Vec<RankedChip>, focus: Focus| {
+    if let (Some(down), Some(up)) = (
+      app.hint_with(focus, Action::MoveDown, "scroll"),
+      app.hint_with(focus, Action::MoveUp, "scroll"),
+    ) {
+      c.push(RankedChip::new(
+        SCROLL_HINT_RANK,
+        bidirectional_chip(&up, &down, "scroll"),
+      ));
     }
   };
   /// Surface the `InputField` modal-contract chips for one of the
@@ -163,6 +185,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
           app.hint_with(Focus::ChatInput, Action::ToggleThinkCollapse, "think"),
         );
       }
+      push_scroll(&mut chips, Focus::ChatInput);
     }
     (Focus::EmbedInput, _) => {
       push_input_field_chips(
@@ -171,6 +194,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
         app.embed.input.is_empty(),
       );
       push(&mut chips, 30, app.hint(Focus::EmbedInput, Action::Submit));
+      push_scroll(&mut chips, Focus::EmbedInput);
     }
     (Focus::RerankInput, _) => {
       // Rerank has two `InputField`s (query / candidate); the
@@ -215,6 +239,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
         20,
         app.hint_with(Focus::RightPane, Action::YankCurl, "copy"),
       );
+      push_scroll(&mut chips, Focus::RightPane);
     }
     (_, RightTab::Chat | RightTab::Embed | RightTab::Rerank) => {
       push(
@@ -232,6 +257,7 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
           app.hint_with(Focus::RightPane, Action::ToggleThinkCollapse, "think"),
         );
       }
+      push_scroll(&mut chips, Focus::RightPane);
     }
     (_, RightTab::Settings) => {
       let running_readonly = app.launch_picker.is_none() && app.focused_managed().is_some();
@@ -254,16 +280,9 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
         );
         // ↑/↓ scroll the read-only running-launch view (~17 rows).
         // Surface the chip so users discover the affordance — without
-        // it, arrows look like a no-op.
-        if let (Some(down), Some(up)) = (
-          app.hint_with(Focus::RightPane, Action::MoveDown, "scroll"),
-          app.hint_with(Focus::RightPane, Action::MoveUp, "scroll"),
-        ) {
-          chips.push(RankedChip::new(
-            30,
-            bidirectional_chip(&up, &down, "scroll"),
-          ));
-        }
+        // it, arrows look like a no-op. Low priority (see
+        // `SCROLL_HINT_RANK`): the yank trio keeps its slots first.
+        push_scroll(&mut chips, Focus::RightPane);
         push(&mut chips, 40, app.hint(Focus::RightPane, Action::YankPath));
         push(&mut chips, 50, app.hint(Focus::RightPane, Action::YankUrl));
         push(&mut chips, 60, app.hint(Focus::RightPane, Action::YankCurl));
@@ -736,23 +755,34 @@ mod tests {
   fn bottom_hint_chips_match_each_focus_tab_combo() {
     use crate::tui::keybindings::{Focus, ENTER_LABEL};
     // Navigation focuses surface the entry-point keystroke per tab.
+    // Every browsing focus also carries the low-priority `↑↓:scroll`
+    // chip (drops first under width pressure) so the output-scroll
+    // affordance is discoverable.
     assert_eq!(
       chip_texts(&app_with_focus(Focus::RightPane, RightTab::Logs)),
-      vec!["s:auto-scroll".to_string(), "c:copy".to_string()]
+      vec![
+        "s:auto-scroll".to_string(),
+        "c:copy".to_string(),
+        "↑↓:scroll".to_string(),
+      ]
     );
     // Chat tab adds `r:think` alongside `e:edit` so the toggle is
     // discoverable from the browsing focus.
     assert_eq!(
       chip_texts(&app_with_focus(Focus::RightPane, RightTab::Chat)),
-      vec!["e:edit".to_string(), "r:think".to_string()]
+      vec![
+        "e:edit".to_string(),
+        "r:think".to_string(),
+        "↑↓:scroll".to_string(),
+      ]
     );
     assert_eq!(
       chip_texts(&app_with_focus(Focus::RightPane, RightTab::Embed)),
-      vec!["e:edit".to_string()]
+      vec!["e:edit".to_string(), "↑↓:scroll".to_string()]
     );
     assert_eq!(
       chip_texts(&app_with_focus(Focus::RightPane, RightTab::Rerank)),
-      vec!["e:edit".to_string()]
+      vec!["e:edit".to_string(), "↑↓:scroll".to_string()]
     );
     // Settings on an unfocused selection has no model to act on,
     // so no chips fire — the bottom border stays bare instead of
@@ -770,6 +800,7 @@ mod tests {
         "e:edit".to_string(),
         enter_send.clone(),
         "r:think".to_string(),
+        "↑↓:scroll".to_string(),
       ]
     );
     // Same field after the user enters edit mode — chip switches to
@@ -780,7 +811,11 @@ mod tests {
     chat_app.chat.prompt.enter_edit();
     assert_eq!(
       chip_texts(&chat_app),
-      vec!["Esc:stop edit".to_string(), enter_send.clone()]
+      vec![
+        "Esc:stop edit".to_string(),
+        enter_send.clone(),
+        "↑↓:scroll".to_string(),
+      ]
     );
     // After exiting edit but with a non-empty buffer (a `Esc` press
     // landed the field in its resting + non-empty state), the chip
@@ -796,12 +831,17 @@ mod tests {
         "Esc:clear".to_string(),
         enter_send,
         "r:think".to_string(),
+        "↑↓:scroll".to_string(),
       ]
     );
     // Embed mirrors the same shape (one fewer trailing chip).
     assert_eq!(
       chip_texts(&app_with_focus(Focus::EmbedInput, RightTab::Embed)),
-      vec!["e:edit".to_string(), format!("{ENTER_LABEL}:embed")]
+      vec![
+        "e:edit".to_string(),
+        format!("{ENTER_LABEL}:embed"),
+        "↑↓:scroll".to_string(),
+      ]
     );
     // Rerank input: chip strip reflects the active sub-field's
     // editing state. Default field is Query (not editing, empty
@@ -826,6 +866,31 @@ mod tests {
         "Esc:stop edit".to_string(),
         format!("{ENTER_LABEL}:add candidate"),
       ]
+    );
+  }
+
+  #[test]
+  fn scroll_chip_is_low_priority_and_drops_first_under_width_pressure() {
+    use crate::tui::hint_picker::pick;
+    use crate::tui::keybindings::Focus;
+    let app = app_with_focus(Focus::RightPane, RightTab::Chat);
+    // Wide budget keeps every chip, including the scroll affordance.
+    let wide = pick(bottom_hint_chips(&app), 200, " · ");
+    assert!(
+      wide.iter().any(|c| c == "↑↓:scroll"),
+      "scroll chip should show when there is room: {wide:?}"
+    );
+    // A budget that fits only the primary chip drops scroll first while
+    // the higher-priority `e:edit` survives — the "only when there's
+    // space" contract.
+    let narrow = pick(bottom_hint_chips(&app), 6, " · ");
+    assert!(
+      narrow.iter().any(|c| c == "e:edit"),
+      "primary chip must survive: {narrow:?}"
+    );
+    assert!(
+      !narrow.iter().any(|c| c == "↑↓:scroll"),
+      "scroll chip must drop first under width pressure: {narrow:?}"
     );
   }
 
@@ -1036,7 +1101,11 @@ mod tests {
     app.right_tab = RightTab::Chat;
     assert_eq!(
       chip_texts(&app),
-      vec!["F4:edit".to_string(), "r:think".to_string()],
+      vec![
+        "F4:edit".to_string(),
+        "r:think".to_string(),
+        "↑↓:scroll".to_string(),
+      ],
       "remapped enter_edit must flow into the chip"
     );
     // Sanity: looking up the action directly through the App also
