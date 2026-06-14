@@ -1803,6 +1803,11 @@ pub(crate) async fn start_model_inner(
         let model_path = launch_params.model_path.clone();
         let knobs = launch_params.knobs.clone();
         let arch_owned = arch.clone();
+        // Shard-aware weight total (sums every split sibling); the
+        // per-shard `weights_bytes(header)` would only see the primary
+        // shard. Computed above for probe scaling — reused here so a
+        // split GGUF is not under-projected and wrongly admitted.
+        let weights_total = total_weight_bytes;
         let demand = tokio::task::spawn_blocking(move || {
           let header = read_gguf_header(&model_path, HeaderReadOptions::default())
             .ok()?
@@ -1813,6 +1818,7 @@ pub(crate) async fn start_model_inner(
             &knobs,
             effective_ctx,
             &gpu_backend,
+            weights_total,
           ))
         })
         .await

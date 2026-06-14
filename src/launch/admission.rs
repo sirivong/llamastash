@@ -32,7 +32,7 @@ use std::sync::Mutex;
 use crate::config::{KnobValueOpt, TypedKnobs};
 use crate::daemon::host_metrics::HostMetricsSnapshot;
 use crate::gguf::header::GgufHeader;
-use crate::gguf::memory::{kv_bytes, parse_cache_type, weights_bytes, EstimateOptions};
+use crate::gguf::memory::{kv_bytes, parse_cache_type, EstimateOptions};
 use crate::launch::headroom::{admissible_bytes, overhead_band_bytes, PoolKind};
 
 /// One in-flight launch's hold on the budget, keyed by `launch_id`.
@@ -182,6 +182,15 @@ pub fn effective_free_bytes(snap: &HostMetricsSnapshot) -> u64 {
 /// geometry yields a KV of 0, so demand degrades to weights + band
 /// rather than refusing on missing data.
 ///
+/// `weights_total_bytes` is the **shard-aware** on-disk weight total
+/// (from `discovery::shard_sizes` via the catalog row), not
+/// `weights_bytes(header)` — the latter only sums the tensors in the
+/// header it is handed, which for a split GGUF is just the primary shard
+/// (`…-00001-of-000NN.gguf`) and silently drops every trailing shard. A
+/// split model would otherwise be under-projected by the size of those
+/// shards and wrongly admitted. The header is still used for the KV term
+/// (all attention geometry lives in the primary shard's metadata).
+///
 /// **It is a floor, not a ceiling.** Under Auto the caller passes
 /// `fit_ctx_floor` as `effective_ctx` (a pinned `--ctx` passes the pin),
 /// so the KV term reflects the *minimum* context, not the (possibly much
@@ -198,6 +207,7 @@ pub fn project_demand(
   knobs: &TypedKnobs,
   effective_ctx: u32,
   backend: &str,
+  weights_total_bytes: u64,
 ) -> u64 {
   let opts = EstimateOptions {
     ctx_len: effective_ctx as u64,
@@ -208,7 +218,7 @@ pub fn project_demand(
     // ignored downstream. Left unset rather than threaded in.
     n_gpu_layers: None,
   };
-  weights_bytes(header)
+  weights_total_bytes
     .saturating_add(kv_bytes(header, arch, opts))
     .saturating_add(overhead_band_bytes(backend))
 }
@@ -350,5 +360,38 @@ mod tests {
     assert!(!is_sampled(&s));
     let s2 = snap(HostMetricsSnapshot::BACKEND_AMD, true, GIB, 0);
     assert!(is_sampled(&s2));
+  }
+
+  #[test]
+  fn demand_uses_shard_aware_weight_total_not_header_tensors() {
+    use crate::gguf::header::GgufHeader;
+    // Empty header (no tensors): the per-shard `weights_bytes(header)`
+    // this used to call would be 0. A split GGUF launches off its
+    // primary shard, whose header omits every trailing shard's tensors,
+    // so the old path under-projected demand by those shards. With the
+    // shard-aware total threaded in, demand must reflect the passed
+    // weight total regardless of what the header carries.
+    let header = GgufHeader {
+      version: 3,
+      tensor_count: 0,
+      metadata: std::collections::HashMap::new(),
+      tensors: Vec::new(),
+    };
+    let knobs = TypedKnobs::default();
+    // arch `None` → KV term is 0, isolating weights + overhead band.
+    let band = overhead_band_bytes(HostMetricsSnapshot::BACKEND_AMD);
+    let demand = project_demand(
+      &header,
+      None,
+      &knobs,
+      16384,
+      HostMetricsSnapshot::BACKEND_AMD,
+      53 * GIB,
+    );
+    assert_eq!(
+      demand,
+      53 * GIB + band,
+      "weights term is the shard-aware total, not the header's tensor sum"
+    );
   }
 }
