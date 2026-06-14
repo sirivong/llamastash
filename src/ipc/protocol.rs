@@ -117,9 +117,14 @@ pub enum ErrorCode {
   InvalidParams,
   InternalError,
   /// Server rejected the connection because the peer UID didn't match the
-  /// daemon's UID. Application-defined code (must be outside the reserved
-  /// `-32768..=-32000` server-error range).
+  /// daemon's UID. Application-defined code in the implementation-defined
+  /// server-error band (`-32000..=-32099`).
   UnauthorizedPeer,
+  /// A launch was refused by admission control because the projected
+  /// memory demand exceeds the admissible pool free (a resource limit,
+  /// not an internal failure). Agents should branch on this code rather
+  /// than the `data.cause` string. Same implementation-defined band.
+  ResourceExhausted,
 }
 
 impl ErrorCode {
@@ -131,6 +136,7 @@ impl ErrorCode {
       Self::InvalidParams => -32602,
       Self::InternalError => -32603,
       Self::UnauthorizedPeer => -32001,
+      Self::ResourceExhausted => -32002,
     }
   }
 }

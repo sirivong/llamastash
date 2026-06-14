@@ -1355,11 +1355,11 @@ fn supported_methods() -> Vec<&'static str> {
   v
 }
 
-/// Upper bound on `ctx` (token-window) advertised on the IPC. The TUI
-/// picker caps at 131_072 but CLI + direct JSON-RPC callers bypass
-/// that; this stops a buggy or malicious request from sending
-/// `--ctx u32::MAX` straight to llama-server. Shared with config
-/// validation via [`crate::config::MAX_CTX_TOKENS`].
+// Upper bound on `ctx` (token-window) advertised on the IPC. The TUI
+// picker caps at 131_072 but CLI + direct JSON-RPC callers bypass
+// that; this stops a buggy or malicious request from sending
+// `--ctx u32::MAX` straight to llama-server. Shared with config
+// validation via `crate::config::MAX_CTX_TOKENS`.
 use crate::config::MAX_CTX_TOKENS;
 
 /// Output of [`start_model_inner`] — everything the caller needs to
@@ -1816,7 +1816,7 @@ pub(crate) async fn start_model_inner(
           if let Err(refusal) = ctx.admission.try_admit(u64::from(port), demand, free) {
             ctx.supervisors.release_reserved_port(port).await;
             return Err(ErrorObject::with_data(
-              ErrorCode::InternalError,
+              ErrorCode::ResourceExhausted,
               format_admission_refusal(&refusal),
               serde_json::json!({ "cause": "launch_refused" }),
             ));
@@ -2121,6 +2121,13 @@ fn format_admission_refusal(refusal: &crate::launch::admission::Refusal) -> Stri
 /// drop its admission reservation. Mirrors the recorder's poll shape;
 /// bounded by the scaled probe budget and the shutdown token so a child
 /// that never settles can't leak the reservation forever.
+///
+/// Best-effort hand-off: the reservation drops on Ready, but the 1 Hz
+/// host-metrics sampler may not yet reflect the child's freshly-committed
+/// allocation, so a concurrent launch in that sub-second window can see
+/// stale free *and* no reservation. The window is bounded by one sample
+/// tick and the in-process load check is the final OOM backstop, so this
+/// is accepted rather than papered over with a longer hold.
 fn spawn_admission_settle(
   ledger: Arc<crate::launch::admission::Ledger>,
   model: ManagedModel,
