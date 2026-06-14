@@ -297,7 +297,8 @@ impl LaunchPickerState {
   }
 
   fn cycle_u32(&mut self, field: KnobField, presets: &[u32], forward: bool) {
-    let cur = if self.user_is_auto(field) {
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
       CycleState::Auto
     } else {
       match self.user_value_u32(field) {
@@ -305,7 +306,7 @@ impl LaunchPickerState {
         None => CycleState::Inherited,
       }
     };
-    match ring_next(cur, presets, forward) {
+    match ring_next(cur, presets, forward, allow_auto) {
       CycleState::Inherited => self.set_user_u32(field, None),
       CycleState::Auto => self.set_user_auto(field),
       CycleState::Set(v) => self.set_user_u32(field, Some(v)),
@@ -313,7 +314,8 @@ impl LaunchPickerState {
   }
 
   fn cycle_f32(&mut self, field: KnobField, presets: &[f32], forward: bool) {
-    let cur = if self.user_is_auto(field) {
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
       CycleState::Auto
     } else {
       match self.user_value_f32(field) {
@@ -321,17 +323,19 @@ impl LaunchPickerState {
         None => CycleState::Inherited,
       }
     };
-    match ring_next(cur, presets, forward) {
+    match ring_next(cur, presets, forward, allow_auto) {
       CycleState::Inherited => self.set_user_f32(field, None),
       CycleState::Auto => self.set_user_auto(field),
       CycleState::Set(v) => self.set_user_f32(field, Some(v)),
     }
   }
 
-  /// Cycle a constrained-string knob (`cache_type_*`, `split_mode`)
-  /// through `Inherited → Auto → set… → wrap`.
+  /// Cycle a constrained-string knob (`cache_type_*`, `split_mode`,
+  /// `tensor_split`). Fit-governed knobs carry the `Auto` stop; the rest
+  /// cycle `Inherited → set… → wrap`.
   fn cycle_str_set(&mut self, field: KnobField, set: &'static [&'static str], forward: bool) {
-    let cur = if self.user_is_auto(field) {
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
       CycleState::Auto
     } else {
       // Detach the `&'static str` from `&self` so `set_user_str(&mut …)`
@@ -344,7 +348,7 @@ impl LaunchPickerState {
         None => CycleState::Inherited,
       }
     };
-    match ring_next(cur, set, forward) {
+    match ring_next(cur, set, forward, allow_auto) {
       CycleState::Inherited => self.set_user_str(field, None),
       CycleState::Auto => self.set_user_auto(field),
       CycleState::Set(v) => self.set_user_str(field, Some(v.to_string())),
@@ -352,8 +356,12 @@ impl LaunchPickerState {
   }
 
   fn cycle_bool(&mut self, field: KnobField, forward: bool) {
-    // Quad-state ring: Inherited → Auto → on → off → wrap.
-    let cur = if self.user_is_auto(field) {
+    // Fit-governed bools get the quad ring `Inherited → Auto → on → off`;
+    // non-fit bools (every bool knob today — flash_attn, mlock, no_mmap,
+    // reasoning) drop the no-op Auto stop to a tri ring
+    // `Inherited → on → off`.
+    let allow_auto = field.fit_governed();
+    let cur = if allow_auto && self.user_is_auto(field) {
       CycleState::Auto
     } else {
       match self.user_value_bool(field) {
@@ -363,7 +371,8 @@ impl LaunchPickerState {
     };
     let next = if forward {
       match cur {
-        CycleState::Inherited => CycleState::Auto,
+        CycleState::Inherited if allow_auto => CycleState::Auto,
+        CycleState::Inherited => CycleState::Set(true),
         CycleState::Auto => CycleState::Set(true),
         CycleState::Set(true) => CycleState::Set(false),
         CycleState::Set(false) => CycleState::Inherited,
@@ -372,7 +381,8 @@ impl LaunchPickerState {
       match cur {
         CycleState::Inherited => CycleState::Set(false),
         CycleState::Set(false) => CycleState::Set(true),
-        CycleState::Set(true) => CycleState::Auto,
+        CycleState::Set(true) if allow_auto => CycleState::Auto,
+        CycleState::Set(true) => CycleState::Inherited,
         CycleState::Auto => CycleState::Inherited,
       }
     };
@@ -384,9 +394,11 @@ impl LaunchPickerState {
   }
 
   /// Cycle the Device row through the flat catalog. The cycle space is
-  /// `[default] + catalog selectors`: stepping off either end wraps
-  /// back to `None` (default → auto-select). `user_knobs.device` holds
-  /// the chosen selector verbatim (`"Vulkan1"`), or `None` for default.
+  /// `[default] + catalog selectors`: stepping off either end wraps back
+  /// to `None`. `default` already means "let llama-server pick the
+  /// device(s)", so the row carries no separate `Auto` stop (device is
+  /// not fit-governed). `user_knobs.device` holds the chosen selector
+  /// verbatim (`"Vulkan1"`), or `None` for default.
   fn cycle_device(&mut self, field: KnobField, forward: bool) {
     if self.device_catalog.is_empty() {
       // No catalog (CPU-only / no binary enumerated) — only the
@@ -399,21 +411,17 @@ impl LaunchPickerState {
       .iter()
       .map(|d| d.selector.as_str())
       .collect();
-    // Cycle positions: 0 = Inherited (None), 1 = Auto (let `--fit` /
-    // llama-server pick), 2+i = selector[i].
-    let cur_pos: usize = if self.user_is_auto(field) {
-      1
-    } else {
-      match self.user_value_str(field).filter(|s| !s.is_empty()) {
-        None => 0,
-        Some(sel) => selectors
-          .iter()
-          .position(|s| *s == sel)
-          .map(|i| i + 2)
-          .unwrap_or(0),
-      }
+    // Cycle positions: 0 = default (None), 1+i = selector[i]. A stale
+    // Auto coerces to default (position 0).
+    let cur_pos: usize = match self.user_value_str(field).filter(|s| !s.is_empty()) {
+      None => 0,
+      Some(sel) => selectors
+        .iter()
+        .position(|s| *s == sel)
+        .map(|i| i + 1)
+        .unwrap_or(0),
     };
-    let len = selectors.len() + 2; // +Inherited +Auto
+    let len = selectors.len() + 1; // +default
     let next_pos = if forward {
       (cur_pos + 1) % len
     } else {
@@ -421,8 +429,7 @@ impl LaunchPickerState {
     };
     match next_pos {
       0 => self.set_user_str(field, None),
-      1 => self.set_user_auto(field),
-      i => self.set_user_str(field, Some(selectors[i - 2].to_string())),
+      i => self.set_user_str(field, Some(selectors[i - 1].to_string())),
     }
   }
 
@@ -767,7 +774,22 @@ fn ring_next<T: PartialEq + PartialOrd + Copy>(
   current: CycleState<T>,
   presets: &[T],
   forward: bool,
+  allow_auto: bool,
 ) -> CycleState<T> {
+  // Non-fit-governed knobs have no Auto stop: a two-stop ring
+  // `Inherited → presets… → Inherited`. A stray Auto (e.g. a stale
+  // persisted value) coerces back to Inherited so cycling escapes it.
+  if !allow_auto {
+    return match current {
+      CycleState::Auto => CycleState::Inherited,
+      CycleState::Inherited => {
+        cycle_through(None, presets, forward).map_or(CycleState::Inherited, CycleState::Set)
+      }
+      CycleState::Set(v) => {
+        cycle_through(Some(v), presets, forward).map_or(CycleState::Inherited, CycleState::Set)
+      }
+    };
+  }
   match current {
     CycleState::Inherited => {
       if forward {
@@ -876,12 +898,11 @@ mod tests {
   }
 
   #[test]
-  fn reasoning_cycle_walks_quad_state_in_both_directions() {
+  fn reasoning_cycle_walks_tri_state_in_both_directions() {
+    // `reasoning` is not fit-governed, so it has no `Auto` stop: the
+    // ring is Inherited → on → off → Inherited.
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::Reasoning);
-    // Forward: Inherited → Auto → on → off → Inherited.
-    s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Auto));
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(true)));
     s.cycle_focused_value_next();
@@ -894,7 +915,7 @@ mod tests {
     s.cycle_focused_value_prev();
     assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Set(true)));
     s.cycle_focused_value_prev();
-    assert_eq!(s.user_knobs.reasoning, Some(KnobValue::Auto));
+    assert_eq!(s.user_knobs.reasoning, None);
   }
 
   #[test]
@@ -1001,12 +1022,11 @@ mod tests {
   }
 
   #[test]
-  fn cycle_knob_flash_attn_walks_quadstate() {
+  fn cycle_knob_flash_attn_walks_tristate() {
     let mut s = LaunchPickerState::for_model("qwen");
     s.field = PickerField::Knob(KnobField::FlashAttn);
-    // Ring: Inherited → Auto → on → off → Inherited.
-    s.cycle_focused_value_next();
-    assert_eq!(s.user_knobs.flash_attn, Some(KnobValue::Auto));
+    // flash_attn is not fit-governed → no Auto stop. Ring:
+    // Inherited → on → off → Inherited.
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.flash_attn, Some(KnobValue::Set(true)));
     s.cycle_focused_value_next();
@@ -1172,17 +1192,21 @@ mod tests {
   fn cycle_device_walks_default_then_each_selector_and_wraps() {
     let mut s = LaunchPickerState::for_model("test");
     s.device_catalog = catalog_two_vendors();
-    // Ring: Inherited → Auto → Vulkan0 → Vulkan1 → ROCm0 → wrap.
+    // Device is not fit-governed and `default` already means auto-select,
+    // so there is no Auto stop. Ring: default → Vulkan0 → Vulkan1 →
+    // ROCm0 → wrap.
     assert_eq!(s.user_value_str(KnobField::Device), None);
     s.cycle_device(KnobField::Device, true);
-    assert!(s.user_is_auto(KnobField::Device), "first stop is Auto");
-    s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan0".into()));
+    assert!(
+      !s.user_is_auto(KnobField::Device),
+      "device has no Auto stop"
+    );
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan1".into()));
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), Some("ROCm0".into()));
-    // One more wraps back to inherited (no override, not Auto).
+    // One more wraps back to default.
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), None);
     assert!(!s.user_is_auto(KnobField::Device));

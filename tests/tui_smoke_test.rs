@@ -222,11 +222,12 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
     app.launch_picker.as_ref().unwrap().field,
     PickerField::Knob(KnobField::Reasoning)
   );
-  // → walks the reasoning ring forward (Inherited → Auto).
+  // reasoning is not fit-governed → no Auto stop; the ring is
+  // Inherited → on → off, so → lands on `on`.
   pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
   assert_eq!(
     app.launch_picker.as_ref().unwrap().user_knobs.reasoning,
-    Some(KnobValue::Auto)
+    Some(KnobValue::Set(true))
   );
 }
 

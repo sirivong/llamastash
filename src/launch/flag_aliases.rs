@@ -44,6 +44,25 @@ pub enum KnobField {
   SplitMode,
 }
 
+impl KnobField {
+  /// Whether llama-server's `--fit` actually decides this knob when it's
+  /// left unset — i.e. the placement / sizing parameters fit adjusts to
+  /// make a model fit device memory. The `Auto` knob state (delegate to
+  /// fit) is only meaningful for these; for every other knob `Auto`
+  /// would emit nothing and behave identically to `Inherited`, so the
+  /// seeding rule and the picker's cycle ring suppress the `Auto` stop
+  /// off this list.
+  ///
+  /// Single source of truth: extend this match when a future
+  /// llama-server build lets `--fit` govern another parameter.
+  pub fn fit_governed(self) -> bool {
+    matches!(
+      self,
+      KnobField::Ctx | KnobField::NGpuLayers | KnobField::NCpuMoe | KnobField::TensorSplit
+    )
+  }
+}
+
 /// What the parser expects after the flag head. Bool consumes no
 /// value; everything else takes one (either the next token or the
 /// `=value` suffix).

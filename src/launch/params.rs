@@ -529,6 +529,13 @@ pub fn seed_layerless(resolved: &mut Resolved, mode: DefaultLaunchMode) {
     return;
   }
   for spec in knob_specs() {
+    // Only fit-governed knobs get the Auto seed: for everything else
+    // Auto is a no-op (emits nothing, same as Inherited) and would just
+    // render a meaningless `auto` row. Non-fit layer-less knobs stay
+    // Inherited and fall through to the server default.
+    if !spec.field.fit_governed() {
+      continue;
+    }
     let layer_less = resolved
       .sources
       .get(&spec.field)
@@ -1226,9 +1233,12 @@ mod tests {
     // Matrix row "touches nothing, a layer has a value": remembered
     // value wins, not seeded to Auto.
     assert_eq!(r.knobs.n_gpu_layers, Some(KnobValue::Set(99)));
-    // Matrix row "touches nothing, no layer, mode = auto": seeded Auto.
-    assert_eq!(r.knobs.keep, Some(KnobValue::Auto));
+    // Layer-less + fit-governed → seeded Auto.
     assert_eq!(r.knobs.ctx, Some(KnobValue::Auto));
+    assert_eq!(r.knobs.tensor_split, Some(KnobValue::Auto));
+    // Layer-less but NOT fit-governed (`keep`) → left Inherited, since
+    // Auto there is a no-op fit can't act on.
+    assert_eq!(r.knobs.keep, None);
   }
 
   #[test]

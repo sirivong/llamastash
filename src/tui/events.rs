@@ -4219,15 +4219,16 @@ mod tests {
     // arrive on the wire.
     app.open_launch_picker();
     let p = app.launch_picker.as_mut().unwrap();
-    // Ring inserts an Auto stop first (Inherited → Auto → presets/on…),
-    // so step twice to land on a concrete value.
+    // ctx is fit-governed, so its ring inserts an Auto stop first
+    // (Inherited → Auto → presets…); step twice to land on a preset.
     p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx);
     p.cycle_focused_value_next(); // → Auto
     p.cycle_focused_value_next(); // → first ctx preset
     let expected_ctx = p.user_knobs.ctx.set_value().copied();
     assert!(expected_ctx.is_some(), "ctx should be a concrete preset");
+    // reasoning is not fit-governed → no Auto stop (Inherited → on → off);
+    // one step lands on `on`.
     p.field = PickerField::Knob(crate::launch::flag_aliases::KnobField::Reasoning);
-    p.cycle_focused_value_next(); // → Auto
     p.cycle_focused_value_next(); // → on
 
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
