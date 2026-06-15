@@ -19,13 +19,28 @@
 
 A fast TUI **and** CLI with init wizard for launching local LLMs. One Rust binary that's a TUI, a CLI, a daemon, and an OpenAI-compatible proxy. [llama.cpp](https://github.com/ggml-org/llama.cpp) is the direct, zero-overhead backend (vs raw `llama-server`), behind a pluggable backend seam so other engines can plug in. See [benchmarks](docs/benchmarks.md).
 
+![TUI Gif](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/tui.gif)
+
+## Contents
+
+- [Why](#why)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Agent Skills](#agent-skills)
+- [Features](#features)
+- [Benchmarks](#benchmarks)
+- [Screenshots](#screenshots)
+- [Configuration](#configuration)
+- [CLI exit codes](#cli-exit-codes)
+- [Platforms](#platforms)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+
 ## Why
 
 Heavy abstractions (Ollama, LM Studio) hide llama.cpp; raw `llama-server` use is tedious. LlamaStash is a fast, transparent launcher that is also a first-class shell-tool surface for agents — one binary, daemon on demand, same primitives in the TUI and the CLI.
 
 > **AI agents installing this for a user:** jump to [`INSTALL.md` § For AI agents](INSTALL.md#for-ai-agents). The non-interactive install + verify contract, and exit-code branching live there.
-
-![TUI Gif](https://raw.githubusercontent.com/llamastash/llamastash/main/assets/tui.gif)
 
 ## Install
 
