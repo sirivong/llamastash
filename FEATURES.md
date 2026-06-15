@@ -179,6 +179,14 @@ If the named model isn't running yet, the proxy auto-starts it. If the launch fa
 
 The full endpoint table, error envelopes, response headers, and config keys live in [`docs/usage.md` § Proxy (OpenAI-compatible listener)](docs/usage.md#proxy-openai-compatible-listener); the manual OpenCode + Pi smoke runbook is at [`tests/proxy_real_client_smoke.md`](https://github.com/llamastash/llamastash/blob/main/tests/proxy_real_client_smoke.md).
 
+### Browser web UI
+
+`http://127.0.0.1:11435/ui/` serves the running model's stock llama.cpp web UI through the proxy on one port-stable origin, so you never have to look up the ephemeral backend port. Chat history persists across model switches because it's keyed to the browser origin, which never changes.
+
+One model running opens directly. Several running show a small chooser; pick one and the browser reloads onto it, pinned by a `ls_ui_target` cookie. Once you're on a model, `http://127.0.0.1:11435/ui/switch` re-opens the chooser so you can switch (it marks the model you're on), and `http://127.0.0.1:11435/ui/?target=<launch-id>` jumps straight to a specific one. The chooser lists running models only.
+
+The web UI rides the same auth gate as the API: keyless on the loopback default, and over the [LAN](#auth-posture) the browser gets a `WWW-Authenticate: Basic` prompt where you paste the proxy key as the password (API clients keep using `Authorization: Bearer`). The stock chat UI has no in-page model switcher and llamastash deliberately doesn't inject one, so switching is the out-of-band `/ui/switch` URL. Details: [`docs/usage.md` § Web UI](docs/usage.md#web-ui-ui).
+
 ### Ollama discovery surface
 
 The proxy also exposes Ollama's discovery surface (`GET /api/tags`, `GET /api/version`, `GET /api/ps`, `POST /api/show`) so tools that auto-detect Ollama via `OLLAMA_HOST` or by probing `GET /api/tags` recognise llamastash and fall through to the OpenAI-compat endpoints for inference. Ollama's _inference_ endpoints (`/api/chat`, `/api/generate`, `/api/embed`) are not implemented — point Ollama-shape inference clients at the OpenAI-compat endpoints above. Tracked in [`TODO.md`](https://github.com/llamastash/llamastash/blob/main/TODO.md) §R2.
