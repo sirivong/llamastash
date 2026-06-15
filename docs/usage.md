@@ -816,10 +816,15 @@ Knob set, grouped into labelled clusters in display order:
 Groups are ordered by how often a knob is typically changed; related
 knobs sit together. (This display order is independent of the order
 flags are emitted on the `llama-server` argv.) Booleans cycle
-`default ↔ on ↔ off`; enums cycle their allowed set (`f16` / `q8_0`
-/ `q4_0` for cache types, `none` / `layer` / `row` for `split_mode`).
+`default ↔ on ↔ off`; enums cycle their allowed set (the standard
+llama-server cache types `f32` / `f16` / `bf16` / `q8_0` / `q4_0` /
+`q4_1` / `iq4_nl` / `q5_0` / `q5_1` for `cache_type_k` / `cache_type_v`,
+`none` / `layer` / `row` for `split_mode`).
 `e` enters free-form numeric / enum / text edit mode for any row whose
-preset list doesn't cover the value the user wants.
+preset list doesn't cover the value the user wants — cache-type rows
+also accept a custom quant identifier from a modified llama-server build
+(e.g. `fp4`, `turbo_quant`) this way, and `--cache-type-k` / `-v` on
+`start` accept the same.
 
 **GPU/CPU offload split.** `n_gpu_layers` offloads N layers to the GPU
 (rest on CPU); `n_cpu_moe` keeps the first N layers' MoE expert weights

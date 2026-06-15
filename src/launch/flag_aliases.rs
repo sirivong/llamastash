@@ -89,7 +89,7 @@ impl ValueKind {
       ValueKind::U32 => "N",
       ValueKind::F32 => "X",
       ValueKind::Bool => "BOOL",
-      ValueKind::KvCacheType => "f16|q8_0|q4_0",
+      ValueKind::KvCacheType => "CACHE_TYPE",
       ValueKind::SplitMode => "none|layer|row",
       ValueKind::Str => "VALUE",
     }
@@ -114,9 +114,16 @@ pub struct KnobSpec {
   pub fallback_label: LayerLabel,
 }
 
-/// Allowed values for `cache_type_k` / `cache_type_v` (matches
-/// llama-server's documented k/v cache quant types).
-pub const KV_CACHE_TYPES: &[&str] = &["f16", "q8_0", "q4_0"];
+/// Known k/v cache quant types from a standard `llama-server` build,
+/// used as the cycle ring in the TUI picker and the "known types" hint
+/// in CLI / TUI validation errors. Re-exported from the single source of
+/// truth next to the KV memory estimator in [`crate::gguf::memory`], so
+/// the validation set and the byte-cost table stay in lock-step. Values
+/// outside this list are still accepted when they look like a valid quant
+/// identifier (see [`crate::cli::tail_args::is_custom_kv_cache_type`]), so
+/// custom builds that add extra types (e.g. `fp4`, `turbo_quant`) are not
+/// blocked at the llamastash layer.
+pub use crate::gguf::memory::KV_CACHE_TYPES;
 
 /// Allowed values for `split_mode` (matches llama-server's
 /// `--split-mode` choices). `layer` is llama-server's own default.

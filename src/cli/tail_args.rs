@@ -267,19 +267,41 @@ fn parse_kv_cache(flag: &str, value: Option<&str>) -> Result<String, CliExit> {
   let v = value.ok_or_else(|| {
     CliExit::new(
       USAGE,
-      format!("{flag}: expected one of {}", KV_CACHE_TYPES.join(", ")),
+      format!(
+        "{flag}: expected a cache type (e.g. {})",
+        KV_CACHE_TYPES.join(", ")
+      ),
     )
   })?;
-  if KV_CACHE_TYPES.contains(&v) {
+  if KV_CACHE_TYPES.contains(&v) || is_custom_kv_cache_type(v) {
     Ok(v.to_string())
   } else {
     Err(CliExit::new(
       USAGE,
       format!(
-        "{flag}: expected one of {}, got {v:?}",
+        "{flag}: {v:?} is not a recognized cache type; known types: {}. \
+         Custom types from a modified llama-server build must start with a \
+         letter and contain only letters, digits, and underscores \
+         (e.g. fp4, turbo_quant).",
         KV_CACHE_TYPES.join(", ")
       ),
     ))
+  }
+}
+
+/// Returns `true` when `s` looks like a cache-type identifier a custom
+/// `llama-server` build might define — starts with an ASCII letter and
+/// contains only ASCII letters, digits, and underscores. This lets
+/// non-standard types (e.g. `fp4`, `turbo_quant`) clear the CLI / TUI
+/// gate so `llama-server` itself is the authority on whether the type is
+/// actually supported, rather than llamastash rejecting it up front.
+pub fn is_custom_kv_cache_type(s: &str) -> bool {
+  let mut chars = s.chars();
+  match chars.next() {
+    Some(first) if first.is_ascii_alphabetic() => {
+      chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    }
+    _ => false,
   }
 }
 
@@ -512,15 +534,49 @@ mod tests {
 
   #[test]
   fn cache_type_k_validates_set() {
-    let (knobs, _) = parse_tail_args(&osvec(&["--cache-type-k", "q8_0"])).unwrap();
-    assert_eq!(
-      knobs.cache_type_k.set_value().map(String::as_str),
-      Some("q8_0")
-    );
-    let err = parse_tail_args(&osvec(&["--cache-type-k", "q9_0"])).unwrap_err();
+    // Every standard llama-server type, plus custom identifiers from
+    // modified builds, parse through to the typed slot unchanged.
+    for t in [
+      "f32",
+      "f16",
+      "bf16",
+      "q8_0",
+      "q4_0",
+      "q4_1",
+      "iq4_nl",
+      "q5_0",
+      "q5_1",
+      "fp4",
+      "turbo_quant",
+      "myfmt0",
+    ] {
+      let (parsed, _) = parse_tail_args(&osvec(&["--cache-type-k", t])).expect(t);
+      assert_eq!(parsed.cache_type_k.set_value().map(String::as_str), Some(t));
+    }
+    // Identifiers that can't name a type (leading digit, embedded space)
+    // are still rejected with a USAGE error that lists the known set.
+    let err = parse_tail_args(&osvec(&["--cache-type-k", "4bad"])).unwrap_err();
     assert_eq!(err.code, USAGE);
-    let msg = err.to_string();
-    assert!(msg.contains("f16, q8_0, q4_0"), "{msg}");
+    assert!(err.to_string().contains("f16, bf16, q8_0"), "{err}");
+    assert_eq!(
+      parse_tail_args(&osvec(&["--cache-type-k", "bad type"]))
+        .unwrap_err()
+        .code,
+      USAGE
+    );
+  }
+
+  #[test]
+  fn is_custom_kv_cache_type_accepts_quant_ids_and_rejects_garbage() {
+    // Permissive on purpose: anything that could name a quant type passes
+    // so llama-server stays the authority. The gate only rejects what
+    // could not be a single identifier token.
+    for ok in ["fp4", "turbo_quant", "q4_0", "iq4_nl", "a", "FP8"] {
+      assert!(is_custom_kv_cache_type(ok), "should accept {ok:?}");
+    }
+    for bad in ["", "4bad", "_lead", "has space", "dash-no"] {
+      assert!(!is_custom_kv_cache_type(bad), "should reject {bad:?}");
+    }
   }
 
   #[test]

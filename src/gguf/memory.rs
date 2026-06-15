@@ -14,49 +14,64 @@
 use crate::gguf::header::{GgufHeader, GgufValue};
 use crate::gguf::metadata::Quant;
 
-/// What KV cache dtype `llama-server` is launched with. Default f16.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(non_camel_case_types)]
-pub enum CacheType {
-  F32,
-  #[default]
-  F16,
-  BF16,
-  Q8_0,
-  Q5_1,
-  Q5_0,
-  Q4_1,
-  Q4_0,
+/// Generate the [`CacheType`] enum, its name parser, its byte-cost
+/// table, and the [`KV_CACHE_TYPES`] name list from one row-per-type
+/// table so the launch-time validation surface and the KV memory
+/// estimator can never disagree on which types are standard.
+macro_rules! cache_types {
+  ( default = $default:ident, $( $variant:ident => $name:literal : $bytes:expr ),+ $(,)? ) => {
+    /// What KV cache dtype `llama-server` is launched with. Default f16.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[allow(non_camel_case_types)]
+    pub enum CacheType { $( $variant, )+ }
+
+    impl Default for CacheType {
+      fn default() -> Self { CacheType::$default }
+    }
+
+    impl CacheType {
+      /// Bytes per stored KV element under this cache dtype.
+      pub fn bytes_per_elem(&self) -> f64 {
+        match self { $( CacheType::$variant => $bytes, )+ }
+      }
+
+      /// Parse a `--cache-type-k/v` value (case-insensitive) into a
+      /// known [`CacheType`]; `None` for anything outside the standard
+      /// set, including build-specific custom types.
+      pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+          $( $name => Some(CacheType::$variant), )+
+          _ => None,
+        }
+      }
+    }
+
+    /// Standard llama-server cache types accepted by `--cache-type-k/v`
+    /// and cycled in the TUI launch picker. Re-exported as
+    /// `crate::launch::flag_aliases::KV_CACHE_TYPES`. Values outside this
+    /// list still pass validation when they look like a custom quant
+    /// identifier (see `crate::cli::tail_args::is_custom_kv_cache_type`),
+    /// so modified llama-server builds are not blocked at this layer.
+    pub const KV_CACHE_TYPES: &[&str] = &[ $( $name, )+ ];
+  };
 }
 
-impl CacheType {
-  /// Bytes per stored KV element under this cache dtype.
-  pub fn bytes_per_elem(&self) -> f64 {
-    match self {
-      CacheType::F32 => 4.0,
-      CacheType::F16 | CacheType::BF16 => 2.0,
-      CacheType::Q8_0 => 34.0 / 32.0, // 1.0625
-      CacheType::Q5_1 => 24.0 / 32.0, // 0.75
-      CacheType::Q5_0 => 22.0 / 32.0, // 0.6875
-      CacheType::Q4_1 => 20.0 / 32.0, // 0.625
-      CacheType::Q4_0 => 18.0 / 32.0, // 0.5625
-    }
-  }
-
-  /// Parse the `--cache-type-k/v` flag value as llama-server accepts it.
-  pub fn parse(s: &str) -> Option<Self> {
-    Some(match s.to_ascii_lowercase().as_str() {
-      "f32" => CacheType::F32,
-      "f16" => CacheType::F16,
-      "bf16" => CacheType::BF16,
-      "q8_0" => CacheType::Q8_0,
-      "q5_1" => CacheType::Q5_1,
-      "q5_0" => CacheType::Q5_0,
-      "q4_1" => CacheType::Q4_1,
-      "q4_0" => CacheType::Q4_0,
-      _ => return None,
-    })
-  }
+// One row per type as `Variant => "flag-spelling" : bytes_per_element`,
+// in llama-server's own `--cache-type-k` listing order (verified against
+// b9245 `--help`). IQ4_NL shares Q4_0's 18-bytes-per-32-elements block
+// layout. Adding a type here updates the enum, the parser, the cost
+// table, and KV_CACHE_TYPES together.
+cache_types! {
+  default = F16,
+  F32    => "f32"    : 4.0,
+  F16    => "f16"    : 2.0,
+  BF16   => "bf16"   : 2.0,
+  Q8_0   => "q8_0"   : 34.0 / 32.0, // 1.0625
+  Q4_0   => "q4_0"   : 18.0 / 32.0, // 0.5625
+  Q4_1   => "q4_1"   : 20.0 / 32.0, // 0.625
+  IQ4_NL => "iq4_nl" : 18.0 / 32.0, // 0.5625
+  Q5_0   => "q5_0"   : 22.0 / 32.0, // 0.6875
+  Q5_1   => "q5_1"   : 24.0 / 32.0, // 0.75
 }
 
 /// Parse a `--cache-type-{k,v}` tag (`q8_0`, `f16`, …) into a
@@ -552,6 +567,27 @@ mod tests {
   fn cache_type_parse_accepts_lowercase_and_uppercase() {
     assert_eq!(CacheType::parse("Q8_0"), Some(CacheType::Q8_0));
     assert_eq!(CacheType::parse("f16"), Some(CacheType::F16));
+    // iq4_nl is part of the standard cycle set; it must estimate at
+    // Q4_0's cost, not silently fall back to f16.
+    assert_eq!(CacheType::parse("iq4_nl"), Some(CacheType::IQ4_NL));
+    assert_eq!(
+      CacheType::IQ4_NL.bytes_per_elem(),
+      CacheType::Q4_0.bytes_per_elem()
+    );
+    // Custom build types still fall through to the f16 default.
     assert_eq!(CacheType::parse("nonsense"), None);
+  }
+
+  #[test]
+  fn every_advertised_cache_type_has_a_cost() {
+    // KV_CACHE_TYPES and the cost table are generated from one macro
+    // table, so this just documents the contract: every advertised name
+    // round-trips through parse and has a real per-element cost.
+    assert!(!KV_CACHE_TYPES.is_empty());
+    for name in KV_CACHE_TYPES {
+      let ct =
+        CacheType::parse(name).unwrap_or_else(|| panic!("no CacheType for advertised {name}"));
+      assert!(ct.bytes_per_elem() > 0.0, "{name} has a non-positive cost");
+    }
   }
 }

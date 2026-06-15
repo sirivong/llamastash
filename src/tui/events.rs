@@ -442,6 +442,7 @@ fn open_focused_inline_edit(app: &mut App) {
 /// Commit the open inline edit. Returns true when a commit closed
 /// the editor — caller can then proceed to a `Submit` action.
 fn commit_inline_edit(app: &mut App) -> bool {
+  use crate::cli::tail_args::is_custom_kv_cache_type;
   use crate::launch::flag_aliases::{KnobField, KV_CACHE_TYPES, SPLIT_MODES};
   use crate::tui::launch_picker::PickerField;
   let Some(picker) = app.launch_picker.as_mut() else {
@@ -509,11 +510,14 @@ fn commit_inline_edit(app: &mut App) -> bool {
         Err(_) => Err("expected float".into()),
       },
       KnobField::CacheTypeK | KnobField::CacheTypeV => {
-        if KV_CACHE_TYPES.iter().any(|t| *t == buffer) {
+        if KV_CACHE_TYPES.iter().any(|t| *t == buffer) || is_custom_kv_cache_type(&buffer) {
           picker.set_user_str(k, Some(buffer.clone()));
           Ok(())
         } else {
-          Err(format!("expected one of {}", KV_CACHE_TYPES.join(", ")))
+          Err(format!(
+            "known types: {}; custom types must start with a letter and use only letters, digits, underscores",
+            KV_CACHE_TYPES.join(", ")
+          ))
         }
       }
       KnobField::SplitMode => {
