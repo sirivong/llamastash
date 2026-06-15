@@ -2209,17 +2209,19 @@ pub async fn run(
   terminal.draw(|f| crate::tui::render::render(f, &mut app))?;
 
   while let Some(evt) = events_rx.recv().await {
+    // Fold this event plus every other one already queued (a burst of
+    // stream deltas, refresh ticks) into a single batch, then draw at
+    // most once — see `drain_and_handle`.
+    let needs_redraw = drain_and_handle(&mut app, evt, &mut events_rx, &writer_tx);
+    if app.should_exit {
+      break;
+    }
     // Mirror the focused launch id to the logs poller so its next
-    // tick fetches the right buffer.
+    // tick fetches the right buffer (post-batch focus is the truth).
     *current_launch
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) =
       app.focused_managed().map(|m| m.launch_id.clone());
-
-    let needs_redraw = handle_event(&mut app, evt, &writer_tx);
-    if app.should_exit {
-      break;
-    }
     if needs_redraw {
       terminal.draw(|f| crate::tui::render::render(f, &mut app))?;
     }
@@ -2238,6 +2240,33 @@ pub async fn run(
   execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
   terminal.show_cursor()?;
   Ok(())
+}
+
+/// Handle `first`, then drain every event already queued behind it
+/// and fold them in, returning whether the batch warrants a redraw.
+///
+/// Coalescing is what keeps input responsive while a chat completion
+/// streams: `spawn_chat_stream` pushes one `Delta` per token, so a
+/// fast model floods the 256-slot channel. Drawing once per event
+/// would mean a queued scroll/keystroke waits behind the whole token
+/// backlog (each forcing a full re-render), which reads as sluggish
+/// or frozen scrolling mid-stream. Applying all ready events first,
+/// then drawing once, collapses the burst into a single frame and
+/// services the queued input in the same pass.
+fn drain_and_handle(
+  app: &mut App,
+  first: Event,
+  events_rx: &mut mpsc::Receiver<Event>,
+  writer_tx: &mpsc::Sender<WriterCmd>,
+) -> bool {
+  let mut needs_redraw = handle_event(app, first, writer_tx);
+  while !app.should_exit {
+    match events_rx.try_recv() {
+      Ok(evt) => needs_redraw |= handle_event(app, evt, writer_tx),
+      Err(_) => break,
+    }
+  }
+  needs_redraw
 }
 
 /// Dispatch one [`Event`] into the right subsystem handler.
@@ -5407,6 +5436,32 @@ mod tests {
     assert!(
       handle_event(&mut app, Event::Tick, &writer_tx),
       "Tick with a strip error must request a redraw so the linger window can elapse"
+    );
+  }
+
+  #[tokio::test]
+  async fn drain_and_handle_coalesces_queued_stream_deltas() {
+    // A streaming completion pushes one Delta per token. The run loop
+    // must fold the whole queued burst into a single batch — one
+    // redraw, all deltas applied — instead of a redraw per token.
+    // Otherwise a queued scroll/keystroke waits behind the backlog and
+    // scrolling reads as frozen mid-stream.
+    let mut app = App::new(Default::default());
+    app.chat.reset_for_send();
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    let (tx, mut rx) = mpsc::channel::<Event>(16);
+    for s in ["a", "b", "c"] {
+      tx.send(Event::ChatStream(ChatStreamMsg::Delta(s.into())))
+        .await
+        .unwrap();
+    }
+    drop(tx); // close so the drain stops once the queued burst is spent
+    let first = rx.recv().await.expect("first queued delta");
+    let needs_redraw = drain_and_handle(&mut app, first, &mut rx, &writer_tx);
+    assert!(needs_redraw, "a stream batch must request a redraw");
+    assert_eq!(
+      app.chat.response, "abc",
+      "every queued delta must be applied within the single coalesced batch"
     );
   }
 }
