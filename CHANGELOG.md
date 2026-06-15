@@ -7,6 +7,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 ### Added
 
 - Browser web UI through the proxy at `/ui` — opens the running model's stock llama.cpp UI on one port-stable origin, with a chooser when several run (and `/ui/switch` to re-pick) plus HTTP Basic auth (the proxy key as the password) for LAN access.
+- KV cache type validation now accepts llama-server's full standard set (`f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`) and passes through custom identifiers from modified builds (e.g. `fp4`, `turbo_quant`) instead of rejecting them, so `--cache-type-k` / `--cache-type-v` and the TUI cache-type row no longer block non-standard quant types. (#29)
 
 ### Changed
 
