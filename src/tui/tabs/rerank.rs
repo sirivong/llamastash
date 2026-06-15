@@ -1,6 +1,8 @@
 //! Rerank tab — call `/v1/rerank` with a query + candidate list
 //! and render ranked scores top-to-bottom.
 
+use std::cell::Cell;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -36,8 +38,10 @@ pub struct RerankTabState {
   pub candidate_buffer: crate::tui::input_field::InputField,
   pub field: RerankField,
   /// Top-of-viewport offset into the rendered output. Round-8: ↑/↓
-  /// in `Focus::RightPane` walk this — same shape as Chat / Embed.
-  pub scroll_offset: u16,
+  /// walk this — same shape as Chat / Embed. A cell so the renderer
+  /// can clamp it to the wrapped content height and write the clamp
+  /// back (see `input_pane::InputPaneOpts::scroll_offset`).
+  pub scroll_offset: Cell<u16>,
 }
 
 impl RerankTabState {
@@ -45,19 +49,24 @@ impl RerankTabState {
     self.ranked = ranked;
     self.last_error = None;
     self.busy = false;
-    self.scroll_offset = 0;
+    self.scroll_offset.set(0);
   }
 
   /// Scroll the output up one line (toward the top). `scroll_offset`
   /// is the top-of-viewport index, so up *decreases* it; clamps at 0.
   pub fn scroll_up(&mut self) {
-    self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    self
+      .scroll_offset
+      .set(self.scroll_offset.get().saturating_sub(1));
   }
 
   /// Scroll the output down one line (toward the end). Increases the
-  /// offset; the render clamps it to the wrapped content height.
+  /// offset; the render clamps it to the wrapped content height (and
+  /// writes the clamp back).
   pub fn scroll_down(&mut self) {
-    self.scroll_offset = self.scroll_offset.saturating_add(1);
+    self
+      .scroll_offset
+      .set(self.scroll_offset.get().saturating_add(1));
   }
 
   pub fn record_error(&mut self, msg: String) {
@@ -173,7 +182,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       body,
       status,
       bold_body: false,
-      scroll_offset: state.scroll_offset,
+      scroll_offset: &state.scroll_offset,
     },
     palette,
   );

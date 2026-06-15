@@ -7,6 +7,8 @@
 //! visually identical without the per-tab modules duplicating the
 //! layout math.
 
+use std::cell::Cell;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -37,9 +39,13 @@ pub struct InputPaneOpts<'a> {
   pub bold_body: bool,
   /// Top-of-viewport offset into `body`. 0 = pinned to the top;
   /// larger values reveal content further down (scroll toward the
-  /// end). The render clamps it to the wrapped content height so it
-  /// can't scroll past the last line into a blank pane.
-  pub scroll_offset: u16,
+  /// end). Passed as a cell so the render can clamp it to the wrapped
+  /// content height and *write the clamp back*: without that, holding
+  /// `↓` past the end (common while following a stream) inflates the
+  /// stored offset far beyond the content, and a later `↑` does
+  /// nothing until it drains back below the max — the pane reads as
+  /// frozen once the response stops growing.
+  pub scroll_offset: &'a Cell<u16>,
 }
 
 /// Render the input pane into `area`. Layout: `Length(3)` per
@@ -70,10 +76,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, opts: InputPaneOpts<'_>, palett
   }
   // Clamp the offset to the wrapped content height so scrolling past
   // the last line shows the tail pinned to the bottom, not a blank
-  // pane. `line_count` accounts for wrapping at the body width.
+  // pane. `line_count` accounts for wrapping at the body width. Write
+  // the clamped value back so an over-scroll can't inflate the stored
+  // offset (which would leave a later `↑` looking dead).
   let wrapped = body_widget.line_count(body_area.width) as u16;
   let max_offset = wrapped.saturating_sub(body_area.height);
-  let body_widget = body_widget.scroll((opts.scroll_offset.min(max_offset), 0));
+  let offset = opts.scroll_offset.get().min(max_offset);
+  opts.scroll_offset.set(offset);
+  let body_widget = body_widget.scroll((offset, 0));
   frame.render_widget(body_widget, body_area);
   frame.render_widget(Paragraph::new(opts.status), layout[status_idx]);
 }
@@ -126,7 +136,7 @@ mod tests {
     assert_eq!(text, "⇧+Enter:newline · Esc:clear");
   }
 
-  fn render_body_frame(body: Vec<Line<'static>>, scroll_offset: u16) -> String {
+  fn render_body_frame(body: Vec<Line<'static>>, scroll_offset: &Cell<u16>) -> String {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
@@ -168,7 +178,8 @@ mod tests {
     let body: Vec<Line<'static>> = (0..20)
       .map(|i| Line::from(Span::raw(format!("line {i}"))))
       .collect();
-    let frame = render_body_frame(body, 2);
+    let off = Cell::new(2);
+    let frame = render_body_frame(body, &off);
     // With offset 2 the first body row shown should be "line 2".
     assert!(
       frame.contains("line 2"),
@@ -183,15 +194,22 @@ mod tests {
   #[test]
   fn input_pane_clamps_scroll_offset_to_content_height() {
     // Over-scrolling past the last line must pin the tail to the
-    // bottom, not blank the pane. A short body with a huge offset
-    // clamps back to 0 so every line stays visible.
+    // bottom, not blank the pane — and the clamp must be written back
+    // so the stored offset can't inflate (which would leave a later
+    // `↑` looking dead until it drained off the excess).
     let body: Vec<Line<'static>> = (0..3)
       .map(|i| Line::from(Span::raw(format!("line {i}"))))
       .collect();
-    let frame = render_body_frame(body, 999);
+    let off = Cell::new(999);
+    let frame = render_body_frame(body, &off);
     assert!(
       frame.contains("line 0") && frame.contains("line 2"),
       "huge offset on a short body must clamp, keeping content visible: {frame}"
+    );
+    assert_eq!(
+      off.get(),
+      0,
+      "the clamp must be written back so the offset can't stay inflated"
     );
   }
 
