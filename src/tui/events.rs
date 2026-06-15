@@ -1031,6 +1031,20 @@ fn apply_arrow_in_pane(app: &mut App, dir: ArrowDir) {
         ArrowDir::Down => app.rerank.scroll_down(),
       },
     },
+    // Composer focuses: ↑/↓ scroll the tab's output viewport. The
+    // input field doesn't use arrows (no in-buffer cursor), so they
+    // scroll the response area while focus stays on the prompt — which
+    // is where the user sits right after asking a question. Rerank
+    // keeps ↑/↓ for its query/candidate field cycle, so it is not
+    // routed here (it scrolls via the right-pane focus instead).
+    Focus::ChatInput => match dir {
+      ArrowDir::Up => app.chat.scroll_up(),
+      ArrowDir::Down => app.chat.scroll_down(),
+    },
+    Focus::EmbedInput => match dir {
+      ArrowDir::Up => app.embed.scroll_up(),
+      ArrowDir::Down => app.embed.scroll_down(),
+    },
     _ => match dir {
       ArrowDir::Up => app.move_up(),
       ArrowDir::Down => app.move_down(),
@@ -2196,17 +2210,19 @@ pub async fn run(
   terminal.draw(|f| crate::tui::render::render(f, &mut app))?;
 
   while let Some(evt) = events_rx.recv().await {
+    // Fold this event plus every other one already queued (a burst of
+    // stream deltas, refresh ticks) into a single batch, then draw at
+    // most once — see `drain_and_handle`.
+    let needs_redraw = drain_and_handle(&mut app, evt, &mut events_rx, &writer_tx);
+    if app.should_exit {
+      break;
+    }
     // Mirror the focused launch id to the logs poller so its next
-    // tick fetches the right buffer.
+    // tick fetches the right buffer (post-batch focus is the truth).
     *current_launch
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) =
       app.focused_managed().map(|m| m.launch_id.clone());
-
-    let needs_redraw = handle_event(&mut app, evt, &writer_tx);
-    if app.should_exit {
-      break;
-    }
     if needs_redraw {
       terminal.draw(|f| crate::tui::render::render(f, &mut app))?;
     }
@@ -2225,6 +2241,33 @@ pub async fn run(
   execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
   terminal.show_cursor()?;
   Ok(())
+}
+
+/// Handle `first`, then drain every event already queued behind it
+/// and fold them in, returning whether the batch warrants a redraw.
+///
+/// Coalescing is what keeps input responsive while a chat completion
+/// streams: `spawn_chat_stream` pushes one `Delta` per token, so a
+/// fast model floods the 256-slot channel. Drawing once per event
+/// would mean a queued scroll/keystroke waits behind the whole token
+/// backlog (each forcing a full re-render), which reads as sluggish
+/// or frozen scrolling mid-stream. Applying all ready events first,
+/// then drawing once, collapses the burst into a single frame and
+/// services the queued input in the same pass.
+fn drain_and_handle(
+  app: &mut App,
+  first: Event,
+  events_rx: &mut mpsc::Receiver<Event>,
+  writer_tx: &mpsc::Sender<WriterCmd>,
+) -> bool {
+  let mut needs_redraw = handle_event(app, first, writer_tx);
+  while !app.should_exit {
+    match events_rx.try_recv() {
+      Ok(evt) => needs_redraw |= handle_event(app, evt, writer_tx),
+      Err(_) => break,
+    }
+  }
+  needs_redraw
 }
 
 /// Dispatch one [`Event`] into the right subsystem handler.
@@ -3113,6 +3156,54 @@ mod tests {
       }
       other => panic!("expected DeleteModel confirm, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn arrows_scroll_chat_output_while_composing() {
+    // Issue #31: in the chat tab the response wouldn't scroll with the
+    // arrow keys — ↑/↓ were unbound in the composer focus, so they
+    // never reached the chat viewport. They must scroll the output
+    // while focus stays on the prompt (where the user sits after
+    // sending), not move the model list.
+    let mut app = App::new(Default::default());
+    app.focus = Focus::ChatInput;
+    assert_eq!(app.chat.scroll_offset.get(), 0);
+    // `scroll_offset` is the top-of-viewport line: ↓ moves toward the
+    // end (increments), ↑ moves back toward the top (decrements). At
+    // the top (offset 0) ↑ is a no-op — it must not scroll the wrong
+    // way (the original bug pushed the offset *up* on ↑).
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+      app.chat.scroll_offset.get(),
+      0,
+      "Up at the top of the response must stay pinned, not scroll down"
+    );
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+      app.chat.scroll_offset.get(),
+      1,
+      "Down in the chat composer must scroll the response toward the end"
+    );
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+      app.chat.scroll_offset.get(),
+      0,
+      "Up must scroll the response back toward the top"
+    );
+    assert_eq!(
+      app.focus,
+      Focus::ChatInput,
+      "scrolling must not change focus"
+    );
+
+    // Embed composer scrolls its own output the same way.
+    app.focus = Focus::EmbedInput;
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+      app.embed.scroll_offset.get(),
+      1,
+      "Down in the embed composer must scroll its output toward the end"
+    );
   }
 
   #[test]
@@ -4958,21 +5049,23 @@ mod tests {
   fn arrow_keys_in_right_pane_scroll_chat_output() {
     // Round-8: Chat/Embed/Rerank output panes get arrow-key
     // scroll mirroring the Logs pane. Editing focus is not
-    // active, so ↑/↓ walk the response viewport.
+    // active, so ↑/↓ walk the response viewport. ↓ moves toward
+    // the end (offset increments), ↑ back toward the top.
     let mut app = App::new(Default::default());
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Chat;
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.chat.scroll_offset.get(), 1);
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.chat.scroll_offset.get(), 2);
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.chat.scroll_offset, 1);
+    assert_eq!(app.chat.scroll_offset.get(), 1);
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.chat.scroll_offset, 2);
-    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.chat.scroll_offset, 1);
-    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
-    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(
-      app.chat.scroll_offset, 0,
-      "Down past zero must clamp to 0, not underflow"
+      app.chat.scroll_offset.get(),
+      0,
+      "Up past zero must clamp to 0, not underflow"
     );
   }
 
@@ -4981,11 +5074,11 @@ mod tests {
     let mut app = App::new(Default::default());
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Embed;
-    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.embed.scroll_offset, 1);
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.embed.scroll_offset.get(), 1);
     app.right_tab = RightTab::Rerank;
-    pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.rerank.scroll_offset, 1);
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.rerank.scroll_offset.get(), 1);
   }
 
   #[test]
@@ -4993,9 +5086,9 @@ mod tests {
     // Sending a new prompt resets the viewport to the top so the
     // response streams from the beginning. Round-8 reset path.
     let mut app = App::new(Default::default());
-    app.chat.scroll_offset = 7;
+    app.chat.scroll_offset.set(7);
     app.chat.reset_for_send();
-    assert_eq!(app.chat.scroll_offset, 0);
+    assert_eq!(app.chat.scroll_offset.get(), 0);
   }
 
   #[test]
@@ -5359,6 +5452,32 @@ mod tests {
     assert!(
       handle_event(&mut app, Event::Tick, &writer_tx),
       "Tick with a strip error must request a redraw so the linger window can elapse"
+    );
+  }
+
+  #[tokio::test]
+  async fn drain_and_handle_coalesces_queued_stream_deltas() {
+    // A streaming completion pushes one Delta per token. The run loop
+    // must fold the whole queued burst into a single batch — one
+    // redraw, all deltas applied — instead of a redraw per token.
+    // Otherwise a queued scroll/keystroke waits behind the backlog and
+    // scrolling reads as frozen mid-stream.
+    let mut app = App::new(Default::default());
+    app.chat.reset_for_send();
+    let (writer_tx, _writer_rx) = fresh_writer_channel();
+    let (tx, mut rx) = mpsc::channel::<Event>(16);
+    for s in ["a", "b", "c"] {
+      tx.send(Event::ChatStream(ChatStreamMsg::Delta(s.into())))
+        .await
+        .unwrap();
+    }
+    drop(tx); // close so the drain stops once the queued burst is spent
+    let first = rx.recv().await.expect("first queued delta");
+    let needs_redraw = drain_and_handle(&mut app, first, &mut rx, &writer_tx);
+    assert!(needs_redraw, "a stream batch must request a redraw");
+    assert_eq!(
+      app.chat.response, "abc",
+      "every queued delta must be applied within the single coalesced batch"
     );
   }
 }

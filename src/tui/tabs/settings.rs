@@ -83,23 +83,24 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         )
         .into(),
       );
-      // Clamp scroll to the actual line count vs viewport height so a
-      // window resize doesn't leave the view blanked. The stored
+      // Clamp scroll to the actual rendered height vs the viewport so
+      // a window resize doesn't leave the view blanked. The stored
       // scroll is bumped freely by ↑/↓ event handlers — this is the
       // single point that ensures the rendered offset is in-bounds.
       // Write the clamped value back so over-scrolling past the
       // bottom doesn't inflate the stored offset (which would make a
       // subsequent ↑ press feel unresponsive until the offset
       // dropped back below `max_scroll`).
-      let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+      //
+      // Count *wrapped* rows, not logical lines: the trailing hint
+      // ("Press `e` … re-launch.") wraps on a narrow pane, so a
+      // logical-line clamp under-counts and leaves the tail unreachable
+      // — cut off at the bottom edge.
+      let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+      let max_scroll = (para.line_count(area.width) as u16).saturating_sub(area.height);
       let scroll = app.running_view_scroll.get().min(max_scroll);
       app.running_view_scroll.set(scroll);
-      frame.render_widget(
-        Paragraph::new(lines)
-          .scroll((scroll, 0))
-          .wrap(Wrap { trim: false }),
-        area,
-      );
+      frame.render_widget(para.scroll((scroll, 0)), area);
       return;
     }
   }

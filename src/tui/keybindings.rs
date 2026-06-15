@@ -792,6 +792,24 @@ fn build_default_bindings() -> Vec<Binding> {
     hint: "prev field", description: None,
     chords: [(KeyCode::Up, KeyModifiers::NONE, "↑", NO_CAT)],
   });
+  // ─── Scroll the Chat / Embed output from inside the composer. ───
+  // The prompt field doesn't consume ↑/↓ (no in-buffer cursor), so
+  // they scroll the response viewport while focus stays on the input
+  // — the state the user is in right after sending. Disjoint scope
+  // from the NAV MoveUp/MoveDown above keeps resolution clean.
+  // Rerank is excluded: its ↑/↓ drive the field cycle above. NO_CAT
+  // (hidden from the overlay) mirrors how Logs/Settings scroll: motion
+  // is listed once under the General section, not per pane.
+  v.extend_from_slice(&binds! {
+    action: Action::MoveUp, scopes: FocusSet::CHAT_INPUT.union(FocusSet::EMBED_INPUT),
+    hint: "scroll up", description: Some("scroll output up"),
+    chords: [(KeyCode::Up, KeyModifiers::NONE, "↑", NO_CAT)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::MoveDown, scopes: FocusSet::CHAT_INPUT.union(FocusSet::EMBED_INPUT),
+    hint: "scroll down", description: Some("scroll output down"),
+    chords: [(KeyCode::Down, KeyModifiers::NONE, "↓", NO_CAT)],
+  });
   // ─── HF dialog stage chords (display-only). ────────────────
   // The dialog's per-stage handler captures `o`/`n`/`p` directly; these
   // rows exist only so the help overlay can list them.
@@ -1107,6 +1125,9 @@ impl Action {
       // chip-rendering callers (right pane reads `app.right_tab`).
       (Action::MoveUp, Focus::RightPane) => Some("scroll up"),
       (Action::MoveDown, Focus::RightPane) => Some("scroll down"),
+      // In the Chat / Embed composers ↑/↓ scroll the output viewport.
+      (Action::MoveUp, Focus::ChatInput | Focus::EmbedInput) => Some("scroll up"),
+      (Action::MoveDown, Focus::ChatInput | Focus::EmbedInput) => Some("scroll down"),
       (Action::Cancel, Focus::HfDialog) => Some("close"),
       (Action::FocusList, Focus::RightPane) => Some("models list"),
       _ => None,
@@ -1576,6 +1597,34 @@ mod tests {
     assert_eq!(
       action_for(Focus::RerankInput, KeyCode::Up, KeyModifiers::NONE),
       Some(Action::PrevField),
+    );
+  }
+
+  #[test]
+  fn chat_embed_input_up_down_resolve_to_scroll() {
+    // Issue #31: ↑/↓ in the chat/embed composer must resolve to
+    // MoveUp/MoveDown so the output viewport scrolls. They were
+    // unbound in these focuses before, so nothing happened.
+    for focus in [Focus::ChatInput, Focus::EmbedInput] {
+      assert_eq!(
+        action_for(focus, KeyCode::Up, KeyModifiers::NONE),
+        Some(Action::MoveUp),
+        "{focus:?} ↑ must scroll output",
+      );
+      assert_eq!(
+        action_for(focus, KeyCode::Down, KeyModifiers::NONE),
+        Some(Action::MoveDown),
+        "{focus:?} ↓ must scroll output",
+      );
+    }
+    // Rerank keeps ↑/↓ for its field cycle — must not be repurposed.
+    assert_eq!(
+      action_for(Focus::RerankInput, KeyCode::Up, KeyModifiers::NONE),
+      Some(Action::PrevField),
+    );
+    assert_eq!(
+      action_for(Focus::RerankInput, KeyCode::Down, KeyModifiers::NONE),
+      Some(Action::NextField),
     );
   }
 

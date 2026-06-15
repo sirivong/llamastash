@@ -12,6 +12,8 @@
 //! viewport so the user can still see the final answer without
 //! scrolling past chain-of-thought spam (R32).
 
+use std::cell::Cell;
+
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -42,9 +44,11 @@ pub struct ChatTabState {
   /// Collapse `<think>` blocks. Drives the same toggle the plan
   /// calls out for reasoning-aware models.
   pub collapse_thinks: bool,
-  /// Top-of-viewport offset into the rendered response. 0 pins
-  /// to the top; ↑/↓ in `Focus::RightPane` walk this (round-8).
-  pub scroll_offset: u16,
+  /// Top-of-viewport offset into the rendered response. 0 pins to
+  /// the top; ↑/↓ walk this (round-8). A cell so the renderer can
+  /// clamp it to the wrapped content height and write the clamp back
+  /// (see `input_pane::InputPaneOpts::scroll_offset`).
+  pub scroll_offset: Cell<u16>,
 }
 
 impl ChatTabState {
@@ -67,18 +71,27 @@ impl ChatTabState {
     self.last_error = None;
     self.finish_reason = None;
     self.streaming = true;
-    self.scroll_offset = 0;
+    self.scroll_offset.set(0);
   }
 
-  /// Scroll the output viewport up by one line. Saturating add so
-  /// repeated presses past the top of the response don't overflow.
+  /// Scroll the output viewport up by one line — toward the top of
+  /// the response. `scroll_offset` is the top-of-viewport line index
+  /// (0 = pinned to the start), so scrolling up *decreases* it;
+  /// saturating so presses at the top clamp at 0.
   pub fn scroll_up(&mut self) {
-    self.scroll_offset = self.scroll_offset.saturating_add(1);
+    self
+      .scroll_offset
+      .set(self.scroll_offset.get().saturating_sub(1));
   }
 
-  /// Scroll the output viewport down by one line, clamping at 0.
+  /// Scroll the output viewport down by one line — toward the end of
+  /// the response. Increases `scroll_offset`; the render clamps it to
+  /// the wrapped content height (and writes the clamp back) so it
+  /// can't run past the last line.
   pub fn scroll_down(&mut self) {
-    self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    self
+      .scroll_offset
+      .set(self.scroll_offset.get().saturating_add(1));
   }
 }
 
@@ -130,7 +143,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       body,
       status,
       bold_body: state.streaming,
-      scroll_offset: state.scroll_offset,
+      scroll_offset: &state.scroll_offset,
     },
     palette,
   );
