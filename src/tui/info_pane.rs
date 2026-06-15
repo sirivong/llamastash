@@ -53,40 +53,57 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
 /// (R161) and the success/error palette signals liveness without
 /// forcing the user to read the endpoint.
 fn proxy_row<'a>(app: &'a App, palette: &'a Palette) -> Line<'a> {
-  let (body, body_style) = match app.daemon_info.proxy.as_ref() {
-    None => ("—".to_string(), palette.muted_style()),
+  let mut spans = vec![Span::styled(LABEL_PROXY, palette.label_style())];
+  match app.daemon_info.proxy.as_ref() {
+    None => spans.push(Span::styled("—", palette.muted_style())),
     Some(info) => {
       let listen = info.listen.as_deref().unwrap_or("");
       match info.status.as_str() {
         "listening" => {
-          // `<listen> (auth)? · ui <listen>/ui`. The `(auth)` flag sits
-          // right after the API endpoint so it reads as a listener
-          // property, not a UI one; keyless loopback renders unchanged.
-          let mut body = listen.to_string();
+          // `<listen> (auth)? · ui <listen>/ui`. The endpoints render in
+          // the success tone (live); the ` · ui ` label rides the row's
+          // label colour so `ui` reads as a sibling of `proxy`, not part
+          // of the API endpoint. The `(auth)` flag sits right after the
+          // API endpoint so it reads as a listener property, not a UI one.
+          let mut endpoint = listen.to_string();
           if info.auth.as_deref() == Some("enforced") {
-            body.push_str(" (auth)");
+            endpoint.push_str(" (auth)");
           }
-          body.push_str(&format!(" · ui {listen}/ui"));
-          (body, palette.success_style())
+          spans.push(Span::styled(endpoint, palette.success_style()));
+          spans.push(Span::styled(" · ui ", palette.label_style()));
+          spans.push(Span::styled(
+            format!("{listen}/ui"),
+            palette.success_style(),
+          ));
         }
-        "port_in_use" => (format!("port_in_use {listen}"), palette.error_style()),
+        "port_in_use" => {
+          spans.push(Span::styled(
+            format!("port_in_use {listen}"),
+            palette.error_style(),
+          ));
+        }
         "unbound" => {
           let cause = info.bind_error.as_deref().unwrap_or("bind failed");
-          (format!("unbound {listen} ({cause})"), palette.error_style())
+          spans.push(Span::styled(
+            format!("unbound {listen} ({cause})"),
+            palette.error_style(),
+          ));
         }
-        "refused_insecure" => (
-          format!("refused {listen} (no auth; set a key or --insecure-no-auth)"),
-          palette.error_style(),
-        ),
-        "disabled" => ("disabled".to_string(), palette.muted_style()),
-        other => (format!("{other} {listen}"), palette.muted_style()),
+        "refused_insecure" => {
+          spans.push(Span::styled(
+            format!("refused {listen} (no auth; set a key or --insecure-no-auth)"),
+            palette.error_style(),
+          ));
+        }
+        "disabled" => spans.push(Span::styled("disabled", palette.muted_style())),
+        other => spans.push(Span::styled(
+          format!("{other} {listen}"),
+          palette.muted_style(),
+        )),
       }
     }
-  };
-  Line::from(vec![
-    Span::styled(LABEL_PROXY, palette.label_style()),
-    Span::styled(body, body_style),
-  ])
+  }
+  Line::from(spans)
 }
 
 fn daemon_row<'a>(app: &'a App, _budget: usize, palette: &'a Palette) -> Line<'a> {
@@ -1220,6 +1237,44 @@ mod tests {
       proxy_row.contains("0.0.0.0:11434 (auth)") && proxy_row.contains("· ui"),
       "expected LAN listener with auth marker + ui segment: {proxy_row:?}"
     );
+  }
+
+  #[test]
+  fn proxy_row_ui_label_uses_proxy_label_colour() {
+    use crate::tui::app::ProxyInfo;
+    let mut app = App::new(AppOptions::default());
+    app.daemon_info = DaemonInfo {
+      proxy: Some(ProxyInfo {
+        enabled: true,
+        listen: Some("127.0.0.1:11435".into()),
+        status: "listening".into(),
+        bind_error: None,
+        auth: None,
+      }),
+      ..Default::default()
+    };
+    let palette = app.palette();
+    let line = proxy_row(&app, palette);
+    // The ` · ui ` segment carries the label colour (same as the `proxy`
+    // row label, the first span), not the success endpoint tone.
+    let ui_span = line
+      .spans
+      .iter()
+      .find(|s| s.content.as_ref() == " · ui ")
+      .expect("a ` · ui ` label span");
+    assert_eq!(
+      ui_span.style,
+      palette.label_style(),
+      "ui label must match the proxy label colour, not the endpoint tone"
+    );
+    // Sanity: the endpoint span is a different (success) tone, so this
+    // isn't trivially passing because every span shares one style.
+    let endpoint_span = line
+      .spans
+      .iter()
+      .find(|s| s.content.as_ref() == "127.0.0.1:11435")
+      .expect("an endpoint span");
+    assert_eq!(endpoint_span.style, palette.success_style());
   }
 
   #[test]
