@@ -18,6 +18,10 @@ comment:     /usr/bin/zsh -i --cast /tmp/ls-demo-out/demo.raw.cast --cols 131 --
 comment: Then trim idle gaps and render:
 comment:   scripts/tui/trim_cast.py demo.raw.cast assets/demo.cast --end <T>
 comment:   agg --font-size 16 assets/demo.cast assets/tui.gif
+comment: Stills + init.gif come from the same cast (see cast_frames.py):
+comment:   cast_frames.py frame assets/demo.cast 15.6 assets/tui_2.png
+comment:   cast_frames.py clip assets/demo.cast /tmp/init.cast --end 7.8
+comment:   agg --font-size 16 /tmp/init.cast assets/init.gif
 
 # ── let the shell paint its prompt, then start the wizard ──
 wait:2.5

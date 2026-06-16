@@ -85,6 +85,33 @@ skip load and quit:
 (launch → chat → HuggingFace pull → theme cycle). See its header comments for
 the capture command.
 
+### Reworking a recorded cast
+
+Two helpers consume a recorded cast (both handle v2 and v3):
+
+- **`trim_cast.py`** — even out timing: clamp idle gaps, rescale speed, hold a
+  payoff frame, drop a ragged tail. Used to turn the raw real-time capture into
+  the steady-cadence `assets/demo.cast`. See its `--help`.
+- **`cast_frames.py`** — pull the README image assets out of one cast:
+
+  ```bash
+  # find the cast time of a moment (dashboard, chat reply, a theme, the finale)
+  python3 scripts/tui/cast_frames.py timeline assets/demo.cast --step 1.0
+
+  # extract that frame to a PNG, exactly as painted at that time
+  python3 scripts/tui/cast_frames.py frame assets/demo.cast 15.6 assets/tui_2.png
+
+  # carve a shorter sub-cast (e.g. just the init wizard) and render it
+  python3 scripts/tui/cast_frames.py clip assets/demo.cast /tmp/init.cast --end 7.8
+  agg --font-size 16 /tmp/init.cast assets/init.gif
+  ```
+
+  `timeline` needs `pyte`; `frame` also shells out to `agg` + ImageMagick
+  (`magick`). It renders at `--font-size 16` by default so stills line up with
+  `assets/tui.gif`. `frame` is deterministic — it clips `0..T`, renders, and
+  coalesces the GIF's last frame, so there is no GIF-time-vs-cast-time seek
+  guessing.
+
 [asciinema]: https://asciinema.org/
 
 ### Program steps
