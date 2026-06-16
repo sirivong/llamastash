@@ -32,7 +32,10 @@ fn unique_temp(label: &str) -> PathBuf {
 }
 
 async fn wait_for_socket(path: &Path) {
-  let deadline = std::time::Instant::now() + Duration::from_secs(3);
+  // 30 s, not 3 s: the daemon's first bind can lag on loaded CI runners
+  // (slow Windows / macOS, larger `uat`-featured binaries) — matches the
+  // bump in `cli_integration_test.rs::wait_for_socket`.
+  let deadline = std::time::Instant::now() + Duration::from_secs(30);
   loop {
     if std::time::Instant::now() > deadline {
       panic!("daemon socket never appeared: {}", path.display());
