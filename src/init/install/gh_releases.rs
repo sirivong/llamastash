@@ -101,6 +101,25 @@ pub fn pick_asset_suffix(hw: &HardwareSnapshot) -> Option<String> {
     (GpuInfo::Nvidia { .. }, OsFamily::Windows) => Some(format!("win-cuda-*-{arch_suffix}.zip")),
     (GpuInfo::Unknown { .. }, OsFamily::Windows) => Some(format!("win-vulkan-{arch_suffix}.zip")),
     (GpuInfo::CpuOnly, OsFamily::Windows) => Some(format!("win-cpu-{arch_suffix}.zip")),
+    // Multi-GPU hosts — and, crucially, single cards that both the DXGI
+    // and Vulkan probes detect: `gpu::probe` counts devices before its
+    // cross-probe dedup, so one physical GPU seen twice tips `total` past
+    // the single-device fast-paths and surfaces as `Multi`. That makes
+    // this arm the common case on any Windows box whose driver ships
+    // `vulkaninfo.exe`, not just true multi-card rigs. Pick the build
+    // that covers the strongest device present: CUDA when any NVIDIA card
+    // is in the set (Windows only — Linux has no CUDA prebuilt per the
+    // Unit 1 spike), else Vulkan, which runs on every GPU llama.cpp
+    // targets. (macOS `Multi` already resolves via the `OsFamily::MacOs`
+    // catch-all above; `OsFamily::Other` via the top arm.)
+    (GpuInfo::Multi { devices }, OsFamily::Windows) => {
+      if devices.iter().any(|d| d.backend == "nvidia") {
+        Some(format!("win-cuda-*-{arch_suffix}.zip"))
+      } else {
+        Some(format!("win-vulkan-{arch_suffix}.zip"))
+      }
+    }
+    (GpuInfo::Multi { .. }, OsFamily::Linux) => Some(format!("ubuntu-vulkan-{arch_suffix}.tar.gz")),
     _ => None,
   }
 }
@@ -417,6 +436,53 @@ mod tests {
       suffix
     ));
     assert!(!asset_matches("llama-b9219-bin-ubuntu-x64.tar.gz", suffix));
+  }
+
+  fn dev(backend: &str) -> GpuDevice {
+    GpuDevice {
+      name: "card".into(),
+      backend: backend.into(),
+      total_memory_bytes: 8 * 1024 * 1024 * 1024,
+      used_memory_bytes: 0,
+      utilization_pct: None,
+      temperature_c: None,
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn windows_single_gpu_double_detected_picks_vulkan() {
+    // Regression for the v0.0.4 Windows `init` failure: a single AMD/Intel
+    // APU is found by BOTH the DXGI probe (→ amd device) and the Vulkan
+    // fallback (→ unknown device). `gpu::probe` counts devices before its
+    // dedup, so it surfaces `GpuInfo::Multi` for what is one physical card.
+    // pick_asset_suffix must resolve the universal Vulkan build instead of
+    // returning None → NoMatchingAsset.
+    let gpu = GpuInfo::Multi {
+      devices: vec![dev("amd"), dev("unknown")],
+    };
+    let s = pick_asset_suffix(&hw(gpu, OsFamily::Windows, CpuArch::X86_64)).unwrap();
+    assert_eq!(s, "win-vulkan-x64.zip");
+  }
+
+  #[test]
+  fn windows_multi_gpu_with_nvidia_prefers_cuda() {
+    let gpu = GpuInfo::Multi {
+      devices: vec![dev("nvidia"), dev("unknown")],
+    };
+    let s = pick_asset_suffix(&hw(gpu, OsFamily::Windows, CpuArch::X86_64)).unwrap();
+    assert_eq!(s, "win-cuda-*-x64.zip");
+  }
+
+  #[test]
+  fn linux_multi_gpu_picks_vulkan() {
+    // No CUDA prebuilt on Linux (Unit 1 spike), so even an NVIDIA-bearing
+    // multi-GPU set routes to the universal Vulkan tarball.
+    let gpu = GpuInfo::Multi {
+      devices: vec![dev("nvidia"), dev("unknown")],
+    };
+    let s = pick_asset_suffix(&hw(gpu, OsFamily::Linux, CpuArch::X86_64)).unwrap();
+    assert_eq!(s, "ubuntu-vulkan-x64.tar.gz");
   }
 
   #[test]

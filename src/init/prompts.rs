@@ -488,7 +488,7 @@ pub async fn pick_install_method(
     // non-TTY warning before the first picker runs.
     return Ok(default);
   }
-  let (initial_idx, items) = build_install_items(&default, existing);
+  let (initial_idx, items) = build_install_items(&default, existing, brew_offer_available());
   let items_for_thread = items.clone();
   let chosen_idx = tokio::task::spawn_blocking(move || {
     let mut select = cliclack::select::<usize>("Install method").initial_value(initial_idx);
@@ -783,6 +783,15 @@ fn install_override_to_choice(
   }
 }
 
+/// Whether the Homebrew install option should be offered in the
+/// interactive picker. Homebrew only exists on macOS/Linux, so it's
+/// never offered on Windows; on macOS/Linux it's offered only when
+/// `brew` is actually resolvable on PATH (a `which` lookup) so the
+/// wizard never lists a method the host can't run.
+fn brew_offer_available() -> bool {
+  !cfg!(target_os = "windows") && which::which("brew").is_ok()
+}
+
 /// Build the cliclack-select items list for the install prompt and
 /// pick which index should be the initial cursor position. Returns
 /// `(initial_index, items)` where each item is
@@ -791,22 +800,29 @@ fn install_override_to_choice(
 /// "Custom path…" sentinel lets users adopt a self-built or otherwise-
 /// installed `llama-server` interactively (mirrors the `--install
 /// custom:PATH` CLI override).
+///
+/// `brew_available` gates the Homebrew item: Homebrew is a macOS/Linux
+/// package manager, so we never list it on Windows, and even on
+/// macOS/Linux we only offer it when `brew` is actually on PATH —
+/// listing an install method the host can't run would just dead-end the
+/// wizard. Compute it via [`brew_offer_available`] at the call site.
 fn build_install_items(
   default: &InstallChoice,
   existing: &BinaryPresence,
+  brew_available: bool,
 ) -> (usize, Vec<(InstallPick, String, String)>) {
-  let mut items: Vec<(InstallPick, String, String)> = vec![
-    (
-      InstallPick::Resolved(InstallChoice::GhReleases),
-      "GitHub Releases".into(),
-      "verified asset for this host".into(),
-    ),
-    (
+  let mut items: Vec<(InstallPick, String, String)> = vec![(
+    InstallPick::Resolved(InstallChoice::GhReleases),
+    "GitHub Releases".into(),
+    "verified asset for this host".into(),
+  )];
+  if brew_available {
+    items.push((
       InstallPick::Resolved(InstallChoice::Brew),
       "Homebrew".into(),
       "brew install --quiet llama.cpp".into(),
-    ),
-  ];
+    ));
+  }
   if let Some(path) = &existing.resolved_path {
     items.push((
       InstallPick::Resolved(InstallChoice::CustomPath(path.clone())),
@@ -1275,7 +1291,7 @@ mod tests {
 
   #[test]
   fn build_install_items_always_includes_custom_path_sentinel() {
-    let (_, items) = build_install_items(&InstallChoice::GhReleases, &no_existing_binary());
+    let (_, items) = build_install_items(&InstallChoice::GhReleases, &no_existing_binary(), true);
     let last = items.last().expect("items must not be empty");
     assert!(
       matches!(last.0, InstallPick::PromptCustomPath),
@@ -1290,6 +1306,7 @@ mod tests {
     let (_, items) = build_install_items(
       &InstallChoice::GhReleases,
       &existing_binary("/opt/llama-server"),
+      true,
     );
     let last = items.last().expect("items must not be empty");
     assert!(
@@ -1301,6 +1318,47 @@ mod tests {
       matches!(p, InstallPick::Resolved(InstallChoice::CustomPath(path)) if path == &PathBuf::from("/opt/llama-server"))
     });
     assert!(has_existing, "detected-binary pick must still be offered");
+  }
+
+  fn has_brew_item(items: &[(InstallPick, String, String)]) -> bool {
+    items
+      .iter()
+      .any(|(p, _, _)| matches!(p, InstallPick::Resolved(InstallChoice::Brew)))
+  }
+
+  #[test]
+  fn build_install_items_includes_homebrew_when_brew_available() {
+    let (_, items) = build_install_items(&InstallChoice::GhReleases, &no_existing_binary(), true);
+    assert!(
+      has_brew_item(&items),
+      "Homebrew must be offered when brew is available"
+    );
+  }
+
+  #[test]
+  fn build_install_items_omits_homebrew_when_brew_unavailable() {
+    let (_, items) = build_install_items(&InstallChoice::GhReleases, &no_existing_binary(), false);
+    assert!(
+      !has_brew_item(&items),
+      "Homebrew must not be offered when brew is unavailable (e.g. Windows, or brew not on PATH)"
+    );
+    // GH Releases + the Custom path… sentinel still stand.
+    assert!(items
+      .iter()
+      .any(|(p, _, _)| matches!(p, InstallPick::Resolved(InstallChoice::GhReleases))));
+    assert!(matches!(
+      items.last().expect("items must not be empty").0,
+      InstallPick::PromptCustomPath
+    ));
+  }
+
+  #[cfg(target_os = "windows")]
+  #[test]
+  fn brew_offer_unavailable_on_windows() {
+    assert!(
+      !brew_offer_available(),
+      "Homebrew is macOS/Linux-only and must never be offered on Windows"
+    );
   }
 
   #[tokio::test]

@@ -4,6 +4,12 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows `init` no longer aborts with "no GH Releases asset matches this hardware" on single-GPU machines. A lone AMD/NVIDIA card that both the DXGI and Vulkan probes detect was double-counted and reported as `gpu_backend: multi`, which had no install route. The probe now collapses the cross-probe duplicate before classifying, so a single card reports its vendor (e.g. `amd`); the GH Releases router also handles genuine multi-GPU hosts (CUDA when any NVIDIA card is present, else the universal Vulkan build).
+- TUI host pane VRAM gauge no longer understates a Windows UMA APU's pool. The reachable ceiling is now `min(pool_total, ram_total − non-GPU RAM use)` for both Linux `amdgpu` (GTT) and Windows DXGI UMA: it shows the full pool when RAM is free (matching `doctor` / `llama-server --list-devices`, e.g. `0.0/64G` instead of the old drifting `0.0/42G`) and only clamps toward free-RAM headroom under memory pressure. On Linux (pool ≈ total RAM) this is identical to the previous behavior.
+- `init`'s interactive install picker no longer offers Homebrew on Windows, and on macOS/Linux offers it only when `brew` is actually on `PATH`. Previously the menu listed Homebrew unconditionally, dead-ending Windows users (and anyone without Homebrew) on a method their host can't run.
+
 ## [0.0.4] — 2026-06-16
 
 ### Added

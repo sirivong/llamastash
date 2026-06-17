@@ -158,6 +158,8 @@ pub fn is_sampled(snap: &HostMetricsSnapshot) -> bool {
 /// its 0.75 headroom.
 pub fn effective_free_bytes(snap: &HostMetricsSnapshot) -> u64 {
   let ram_free = snap.ram_total_bytes.saturating_sub(snap.ram_used_bytes);
+  // Apple is unified by construction (the `|| apple_metal` just guards
+  // it); the host-pane VRAM gauge keys off the same `unified` flag.
   let unified = snap.unified || snap.gpu_backend == HostMetricsSnapshot::BACKEND_APPLE_METAL;
   if unified {
     let pool_free = match snap.uma_shared_total_bytes {
