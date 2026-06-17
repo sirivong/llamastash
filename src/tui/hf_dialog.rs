@@ -851,11 +851,16 @@ fn render_search_row(
     HfSortKey::Trending => "★ trending".into(),
   };
   let tag = r.pipeline_tag.clone().unwrap_or_else(|| "—".to_string());
+  let size = r
+    .download_size_bytes()
+    .map(crate::tui::fmt::format_bytes)
+    .unwrap_or_else(|| "—".to_string());
   Line::from(vec![
     Span::styled(prefix.to_string(), style),
-    Span::styled(format!("{:<48}  ", truncate(&r.repo_id, 48)), style),
+    Span::styled(format!("{:<40}  ", truncate(&r.repo_id, 40)), style),
+    Span::styled(format!("{size:>6}  "), style),
     Span::styled(
-      format!("{:<22}  ", truncate(&tag, 22)),
+      format!("{:<18}  ", truncate(&tag, 18)),
       palette.muted_style(),
     ),
     Span::styled(metric, palette.label_style()),
@@ -1141,7 +1146,33 @@ mod tests {
       last_modified: Some("2026-04-18T12:00:00Z".into()),
       pipeline_tag: Some("text-generation".into()),
       tags: vec!["gguf".into()],
+      gguf: Some(crate::init::hf_api::HfGgufMeta {
+        total_file_size: Some(5_732_991_008),
+      }),
     }
+  }
+
+  #[test]
+  fn search_row_renders_download_size_and_placeholder() {
+    let palette = crate::theme::palette_for(crate::theme::ThemeName::Macchiato);
+    let mut r = fake_result("owner/Some-Model-GGUF");
+    // 5_732_991_008 bytes → format_bytes → "5.3G".
+    let line = render_search_row(0, false, HfSortKey::Downloads, &r, palette);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.contains("owner/Some-Model-GGUF"), "repo id missing: {text}");
+    assert!(text.contains("5.3G"), "download-size column missing: {text}");
+    // No gguf block → placeholder, not a panic.
+    r.gguf = None;
+    let placeholder_line = render_search_row(0, false, HfSortKey::Downloads, &r, palette);
+    let placeholder_text: String = placeholder_line
+      .spans
+      .iter()
+      .map(|s| s.content.as_ref())
+      .collect();
+    assert!(
+      placeholder_text.contains('—'),
+      "missing-size placeholder absent: {placeholder_text}"
+    );
   }
 
   #[test]

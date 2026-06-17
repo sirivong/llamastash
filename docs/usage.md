@@ -804,7 +804,7 @@ When enabled, left-click moves focus and the wheel replays the `↑`/`↓` actio
 
 ### HuggingFace pull dialog (`Focus::HfDialog`, `Shift+P` from the Models list)
 
-Three-stage modal: **Search → File picker → Confirm**. Search runs live against the public `/api/models` endpoint (300 ms debounce); paste an `owner/repo[:filename]` slug + Enter to bypass search.
+Three-stage modal: **Search → File picker → Confirm**. Search runs live against the public `/api/models` endpoint (300 ms debounce); paste an `owner/repo[:filename]` slug + Enter to bypass search. Each search row shows the repo's approximate download size (the representative GGUF file HF parsed, e.g. `5.3G`); the exact per-quant size lands in the File picker.
 
 | Key                         | Action                                                                                                                                                                                                   |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

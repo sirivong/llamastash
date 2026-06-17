@@ -166,7 +166,7 @@ places.
 ## R5 (v0.0.5 checklist)
 
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
-- [ ] Add model size to HF downloader Search results page
+- [x] Add model size to HF downloader Search results page (approx download size from `gguf.totalFileSize`, single search call)
 - [ ] Add ability to search for model during init flow. How can we best represent this in UI. Lets do a small brainstorm. Maybe we customize the model selection select view with a custom component or something that letys the userr either pick from given option or type a model ID in or search for model by name and pick from search results (limited number shown in the UI)
 - [x] Windows: why is homebrew showing up as install option in Init flow in windows
 - [x] **Flaky CI test failures — harness hardening (migrated to cargo-nextest, 2026-06-17).** Original off-Linux root cause was thread oversubscription against fixed wall-clock deadlines: ~10 integration binaries each boot a full daemon (control plane + proxy listener + supervised tasks) and several booting at once on a 3-4 core macOS/Windows runner starved a listener past its readiness deadline. **Correction:** the bind-drop-rebind port race (sub-item below) also bit **Linux** (PR #40 CI, `src/daemon/orphans.rs` `AddrInUse`), so the flake class was never Windows/macOS-only. **Resolved:** the CI `test` matrix now runs `cargo nextest run --profile ci`; the `daemon-bound` test-group (`.config/nextest.toml`) caps daemon-spawning concurrency globally (replacing the `--test-threads=2` band-aid) and `retries = 2` absorbs residual environmental flake. Sub-items:

@@ -60,6 +60,32 @@ pub struct HfSearchResult {
   pub pipeline_tag: Option<String>,
   #[serde(default)]
   pub tags: Vec<String>,
+  /// GGUF metadata block (present only with `expand[]=gguf`). Carries
+  /// the representative GGUF file's byte size, which the search row
+  /// renders as the model's approximate download size.
+  #[serde(default)]
+  pub gguf: Option<HfGgufMeta>,
+}
+
+impl HfSearchResult {
+  /// Approximate download size (bytes) for the repo, when the `gguf`
+  /// expand surfaced it. This is the size of the single representative
+  /// GGUF file HF parsed for the repo — not the sum of every quant —
+  /// so it's a ballpark for the search row; the file picker shows the
+  /// exact per-quant size once the user drills in.
+  pub fn download_size_bytes(&self) -> Option<u64> {
+    self.gguf.as_ref().and_then(|g| g.total_file_size)
+  }
+}
+
+/// GGUF metadata returned under `expand[]=gguf`. Only `totalFileSize`
+/// (the representative GGUF file's byte size) is consumed; the block
+/// also carries the parameter count, architecture, context length, and
+/// a chat template that `serde` ignores.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HfGgufMeta {
+  #[serde(default, rename = "totalFileSize")]
+  pub total_file_size: Option<u64>,
 }
 
 /// Sort key for the search endpoint. Maps to HF Hub's API query
@@ -180,6 +206,20 @@ fn build_search_url(
     pairs.append_pair("filter", "gguf");
     pairs.append_pair("sort", sort.as_query_token());
     pairs.append_pair("limit", &SEARCH_LIMIT.to_string());
+    // `expand[]` narrows the payload to *only* the listed fields, so
+    // every column the dialog renders must be requested explicitly —
+    // `gguf` adds the parameter count, the rest just preserve the
+    // default fields the bare endpoint would have returned.
+    for field in [
+      "gguf",
+      "downloads",
+      "likes",
+      "lastModified",
+      "pipeline_tag",
+      "tags",
+    ] {
+      pairs.append_pair("expand[]", field);
+    }
     if let Some(c) = cursor {
       pairs.append_pair("cursor", c);
     }
@@ -385,7 +425,8 @@ mod tests {
         "likes": 4321,
         "lastModified": "2026-04-18T12:34:56.000Z",
         "pipeline_tag": "text-generation",
-        "tags": ["gguf", "qwen", "coder"]
+        "tags": ["gguf", "qwen", "coder"],
+        "gguf": { "total": 8030261248, "totalFileSize": 5732991008, "architecture": "qwen2" }
       },
       {
         "id": "TheBloke/Qwen-7B-Chat-GGUF",
@@ -400,7 +441,10 @@ mod tests {
     assert_eq!(results[0].repo_id, "Qwen/Qwen2.5-7B-Instruct-GGUF");
     assert_eq!(results[0].downloads, Some(1234567));
     assert_eq!(results[0].pipeline_tag.as_deref(), Some("text-generation"));
+    assert_eq!(results[0].download_size_bytes(), Some(5732991008));
     assert!(results[1].pipeline_tag.is_none());
+    // No `gguf` block → no size, not a deserialise failure.
+    assert_eq!(results[1].download_size_bytes(), None);
   }
 
   #[test]
@@ -596,6 +640,12 @@ mod tests {
       assert!(q.contains("search=qwen"), "{sort:?} must carry search: {q}");
       assert!(q.contains("filter=gguf"), "{sort:?} must carry filter: {q}");
       assert!(q.contains(&format!("sort={}", sort.as_query_token())));
+      // `expand[]` brackets are percent-encoded by `append_pair`; the
+      // gguf expand is what brings the parameter count into the row.
+      assert!(
+        q.contains("expand%5B%5D=gguf"),
+        "{sort:?} must request the gguf expand: {q}"
+      );
     }
   }
 

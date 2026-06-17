@@ -4,6 +4,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- HuggingFace pull dialog search rows now show each repo's approximate download size (e.g. `5.3G`), fetched in the same search request.
+
 ### Fixed
 
 - Windows `init` no longer aborts with "no GH Releases asset matches this hardware" on single-GPU machines. A lone AMD/NVIDIA card that both the DXGI and Vulkan probes detect was double-counted and reported as `gpu_backend: multi`, which had no install route. The probe now collapses the cross-probe duplicate before classifying, so a single card reports its vendor (e.g. `amd`); the GH Releases router also handles genuine multi-GPU hosts (CUDA when any NVIDIA card is present, else the universal Vulkan build).
