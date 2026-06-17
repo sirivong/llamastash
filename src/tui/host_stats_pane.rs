@@ -30,7 +30,6 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::daemon::host_metrics::HostMetricsSnapshot;
-use crate::gpu::ClassSource;
 use crate::theme::Palette;
 use crate::tui::fmt::format_bytes_pair;
 
@@ -228,16 +227,18 @@ fn gpu_device_rows<'a>(
 /// `min` keeps the gauge at the full pool until RAM genuinely fills.
 /// Clamped to `>= used` so the gauge never reads over 100%.
 ///
-/// Discrete cards (separate pool) and OS-managed Apple unified memory
-/// (no `uma_class_source`) keep `used / total`.
+/// Discrete cards keep `used / total`. Unified-memory hosts (Apple, AMD
+/// GTT, Windows DXGI — gated on `HostMetricsSnapshot::unified`, the same
+/// flag `launch::admission` uses) share one pool with the CPU, so the
+/// reachable ceiling is `min(pool_total, ram_total − non-GPU RAM use)`:
+/// the full pool when RAM is free, dropping toward free-RAM headroom under
+/// pressure. Clamped `>= used` so the bar never exceeds 100%.
 fn vram_denominator(host: &HostMetricsSnapshot, used: u64, total: u64) -> u64 {
-  let ram_shared_uma = matches!(
-    host.uma_class_source,
-    Some(ClassSource::CarveSignature) | Some(ClassSource::ExplicitDxgiUma)
-  );
-  if !ram_shared_uma {
+  if !host.unified {
     return total;
   }
+  // Add the GPU's own shared bytes back before subtracting: sysinfo folds
+  // them into ram_used, so otherwise they'd be discounted twice.
   let gpu_in_shared = host.uma_shared_used_bytes.unwrap_or(used);
   let other_ram = host.ram_used_bytes.saturating_sub(gpu_in_shared);
   let reachable = host.ram_total_bytes.saturating_sub(other_ram);
@@ -432,6 +433,7 @@ fn temp_spans<'a>(temp: f32, palette: &'a Palette) -> Vec<Span<'a>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::gpu::ClassSource;
   use crate::tui::app::{App, AppOptions};
   use ratatui::backend::TestBackend;
   use ratatui::Terminal;
@@ -848,6 +850,24 @@ mod tests {
       vram_row.contains("14/24G"),
       "discrete VRAM gauge stays used / total, got: {vram_row:?}"
     );
+  }
+
+  #[test]
+  fn vram_denominator_clamps_apple_unified_by_free_ram() {
+    // Apple shares one pool with the CPU, so the gauge clamps to the
+    // reachable ceiling like AMD GTT / Windows DXGI (matching admission),
+    // not the raw working-set total. used 8, total 48, 40 of 64 GiB RAM
+    // used → min(48, (64−40)+8) = 32.
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let snap = HostMetricsSnapshot {
+      ram_used_bytes: 40 * GIB,
+      ram_total_bytes: 64 * GIB,
+      gpu_backend: HostMetricsSnapshot::BACKEND_APPLE_METAL.into(),
+      unified: true,
+      uma_class_source: Some(ClassSource::AppleUnified),
+      ..Default::default()
+    };
+    assert_eq!(vram_denominator(&snap, 8 * GIB, 48 * GIB), 32 * GIB);
   }
 
   #[test]

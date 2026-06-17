@@ -170,6 +170,7 @@ places.
 - [ ] Add size to HF downloader Search results page
 - [ ] Add ability to search for model during init flow
 - [x] Windows: why is homebrew showing up as install option in Init flow in windows
+- [ ] Validate `gpu::is_cross_probe_duplicate` name-matching on more GPUs (the no-lspci/Windows path leans on `normalize_card_name`, so DXGI-vs-Vulkan names that diverge before the first `(` won't dedup → phantom `Multi`; confirmed only on one APU). See `src/gpu/mod.rs::is_cross_probe_duplicate`.
 - [ ] Publish to Clawhub/Hermes/etc
 - [ ] Publish to https://www.skills.sh/
 - [ ] Manual UAT smoke run

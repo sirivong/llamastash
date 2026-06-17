@@ -514,6 +514,23 @@ fn normalize_card_name(name: &str) -> String {
     .to_lowercase()
 }
 
+/// True when `candidate` (a Vulkan-fallback device) is the same physical
+/// card a native probe already reported — matched by PCI id, else by
+/// normalized name. The name fallback is coarse: with no PCI id (Windows
+/// DXGI carries none, and there's no `lspci`) names that don't normalize
+/// alike won't dedup, leaving a phantom `Multi` entry. See TODO.
+fn is_cross_probe_duplicate(
+  candidate: &GpuDevice,
+  natives: &[&GpuDevice],
+  lspci: &Option<LspciMaps>,
+) -> bool {
+  let id = resolve_device_id(candidate, lspci);
+  let norm = normalize_card_name(&candidate.name);
+  natives
+    .iter()
+    .any(|seen| resolve_device_id(seen, lspci) == id || normalize_card_name(&seen.name) == norm)
+}
+
 /// Enrich a list of devices with lspci PCI address lookups.
 ///
 /// For devices whose `device_id` is missing or looks like a
@@ -591,32 +608,29 @@ pub fn probe() -> GpuInfo {
     return GpuInfo::CpuOnly;
   }
 
-  // Resolve canonical PCI ids and collapse cross-probe duplicates BEFORE
-  // counting devices. The Vulkan probe is a last-resort "is there any
-  // GPU?" fallback; when it re-detects a card a native/DXGI probe already
-  // found, that duplicate must be dropped here — not after the
-  // single-vs-multi decision below — or one physical GPU is counted
-  // twice and mislabelled `Multi`. That double-count is the norm on
-  // Windows, where the GPU driver ships `vulkaninfo.exe` next to the
-  // DXGI adapter (and on any Linux box carrying both a vendor tool and
-  // `vulkaninfo`). Dedup is by canonical PCI address where available,
-  // else by normalized card name (see `resolve_device_id` /
-  // `normalize_card_name`).
-  let lspci = query_lspci();
-  enrich_with_lspci(&mut nvidia_devices, &lspci);
-  enrich_with_lspci(&mut amd_devices, &lspci);
-  enrich_with_lspci(&mut metal_devices, &lspci);
-  enrich_with_lspci(&mut unknown_devices, &lspci);
-  unknown_devices.retain(|d| {
-    let id = resolve_device_id(d, &lspci);
-    let norm = normalize_card_name(&d.name);
-    let native_dup = nvidia_devices
+  // Collapse cross-probe duplicates BEFORE counting: the Vulkan fallback
+  // re-detects cards a native/DXGI probe already found (the norm on
+  // Windows), and counting one card twice mislabels it `Multi`. Skip the
+  // work — and the `lspci` subprocess — for a lone card, which hits a
+  // single-device variant below that never reads `device_id`.
+  let raw_total =
+    nvidia_devices.len() + amd_devices.len() + metal_devices.len() + unknown_devices.len();
+  let lspci = if raw_total > 1 {
+    let maps = query_lspci();
+    enrich_with_lspci(&mut nvidia_devices, &maps);
+    enrich_with_lspci(&mut amd_devices, &maps);
+    enrich_with_lspci(&mut metal_devices, &maps);
+    enrich_with_lspci(&mut unknown_devices, &maps);
+    let natives: Vec<&GpuDevice> = nvidia_devices
       .iter()
       .chain(amd_devices.iter())
       .chain(metal_devices.iter())
-      .any(|seen| resolve_device_id(seen, &lspci) == id || normalize_card_name(&seen.name) == norm);
-    !native_dup
-  });
+      .collect();
+    unknown_devices.retain(|d| !is_cross_probe_duplicate(d, &natives, &maps));
+    maps
+  } else {
+    None
+  };
 
   // Count devices across all backends (post-dedup).
   let total =
@@ -855,6 +869,41 @@ mod tests {
       normalize_card_name("NVIDIA GeForce RTX 3080"),
       normalize_card_name("AMD Radeon AI PRO R9700"),
     );
+  }
+
+  fn named_device(name: &str, backend: &str) -> GpuDevice {
+    GpuDevice {
+      name: name.into(),
+      backend: backend.into(),
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn cross_probe_duplicate_collapses_driver_tagged_vulkan_name() {
+    // Same card, bare native name vs "(RADV …)"-tagged Vulkan name, no
+    // PCI id (the Windows case) — must still collapse via the name path.
+    let native = named_device("AMD Radeon AI PRO R9700", "amd");
+    let vulkan = named_device("AMD Radeon AI PRO R9700 (RADV GFX1201)", "unknown");
+    assert!(is_cross_probe_duplicate(&vulkan, &[&native], &None));
+  }
+
+  #[test]
+  fn cross_probe_duplicate_keeps_genuinely_distinct_cards() {
+    let native = named_device("NVIDIA GeForce RTX 4090", "nvidia");
+    let vulkan = named_device("AMD Radeon RX 7900 XT (RADV NAVI31)", "unknown");
+    assert!(!is_cross_probe_duplicate(&vulkan, &[&native], &None));
+  }
+
+  #[test]
+  fn cross_probe_duplicate_name_mismatch_is_a_known_gap() {
+    // Known gap (see TODO): same card, but the names don't normalize alike
+    // (native drops the "AMD" prefix) and there's no PCI id, so it won't
+    // dedup. Characterization test — gh_releases' Multi route is what
+    // keeps init working when this fires.
+    let native = named_device("Radeon RX 7900 XT", "amd");
+    let vulkan = named_device("AMD Radeon RX 7900 XT (RADV NAVI31)", "unknown");
+    assert!(!is_cross_probe_duplicate(&vulkan, &[&native], &None));
   }
 
   #[test]
