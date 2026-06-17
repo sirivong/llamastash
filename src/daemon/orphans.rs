@@ -408,6 +408,11 @@ mod tests {
     }
   }
 
+  /// A loopback port that nothing is listening on: bind ephemeral, read
+  /// it, drop. Only for the "connection refused" probe case below — the
+  /// listening cases use `spawn_one_shot`, which keeps its port so there's
+  /// no reuse window. A rare post-drop reuse here is absorbed by nextest
+  /// `retries` on CI.
   fn allocate_port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     let p = l.local_addr().unwrap().port();
@@ -415,15 +420,21 @@ mod tests {
     p
   }
 
-  /// Spin up a tiny single-shot HTTP responder on `port` returning
-  /// the supplied (status, body) pair to one connection. Used by
-  /// the orphan probe tests so we don't need the full
-  /// `fake_llama_server` binary just to validate the matcher.
-  async fn spawn_one_shot(port: u16, status: u16, body: String) -> tokio::task::JoinHandle<()> {
-    let listener = TcpListener::bind(("127.0.0.1", port))
+  /// Spin up a tiny single-shot HTTP responder on an OS-assigned loopback
+  /// port, returning `(task, port)`. Binding the port here and holding it —
+  /// rather than taking a pre-picked number — closes the bind-drop-rebind
+  /// race that panicked CI with `AddrInUse` (the port could be reused
+  /// between a separate allocate and this bind). Used by the orphan probe
+  /// tests so we don't need the full `fake_llama_server` binary.
+  async fn spawn_one_shot(status: u16, body: String) -> (tokio::task::JoinHandle<()>, u16) {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
       .await
       .expect("bind probe responder");
-    tokio::spawn(async move {
+    let port = listener
+      .local_addr()
+      .expect("probe responder local_addr")
+      .port();
+    let task = tokio::spawn(async move {
       if let Ok((mut sock, _)) = listener.accept().await {
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
@@ -440,7 +451,8 @@ mod tests {
         let _ = sock.write_all(body.as_bytes()).await;
         let _ = sock.shutdown().await;
       }
-    })
+    });
+    (task, port)
   }
 
   #[test]
@@ -574,13 +586,12 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn live_pid_with_matching_port_and_model_path_adopts() {
     let live = std::process::id() as i32;
-    let port = allocate_port();
     let body = serde_json::json!({
       "object": "list",
       "data": [{"id": "/m/match.gguf", "object": "model"}],
     })
     .to_string();
-    let _resp = spawn_one_shot(port, 200, body).await;
+    let (_resp, port) = spawn_one_shot(200, body).await;
 
     let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
     let report = sweep(SweepInputs {
@@ -600,13 +611,12 @@ mod tests {
     // builds echoed). The recorded path is absolute; the sweep must
     // still adopt when the basenames line up.
     let live = std::process::id() as i32;
-    let port = allocate_port();
     let body = serde_json::json!({
       "object": "list",
       "data": [{"id": "match.gguf", "object": "model"}],
     })
     .to_string();
-    let _resp = spawn_one_shot(port, 200, body).await;
+    let (_resp, port) = spawn_one_shot(200, body).await;
 
     let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
     let report = sweep(SweepInputs {
@@ -630,13 +640,12 @@ mod tests {
     // bind a stale `state.json::running` entry to an unrelated
     // process. Three-factor confirmation rejects it.
     let live = std::process::id() as i32;
-    let port = allocate_port();
     let body = serde_json::json!({
       "object": "list",
       "data": [{"id": "/m/different.gguf", "object": "model"}],
     })
     .to_string();
-    let _resp = spawn_one_shot(port, 200, body).await;
+    let (_resp, port) = spawn_one_shot(200, body).await;
 
     let recorded = vec![fake_snapshot(live, port, "/m/expected.gguf", 1)];
     let report = sweep(SweepInputs {

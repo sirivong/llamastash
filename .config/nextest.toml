@@ -1,0 +1,34 @@
+# nextest config. `.github/workflows/ci.yml` runs the `ci` profile; the
+# default profile keeps local `cargo nextest run` fast.
+#
+# The daemon/proxy integration tests each boot a full daemon (control
+# plane + proxy listener + supervised tasks). Several booting at once
+# oversubscribe a 3-4 core CI runner and starve a listener past its
+# readiness deadline -- the off-Linux flake. libtest's per-binary
+# `--test-threads` can't bound concurrency across binaries; nextest's
+# global scheduler + a test-group can.
+
+# Bound how many daemon-spawning tests run at once across the WHOLE run
+# (not per-binary), so several daemons never boot together on a few-core
+# runner. Assigned to the matching binaries via the override below.
+[test-groups]
+daemon-bound = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(/^(proxy_|daemon_|control_plane|supervisor_|start_model|lemonade_|tui_|init_orchestration|list_models|cli_integration|uat_lifecycle)/)'
+test-group = 'daemon-bound'
+
+[profile.ci]
+# Retry environmental flake (a port-reuse race, a slow-runner deadline
+# miss) instead of failing the run; a real logic bug fails every attempt.
+retries = 2
+fail-fast = false
+# Flag slow tests and terminate a genuinely hung one rather than waiting
+# out the job timeout.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Profile overrides don't inherit the default profile's, so repeat the
+# daemon-bound assignment here for the CI profile.
+[[profile.ci.overrides]]
+filter = 'binary(/^(proxy_|daemon_|control_plane|supervisor_|start_model|lemonade_|tui_|init_orchestration|list_models|cli_integration|uat_lifecycle)/)'
+test-group = 'daemon-bound'
