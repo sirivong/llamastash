@@ -6,7 +6,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Added
 
-- HuggingFace pull dialog search rows now show `params` (model size, e.g. `35B`) and `size` (approximate download size, e.g. `5.3G`) columns, fetched in the same search request. Sort (`o`) now also cycles through File size and Params (reordering the current page).
+- HuggingFace pull dialog search rows now show `params` (model size, e.g. `35B`) and `size` (approximate download size, e.g. `5.3G`) columns, fetched in the same search request. Sort (`o`) now also cycles through File size, Params, and Repo name (reordering the current page).
 
 ### Fixed
 

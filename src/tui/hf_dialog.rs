@@ -447,20 +447,27 @@ impl HfDialogState {
     self.sort_results_in_place();
   }
 
-  /// Reorder the fetched page for the client-side sorts (file size /
-  /// param size, descending). The HF API can't sort by either, so the
-  /// page arrives in `downloads` order and we reorder it here. Rows
-  /// missing the `gguf` value sort to the bottom. No-op for the
-  /// server-side sorts, which already arrive ordered.
+  /// Reorder the fetched page for the client-side sorts. The HF API
+  /// can't sort by these, so the page arrives in `downloads` order and
+  /// we reorder it here: file size / param size descending (rows
+  /// missing the `gguf` value sink to the bottom), repo name
+  /// case-insensitive ascending. No-op for the server-side sorts,
+  /// which already arrive ordered.
   fn sort_results_in_place(&mut self) {
-    let key = match self.sort {
+    let size_key = match self.sort {
       HfSortKey::FileSize => HfSearchResult::download_size_bytes,
       HfSortKey::ParamSize => HfSearchResult::param_count,
+      HfSortKey::RepoName => {
+        self
+          .results
+          .sort_by(|a, b| a.repo_id.to_lowercase().cmp(&b.repo_id.to_lowercase()));
+        return;
+      }
       _ => return,
     };
     self
       .results
-      .sort_by(|a, b| key(b).unwrap_or(0).cmp(&key(a).unwrap_or(0)));
+      .sort_by(|a, b| size_key(b).unwrap_or(0).cmp(&size_key(a).unwrap_or(0)));
   }
 
   /// Apply a SearchFailed event. Same stale-drop rule as
@@ -732,6 +739,7 @@ fn render_header(
     HfSortKey::Trending => "★ trending",
     HfSortKey::FileSize => "▾ file size (this page)",
     HfSortKey::ParamSize => "▾ params (this page)",
+    HfSortKey::RepoName => "▴ repo name (this page)",
   };
   let label_style = palette.label_style();
   let value_style = palette.text_style();
@@ -861,10 +869,12 @@ fn render_search_row(
   // sorted value, so the metric falls back to downloads as a
   // popularity hint.
   let metric = match sort {
-    HfSortKey::Downloads | HfSortKey::FileSize | HfSortKey::ParamSize => match r.downloads {
-      Some(n) => format!("↓ {}", short_count(n)),
-      None => "↓ —".into(),
-    },
+    HfSortKey::Downloads | HfSortKey::FileSize | HfSortKey::ParamSize | HfSortKey::RepoName => {
+      match r.downloads {
+        Some(n) => format!("↓ {}", short_count(n)),
+        None => "↓ —".into(),
+      }
+    }
     HfSortKey::Likes => match r.likes {
       Some(n) => format!("♡ {n}"),
       None => "♡ —".into(),
@@ -904,20 +914,20 @@ fn render_search_row(
 fn render_search_header(sort: HfSortKey, palette: &Palette) -> Line<'static> {
   let label = palette.label_style();
   let active = palette.accent_style();
-  let params_style = if sort == HfSortKey::ParamSize {
-    active
-  } else {
-    label
-  };
-  let size_style = if sort == HfSortKey::FileSize {
-    active
-  } else {
-    label
-  };
+  let col_style = |on: bool| if on { active } else { label };
   Line::from(vec![
-    Span::styled(format!("  {:<36}  ", "repo"), label),
-    Span::styled(format!("{:>6}  ", "params"), params_style),
-    Span::styled(format!("{:>6}  ", "size"), size_style),
+    Span::styled(
+      format!("  {:<36}  ", "repo"),
+      col_style(sort == HfSortKey::RepoName),
+    ),
+    Span::styled(
+      format!("{:>6}  ", "params"),
+      col_style(sort == HfSortKey::ParamSize),
+    ),
+    Span::styled(
+      format!("{:>6}  ", "size"),
+      col_style(sort == HfSortKey::FileSize),
+    ),
     Span::styled(format!("{:<16}  ", "task"), label),
   ])
 }
@@ -1332,10 +1342,10 @@ mod tests {
   }
 
   #[test]
-  fn cycle_sort_walks_all_six_back_to_downloads() {
+  fn cycle_sort_walks_all_seven_back_to_downloads() {
     let mut s = HfDialogState::open(false, HardwareFitContext::default());
     let start = s.sort;
-    for _ in 0..6 {
+    for _ in 0..7 {
       s.cycle_sort();
     }
     assert_eq!(s.sort, start);
@@ -1371,13 +1381,19 @@ mod tests {
     assert_eq!(order, ["b/big", "c/mid", "a/small"], "file-size desc");
 
     s.sort = HfSortKey::ParamSize;
-    s.apply_search_results(s.last_dispatched_seq, page);
+    s.apply_search_results(s.last_dispatched_seq, page.clone());
     let param_order: Vec<&str> = s.results.iter().map(|r| r.repo_id.as_str()).collect();
     assert_eq!(
       param_order,
       ["b/big", "c/mid", "a/small"],
       "param-size desc"
     );
+
+    // Repo name sorts case-insensitive ascending.
+    s.sort = HfSortKey::RepoName;
+    s.apply_search_results(s.last_dispatched_seq, page);
+    let name_order: Vec<&str> = s.results.iter().map(|r| r.repo_id.as_str()).collect();
+    assert_eq!(name_order, ["a/small", "b/big", "c/mid"], "repo name A→Z");
   }
 
   #[test]

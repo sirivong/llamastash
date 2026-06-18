@@ -119,9 +119,9 @@ pub fn format_param_count(n: u64) -> String {
 /// Sort key for the search results. `Downloads` / `Likes` /
 /// `RecentlyUpdated` / `Trending` map to HF Hub API query tokens
 /// (server-side, globally ordered + paginated). `FileSize` / `ParamSize`
-/// have no HF sort token — the API rejects `sort=totalFileSize` — so
-/// they're applied client-side, reordering the fetched page by the
-/// `gguf` size fields (see `HfDialogState::sort_results_in_place`).
+/// / `RepoName` have no HF sort token — the API rejects e.g.
+/// `sort=totalFileSize` — so they're applied client-side, reordering
+/// the fetched page (see `HfDialogState::sort_results_in_place`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HfSortKey {
   Downloads,
@@ -130,6 +130,7 @@ pub enum HfSortKey {
   Trending,
   FileSize,
   ParamSize,
+  RepoName,
 }
 
 impl HfSortKey {
@@ -145,7 +146,9 @@ impl HfSortKey {
   /// `downloads` page and reorder it locally.
   pub fn as_query_token(self) -> &'static str {
     match self {
-      HfSortKey::Downloads | HfSortKey::FileSize | HfSortKey::ParamSize => "downloads",
+      HfSortKey::Downloads | HfSortKey::FileSize | HfSortKey::ParamSize | HfSortKey::RepoName => {
+        "downloads"
+      }
       HfSortKey::Likes => "likes",
       HfSortKey::RecentlyUpdated => "lastModified",
       HfSortKey::Trending => "trendingScore",
@@ -155,11 +158,14 @@ impl HfSortKey {
   /// `true` for sorts the HF API can't do, which the dialog applies in
   /// memory over the fetched page.
   pub fn is_client_sort(self) -> bool {
-    matches!(self, HfSortKey::FileSize | HfSortKey::ParamSize)
+    matches!(
+      self,
+      HfSortKey::FileSize | HfSortKey::ParamSize | HfSortKey::RepoName
+    )
   }
 
   /// Cycle order: Downloads → Likes → RecentlyUpdated → Trending →
-  /// FileSize → ParamSize → Downloads.
+  /// FileSize → ParamSize → RepoName → Downloads.
   pub fn cycle_next(self) -> Self {
     match self {
       HfSortKey::Downloads => HfSortKey::Likes,
@@ -167,7 +173,8 @@ impl HfSortKey {
       HfSortKey::RecentlyUpdated => HfSortKey::Trending,
       HfSortKey::Trending => HfSortKey::FileSize,
       HfSortKey::FileSize => HfSortKey::ParamSize,
-      HfSortKey::ParamSize => HfSortKey::Downloads,
+      HfSortKey::ParamSize => HfSortKey::RepoName,
+      HfSortKey::RepoName => HfSortKey::Downloads,
     }
   }
 }
@@ -451,17 +458,19 @@ mod tests {
     // page and reorder it locally.
     assert_eq!(HfSortKey::FileSize.as_query_token(), "downloads");
     assert_eq!(HfSortKey::ParamSize.as_query_token(), "downloads");
+    assert_eq!(HfSortKey::RepoName.as_query_token(), "downloads");
     assert!(HfSortKey::FileSize.is_client_sort());
     assert!(HfSortKey::ParamSize.is_client_sort());
+    assert!(HfSortKey::RepoName.is_client_sort());
     assert!(!HfSortKey::Downloads.is_client_sort());
     assert!(!HfSortKey::Trending.is_client_sort());
   }
 
   #[test]
-  fn sort_key_cycles_through_all_six() {
+  fn sort_key_cycles_through_all_seven() {
     let start = HfSortKey::Downloads;
     let mut cur = start;
-    for _ in 0..6 {
+    for _ in 0..7 {
       cur = cur.cycle_next();
     }
     assert_eq!(cur, start);
