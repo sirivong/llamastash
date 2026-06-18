@@ -166,7 +166,7 @@ places.
 ## R5 (v0.0.5 checklist)
 
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
-- [ ] why not pick last available upstream? `• [snapshot_stale] benchmark snapshot was bundled 21 days ago — the daily CI refresh has not landed; recommender picks may be stale → fix with: (no action — daily CI refresh will heal automatically; re-run `llamastash doctor` later)`
+- [x] why not pick last available upstream? `• [snapshot_stale] benchmark snapshot was bundled 21 days ago — the daily CI refresh has not landed; recommender picks may be stale → fix with: (no action — daily CI refresh will heal automatically; re-run `llamastash doctor` later)`
 - [x] TUI: for multi gpu, dont show a row for each. instead show combined usage and hottest temp in a single gpu row. when multi gpu, show GPU* with legend entry in help
 - [x] Validate `gpu::is_cross_probe_duplicate` name-matching on more GPUs — closed: `normalize_card_name` now strips a leading vendor token (rocm-smi `Radeon …` vs Vulkan `AMD Radeon …`), and the pure `resolve_devices` core is table-tested across every backend combo (`src/gpu/mod.rs` tests). The PCI-id path (vendor:device parsing) was the actual Strix Halo dedup miss and is fixed + regression-tested.
 - [x] Add model size to HF downloader Search results page (`params` + approx download `size` columns from `gguf.total` / `gguf.totalFileSize`, single search call; sort cycles to File size / Params client-side)

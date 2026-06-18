@@ -138,6 +138,13 @@ pub struct InitSummary {
   /// finding — never emitted in `init --json`.
   #[serde(skip)]
   pub remote_snapshot_attempt: Option<bool>,
+  /// `bundle_date` of the snapshot actually used by the models step
+  /// (fresh remote when fetched, else bundled). Consumed only by
+  /// `persist_init_snapshot` so doctor's `SnapshotStale` finding
+  /// reflects the effective snapshot, not the binary's bundled date —
+  /// never emitted in `init --json`.
+  #[serde(skip)]
+  pub snapshot_bundle_date: Option<String>,
 }
 
 impl Default for InitSummary {
@@ -156,6 +163,7 @@ impl Default for InitSummary {
       offline: false,
       recommendations: Vec::new(),
       remote_snapshot_attempt: None,
+      snapshot_bundle_date: None,
     }
   }
 }
@@ -357,6 +365,7 @@ pub async fn run(args: InitArgs, cli: &Cli, config: &Config) -> CliResult {
     summary.steps_ran.push("models");
     let outcome = run_models_step(&args, &fetch, &hardware).await?;
     summary.remote_snapshot_attempt = outcome.remote_snapshot_attempt;
+    summary.snapshot_bundle_date = outcome.snapshot_bundle_date;
     summary.recommendations = outcome.recommendations;
     Some(outcome.model)
   } else {
@@ -749,6 +758,11 @@ struct ModelsStepResult {
   /// auto-selected or download was skipped.
   recommendations: Vec<Recommendation>,
   remote_snapshot_attempt: Option<bool>,
+  /// `bundle_date` of the snapshot actually *in effect* this run — the
+  /// fresh remote when the fetch succeeded, else the bundled one. This
+  /// (not the bundled date) is what `persist_init_snapshot` records, so
+  /// doctor's `SnapshotStale` finding reflects what the recommender used.
+  snapshot_bundle_date: Option<String>,
 }
 
 async fn run_models_step(
@@ -793,6 +807,11 @@ async fn run_models_step(
       }
     }
   };
+  // The date of the snapshot actually in effect (fresh remote or bundled)
+  // — recorded so doctor judges staleness against what the recommender
+  // used, not the binary's bundled date.
+  let effective_snapshot_date =
+    (!snapshot.bundle_date.is_empty()).then(|| snapshot.bundle_date.clone());
   let on_disk: Vec<OnDiskModel> = Vec::new();
   let recs = recommend(&snapshot, hardware, &on_disk, &RecommendOptions::default());
   log::debug!(
@@ -814,6 +833,7 @@ async fn run_models_step(
       },
       recommendations: recs,
       remote_snapshot_attempt,
+      snapshot_bundle_date: effective_snapshot_date.clone(),
     });
   }
   let choice = prompts::pick_model(args, fetch, &recs).await?;
@@ -858,6 +878,7 @@ async fn run_models_step(
         },
         recommendations: recs,
         remote_snapshot_attempt,
+        snapshot_bundle_date: effective_snapshot_date.clone(),
       });
     }
   };
@@ -910,6 +931,7 @@ async fn run_models_step(
     },
     recommendations: recs,
     remote_snapshot_attempt,
+    snapshot_bundle_date: effective_snapshot_date,
   })
 }
 
@@ -1422,11 +1444,16 @@ fn persist_init_snapshot(
     None => {}
   }
   // Record the bundle date of the snapshot in effect this run so
-  // doctor's `SnapshotStale` finding has a baseline. Best-effort —
-  // a successful remote fetch updates this to the fresher date.
-  let bundled = crate::init::benchmark::load_bundled();
-  if !bundled.bundle_date.is_empty() {
-    snap.snapshot_bundle_date = Some(bundled.bundle_date);
+  // doctor's `SnapshotStale` finding has a baseline — the fresh remote
+  // date when the models step fetched one, else the bundled date. (The
+  // models step carries the effective date through `summary`; falling
+  // back to bundled covers a run that skipped the models step.)
+  let effective_date = summary.snapshot_bundle_date.clone().or_else(|| {
+    let bundled = crate::init::benchmark::load_bundled();
+    (!bundled.bundle_date.is_empty()).then_some(bundled.bundle_date)
+  });
+  if let Some(date) = effective_date {
+    snap.snapshot_bundle_date = Some(date);
   }
   if let Some(ref cfg) = summary.config {
     let mut merged: Vec<ManagedKey> = cfg.managed_records.clone();

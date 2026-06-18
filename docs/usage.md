@@ -696,7 +696,7 @@ Non-interactive contract: when stdout isn't a terminal and `--recommended` is no
 
 ### `llamastash doctor`
 
-Read-only diagnostic. Re-runs hardware detection, diffs against `_init_snapshot.json`, and emits 0-8 findings with stable ids agents can branch on: `binary_missing`, `binary_digest_drift` (skipped on brew installs — routine `brew upgrade` legitimately rotates the digest), `hardware_drift`, `memory_drift`, `gtt_hint`, `snapshot_stale`, `config_mode_drift`, `remote_snapshot_unreachable`.
+Read-only diagnostic (its one write is the memory-drift baseline refresh). Re-runs hardware detection, diffs against `_init_snapshot.json`, and emits 0-8 findings with stable ids agents can branch on: `binary_missing`, `binary_digest_drift` (skipped on brew installs — routine `brew upgrade` legitimately rotates the digest), `hardware_drift`, `memory_drift`, `gtt_hint`, `snapshot_stale`, `config_mode_drift`, `remote_snapshot_unreachable`. When the local benchmark snapshot looks stale, `doctor` probes the latest remote (the same one the recommender prefers) before judging `snapshot_stale`, so it only fires when no fresher snapshot is actually reachable; `LLAMASTASH_OFFLINE` skips that probe.
 
 ```
 llamastash doctor [--json]

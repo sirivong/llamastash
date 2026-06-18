@@ -90,8 +90,11 @@ impl FindingId {
       Self::GttHint => {
         "(optional — raise `amdgpu.gttsize` / `ttm.pages_limit` to let llama-server use more system RAM; see docs/troubleshooting.md)"
       }
-      Self::SnapshotStale | Self::RemoteSnapshotUnreachable => {
-        "(no action — daily CI refresh will heal automatically; re-run `llamastash doctor` later)"
+      Self::SnapshotStale => {
+        "run `llamastash recommend` (or `init`) to pull the latest snapshot — the recommender prefers it over the bundled one; upgrade for a fresher bundled snapshot"
+      }
+      Self::RemoteSnapshotUnreachable => {
+        "the remote snapshot fetch keeps failing — check network / egress; the recommender falls back to the bundled snapshot until it recovers"
       }
       Self::ConfigModeDrift => "llamastash init --only config",
     }
@@ -404,6 +407,59 @@ fn check_gtt_hint(hardware: &HardwareSnapshot) -> Option<Finding> {
 
 use crate::init::detection::fmt_gib;
 
+/// Freshen the persisted snapshot's `bundle_date` against the latest
+/// available remote so the staleness check reflects what the recommender
+/// would actually use, not the binary's bundled date. The recommender
+/// already prefers a verified-fresher remote (`benchmark::load_remote`);
+/// doctor must too or it cries wolf about a snapshot the picks don't even
+/// use. In-memory only — doctor's sole persisted write stays the memory
+/// baseline. Skips the network entirely when the local snapshot is
+/// already fresh, or when offline (`LLAMASTASH_OFFLINE`).
+async fn freshen_snapshot_date(snapshot: Option<InitSnapshot>) -> Option<InitSnapshot> {
+  let mut snap = snapshot?;
+  let bundled = crate::init::benchmark::load_bundled();
+  // Local freshest = max(date init recorded, this binary's bundled date).
+  let mut freshest = snap.snapshot_bundle_date.clone().unwrap_or_default();
+  if bundled.bundle_date > freshest {
+    freshest = bundled.bundle_date.clone();
+  }
+  // Only pay a network round-trip when the local snapshot already looks
+  // stale — a fresh install never reaches out.
+  if date_is_stale(&freshest) {
+    if let Ok(fetch) = crate::init::fetch::build_with_offline_check(
+      false,
+      crate::init::fetch::FetchClientConfig::default(),
+    ) {
+      if !fetch.is_offline() {
+        if let Ok(Some(remote)) = crate::init::benchmark::load_remote(&fetch, &bundled).await {
+          if remote.bundle_date > freshest {
+            freshest = remote.bundle_date;
+          }
+        }
+      }
+    }
+  }
+  if !freshest.is_empty() {
+    snap.snapshot_bundle_date = Some(freshest);
+  }
+  Some(snap)
+}
+
+/// `true` when a `YYYY-MM-DD` date is older than the stale threshold.
+/// Mirrors `check_snapshot_stale`'s arithmetic so the "should I probe the
+/// remote?" gate and the finding agree.
+fn date_is_stale(date: &str) -> bool {
+  let Some(now) = current_yyyymmdd() else {
+    return false;
+  };
+  let (Some(then), Some(parsed_now)) = (parse_yyyymmdd(date), parse_yyyymmdd(&now)) else {
+    return false;
+  };
+  days_between(then, parsed_now)
+    .map(|d| d > STALE_SNAPSHOT_THRESHOLD_DAYS)
+    .unwrap_or(false)
+}
+
 fn check_snapshot_stale(snapshot: &InitSnapshot) -> Option<Finding> {
   let bundle_date = snapshot.snapshot_bundle_date.as_deref()?;
   let now = current_yyyymmdd()?;
@@ -417,8 +473,8 @@ fn check_snapshot_stale(snapshot: &InitSnapshot) -> Option<Finding> {
     FindingId::SnapshotStale,
     Severity::Info,
     format!(
-      "benchmark snapshot was bundled {delta_days} days ago — \
-       the daily CI refresh has not landed; recommender picks may be stale"
+      "benchmark snapshot in use is {delta_days} days old and no fresher \
+       one was reachable — recommender picks may be stale"
     ),
   ))
 }
@@ -561,7 +617,12 @@ pub async fn run(args: DoctorArgs, _cli: &Cli, _config: &Config) -> CliResult {
     },
     None => None,
   };
-  let mut report = build_report(snapshot.as_ref(), &hardware);
+  // Reflect the snapshot the recommender would actually use: freshen the
+  // recorded bundle_date against the latest available remote before the
+  // staleness check runs. In-memory only — the original `snapshot` is
+  // left intact for the memory-baseline write below.
+  let report_snapshot = freshen_snapshot_date(snapshot.clone()).await;
+  let mut report = build_report(report_snapshot.as_ref(), &hardware);
 
   // R13 baseline stamp/refresh — doctor's single documented write,
   // amending the otherwise read-only contract. Persist the current GPU
@@ -781,6 +842,23 @@ mod tests {
     };
     let report = build_report(Some(&snap), &cpu_hw());
     assert!(!report.findings.iter().any(|f| f.id == "snapshot_stale"));
+  }
+
+  #[test]
+  fn date_is_stale_flags_only_old_parseable_dates() {
+    // The remote-probe gate in `freshen_snapshot_date` reuses this.
+    assert!(date_is_stale("2000-01-01"), "ancient date must be stale");
+    let today = current_yyyymmdd().expect("clock");
+    assert!(!date_is_stale(&today), "today is never stale");
+    assert!(
+      !date_is_stale("not-a-date"),
+      "an unparseable date must not be flagged (no spurious network probe)"
+    );
+  }
+
+  #[tokio::test]
+  async fn freshen_snapshot_date_noop_without_a_snapshot() {
+    assert!(freshen_snapshot_date(None).await.is_none());
   }
 
   #[test]
