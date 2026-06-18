@@ -628,6 +628,10 @@ pub async fn pick_model(
 
 /// What the model-list prompt resolved to. `Pick` carries the chosen
 /// recommendation's kind so the caller branches without re-indexing.
+// `Pick` embeds the ~1.4 KB `RecommendationKind`; built once per prompt
+// and dropped immediately, so accept the asymmetry (as `RecommendationKind`
+// itself does) rather than box it.
+#[allow(clippy::large_enum_variant)]
 enum ModelMenuOutcome {
   Pick(RecommendationKind),
   Search,
@@ -686,7 +690,7 @@ async fn prompt_paste_repo() -> Result<String, CliExit> {
   tokio::task::spawn_blocking(|| {
     cliclack::input("Paste an HF repo id")
       .placeholder("owner/repo")
-      .validate(validate_repo_slug)
+      .validate(|s: &String| validate_repo_slug(s))
       .interact()
   })
   .await
@@ -696,7 +700,7 @@ async fn prompt_paste_repo() -> Result<String, CliExit> {
 
 /// `owner/repo` slug validator, shared by the paste prompt and the
 /// search query (which forbids the slash a query wouldn't carry).
-fn validate_repo_slug(s: &String) -> Result<(), &'static str> {
+fn validate_repo_slug(s: &str) -> Result<(), &'static str> {
   if !s.contains('/') {
     return Err("expected `owner/repo`");
   }

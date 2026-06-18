@@ -458,16 +458,14 @@ impl HfDialogState {
       HfSortKey::FileSize => HfSearchResult::download_size_bytes,
       HfSortKey::ParamSize => HfSearchResult::param_count,
       HfSortKey::RepoName => {
-        self
-          .results
-          .sort_by(|a, b| a.repo_id.to_lowercase().cmp(&b.repo_id.to_lowercase()));
+        self.results.sort_by_key(|r| r.repo_id.to_lowercase());
         return;
       }
       _ => return,
     };
     self
       .results
-      .sort_by(|a, b| size_key(b).unwrap_or(0).cmp(&size_key(a).unwrap_or(0)));
+      .sort_by_key(|r| std::cmp::Reverse(size_key(r).unwrap_or(0)));
   }
 
   /// Apply a SearchFailed event. Same stale-drop rule as
