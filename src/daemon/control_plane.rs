@@ -32,8 +32,9 @@ use serde_json::Value;
 use tokio::{net::TcpListener, task::JoinHandle, time::Instant};
 
 use super::auth::IpcToken;
+use crate::daemon::context::MethodContext;
 use crate::daemon::shutdown::ShutdownToken;
-use crate::ipc::methods::{dispatch_request, MethodContext};
+use crate::ipc::methods::dispatch_request;
 use crate::ipc::protocol::{
   ErrorCode, ErrorObject, Request as RpcRequest, Response as RpcResponse,
 };

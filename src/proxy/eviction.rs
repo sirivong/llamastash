@@ -214,10 +214,8 @@ async fn unload_idle_umbrella_model(
         supervisors.remove_delegated(&name).await;
         persisted
           .mutate(|s| {
-            s.running.retain(|r| {
-              crate::ipc::methods::lemonade_snapshot_id(r).map(|b| b.name.as_str())
-                != Some(name.as_str())
-            });
+            s.running
+              .retain(|r| r.lemonade_backend_id().map(|b| b.name.as_str()) != Some(name.as_str()));
           })
           .await;
       }

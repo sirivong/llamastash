@@ -1,7 +1,7 @@
 //! Per-`ModelId` recent-failure tracker for proxy auto-start.
 //!
 //! Without this, every inbound `/v1/...` request for a model with no
-//! Ready supervisor kicks off a fresh `start_model_inner` — and if
+//! Ready supervisor kicks off a fresh `compose_and_spawn` — and if
 //! the model can't load (VRAM contention, broken GGUF, missing CUDA),
 //! every retry pays the full GGUF read + child fork + probe wait
 //! before failing again. Observed in the wild: a single

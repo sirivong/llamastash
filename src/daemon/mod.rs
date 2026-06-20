@@ -9,9 +9,11 @@
 
 pub mod actuals;
 pub mod auth;
+pub mod context;
 pub mod control_plane;
 pub mod discovery_task;
 pub mod host_metrics;
+pub mod launch_service;
 pub mod lockfile;
 pub mod orphans;
 pub mod ports;
@@ -43,9 +45,9 @@ use self::{
   state_store::{load as load_state, RunningSnapshot},
 };
 use crate::config::loader::{LemonadeConfig, PortRange, ProxyConfig};
+use crate::daemon::context::{LaunchEnv, MethodContext, PersistedState};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
-use crate::ipc::methods::{LaunchEnv, MethodContext, PersistedState};
 use crate::proxy::{self, server::ProxyStatus};
 
 /// Options for starting the daemon. `state_dir` holds the PID

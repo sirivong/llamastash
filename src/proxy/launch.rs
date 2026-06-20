@@ -3,19 +3,19 @@
 //! When a `/v1/...` request lands for a model that exists in the
 //! catalog but has no Ready supervisor, [`auto_start`] drives the
 //! launch in-process by calling
-//! [`crate::ipc::methods::start_model_inner`] — the same composition
-//! pipeline the IPC `start_model` handler uses, so the two paths
-//! can't drift apart.
+//! [`crate::daemon::launch_service::compose_and_spawn`] — the same
+//! composition pipeline the IPC `start_model` handler uses, so the two
+//! paths can't drift apart.
 //!
 //! The flow:
 //!   1. Build a default [`StartParams`] from the resolved catalog
 //!      row (just the path; mode defaults to Chat, no port
-//!      preference, no caller knobs — `start_model_inner` then
+//!      preference, no caller knobs — `compose_and_spawn` then
 //!      replays the same `last_params → arch_defaults → built-in`
 //!      cascade the IPC handler does).
 //!   2. Acquire single-flight rights via
 //!      [`crate::proxy::coalesce::Coalesce::acquire`]. Leaders run
-//!      `start_model_inner`; followers `.wait()` and receive the
+//!      `compose_and_spawn`; followers `.wait()` and receive the
 //!      leader's outcome directly from the slot (no re-snapshot).
 //!   3. Poll [`crate::daemon::supervisor::ManagedModel::state`] at
 //!      100 ms cadence until it reaches `Ready` (forward) or
@@ -28,9 +28,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::daemon::launch_service::{compose_and_spawn, LaunchModeWire, StartParams};
 use crate::daemon::supervisor::ManagedState;
 use crate::gguf::identity::ModelId;
-use crate::ipc::methods::{start_model_inner, LaunchModeWire, StartParams};
 use crate::launch::resolve::CatalogRow;
 
 use super::coalesce::{AcquireOutcome, SharedOutcome};
@@ -81,7 +81,7 @@ impl From<LaunchOutcome> for SharedOutcome {
 pub(crate) async fn auto_start(state: &Arc<ProxyState>, resolved: &CatalogRow) -> LaunchOutcome {
   // Compute the canonical ModelId from the resolved row. We read
   // the header here rather than trusting any in-process cache so
-  // the single-flight key matches what `start_model_inner` will
+  // the single-flight key matches what `compose_and_spawn` will
   // observe at spawn time (it does the same read internally).
   //
   // The header read is up to 16 MiB of synchronous I/O; offload to
@@ -139,7 +139,7 @@ pub(crate) async fn auto_start(state: &Arc<ProxyState>, resolved: &CatalogRow) -
   }
 }
 
-/// Run [`start_model_inner`], then poll `state()` at 100 ms until
+/// Run [`compose_and_spawn`], then poll `state()` at 100 ms until
 /// the supervisor reaches `Ready` or `Error`. Pulled out so the
 /// leader arm of [`auto_start`] reads top-to-bottom without nesting.
 async fn drive_launch_as_leader(
@@ -148,13 +148,13 @@ async fn drive_launch_as_leader(
   model_id: ModelId,
 ) -> LaunchOutcome {
   // Mode is read from the catalog row's GGUF-derived mode_hint so
-  // `start_model_inner` composes the right argv (`--embeddings` for
+  // `compose_and_spawn` composes the right argv (`--embeddings` for
   // embedding-only models, `--rerank` for rerank models). Without
   // this the proxy auto-start path defaulted every model to chat
   // mode and embedding requests against a nomic/jina/etc model
   // came back 501 (`This server does not support embeddings`) even
   // though `llamastash start <model>` worked fine. `Unknown` /
-  // missing hint leaves `mode = None` so `start_model_inner`'s
+  // missing hint leaves `mode = None` so `compose_and_spawn`'s
   // chat default still applies.
   let params = StartParams {
     model_path: std::path::PathBuf::from(&resolved.path),
@@ -166,7 +166,7 @@ async fn drive_launch_as_leader(
     }),
     ..StartParams::default()
   };
-  let started = match start_model_inner(
+  let started = match compose_and_spawn(
     &state.ctx,
     params,
     crate::daemon::supervisor::LaunchOrigin::AutoStart,
@@ -176,7 +176,7 @@ async fn drive_launch_as_leader(
     Ok(s) => s,
     Err(e) => {
       return LaunchOutcome::Failed {
-        cause: format!("start_model_inner: {}", e.message),
+        cause: format!("compose_and_spawn: {}", e.message),
       };
     }
   };

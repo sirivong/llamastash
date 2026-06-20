@@ -1,7 +1,7 @@
 //! Shared state every proxy connection's handlers read from.
 //!
 //! Cloned-and-`Arc`-wrapped fields mirror the relevant slots of
-//! [`crate::ipc::methods::MethodContext`] — the catalog, the
+//! [`crate::daemon::context::MethodContext`] — the catalog, the
 //! supervisor registry, persisted state, and the launch env — so
 //! the proxy can answer requests without round-tripping through the
 //! IPC dispatcher. `/health` reads `catalog` and `supervisors` (for
@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ipc::methods::MethodContext;
+use crate::daemon::context::MethodContext;
 
 use super::coalesce::Coalesce;
 use super::failure_tracker::FailureTracker;

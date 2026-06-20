@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use llamastash::backend::llama_cpp::LlamaCppBackend;
 use llamastash::config::loader::PortRange;
+use llamastash::daemon::context::{LaunchEnv, MethodContext};
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
@@ -24,7 +25,6 @@ use llamastash::daemon::supervisor::{
 };
 use llamastash::discovery::ModelCatalog;
 use llamastash::gguf::identity::ModelId;
-use llamastash::ipc::methods::{LaunchEnv, MethodContext};
 use llamastash::launch::mode::LaunchMode;
 use llamastash::launch::params::LaunchParams;
 use llamastash::proxy::eviction;

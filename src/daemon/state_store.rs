@@ -143,6 +143,18 @@ impl RunningSnapshot {
   pub fn started_at_system(&self) -> SystemTime {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(self.started_at)
   }
+
+  /// The lemonade [`BackendModelId`](crate::backend::identity::BackendModelId)
+  /// behind this row, or `None` for any other identity (GGUF, other
+  /// backends). The one predicate shared by the `status` projection, the
+  /// `stop_model` snapshot sweeps, and the proxy eviction filter, so "is
+  /// this a delegated lemonade row" can't drift between them.
+  pub fn lemonade_backend_id(&self) -> Option<&crate::backend::identity::BackendModelId> {
+    self
+      .id
+      .as_backend()
+      .filter(|b| b.backend == crate::backend::lemonade::LEMONADE_BACKEND_ID)
+  }
 }
 
 fn current_schema_version() -> u32 {

@@ -18,12 +18,13 @@ use llamastash::backend::lemonade::{
 };
 use llamastash::backend::{Backend, LaunchPlan};
 use llamastash::config::loader::{LemonadeConfig, PortRange};
+use llamastash::daemon::context::{LaunchEnv, MethodContext};
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
 use llamastash::daemon::state_store::RunningSnapshot;
 use llamastash::daemon::supervisor::{ManagedModel, ManagedState};
-use llamastash::ipc::methods::{dispatch_request, LaunchEnv, MethodContext};
+use llamastash::ipc::methods::dispatch_request;
 use llamastash::ipc::protocol::Request;
 use llamastash::launch::mode::LaunchMode;
 use llamastash::launch::params::LaunchParams;

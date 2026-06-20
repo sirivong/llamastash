@@ -517,28 +517,38 @@ unchanged; full suite green.
 
 ---
 
-- [ ] **Unit 5: Extract launch-composition & status assembly from `ipc/methods.rs`**
+- [x] **Unit 5: Extract launch-composition & status assembly from `ipc/methods.rs`**
 
-**Goal:** Move the launch pipeline (`start_model_inner` + `StartParams`/`StartedLaunch`/
-`LaunchModeWire`) into `src/launch/`, and the status-document assembly into a daemon
-reporter, so `ipc/methods.rs` becomes a thin dispatch + parse/serialize layer and the
-proxy→ipc inversion disappears.
+**Goal:** Move the launch pipeline (`start_model_inner` → `compose_and_spawn`, plus
+`StartParams`/`StartedLaunch`/`LaunchModeWire`) and the status-document assembly out of
+`ipc/methods.rs`, so it becomes a thin dispatch + parse/serialize layer and the proxy→ipc
+inversion disappears.
 
 **Requirements:** R1, R7
 
 **Dependencies:** U4 (recommended — cleaner once `resolve`/`mode` already moved)
 
+**As built:** `MethodContext` is daemon-state, not an IPC concept, so it relocated to
+`src/daemon/context.rs` (with `PersistedState` / `LaunchEnv`) — this is what makes every
+edge point downward (`ipc`/`proxy` → `daemon`). The launch pipeline then lands in the
+daemon layer too.
+
 **Files:**
-- Create: `src/launch/compose.rs` (or extend `src/launch/`) — `compose_and_spawn(req,
-  origin) -> StartedLaunch`; move `StartParams`/`StartedLaunch`/`LaunchModeWire` here
-- Create: `src/daemon/status.rs` (or `src/ipc/status.rs`) — `status_response` +
-  `backends_status` document assembly
-- Modify: `src/ipc/methods.rs` (call the launch service + status reporter; keep the
-  ~70-line dispatch table + thin adapters)
-- Modify: `src/proxy/launch.rs` (call `launch::compose_and_spawn` instead of
-  `ipc::methods::start_model_inner`)
-- Test: `tests/start_model_ipc_test.rs`, `tests/supervisor_ipc_test.rs`,
-  `tests/supervisor_lifecycle_test.rs`, inline `#[cfg(test)]`
+- Create: `src/daemon/context.rs` — `MethodContext`, `PersistedState`, `LaunchEnv`
+  (moved out of `ipc/methods.rs`)
+- Create: `src/daemon/launch_service.rs` — `compose_and_spawn(ctx, params, origin) ->
+  StartedLaunch`; `StartParams`/`StartedLaunch`/`LaunchModeWire` + the launch-exclusive
+  helpers (`start_delegated_lemonade`, admission/recorder spawners, port collection, …)
+- Create: `src/ipc/status.rs` — `status_response` + `backends_status` document assembly
+- Modify: `src/ipc/methods.rs` (thin `start_model_handler` calls
+  `daemon::launch_service::compose_and_spawn`; `status` calls `ipc::status::status_response`;
+  `resolve_model_id` / `resolve_model_id_and_arch` stay `pub(crate)` for the launch service)
+- Modify: `src/proxy/launch.rs`, `src/proxy/state.rs`, `src/proxy/server.rs`,
+  `src/daemon/control_plane.rs`, `src/daemon/mod.rs`, `benches/proxy_overhead.rs`,
+  and the proxy/lemonade integration tests (re-path to `daemon::context::*` /
+  `daemon::launch_service::*`)
+- Test: `tests/supervisor_ipc_test.rs`, the proxy integration suite, inline
+  `#[cfg(test)]` (status + launch tests moved with their code)
 
 **Approach:** Move at the existing `start_model_inner` function boundary (already clean,
 already referenced by path in tests). Status assembly is a self-contained
@@ -564,9 +574,12 @@ call sites `start_model_inner` already orchestrates.
 - Integration: proxy auto-start path drives `launch::compose_and_spawn` and reaches
   Ready against `fake_llama_server` (proves the proxy→launch rewire).
 
-**Verification:** `grep -rn 'ipc::methods::start_model_inner' src/proxy` returns
-nothing; `ipc/methods.rs` line count drops materially and contains dispatch + adapters,
-not the launch body; `status --json` byte-compatible; full suite green.
+**Verification:** `grep -rn 'ipc::methods::start_model_inner' src tests` and
+`grep -rn 'ipc::methods::MethodContext' src tests` both return nothing (everything
+references `daemon::launch_service::compose_and_spawn` / `daemon::context::MethodContext`);
+`ipc/methods.rs` dropped from ~3283 to ~1142 lines and holds dispatch + the stop/preset/
+favorite handlers, not the launch body or status assembly; the
+`status_top_level_key_set_is_stable` golden and full suite stay green.
 
 ---
 

@@ -420,7 +420,7 @@ fn finalize_uat_command(cmd: &mut tokio::process::Command) -> &mut tokio::proces
 /// so a real `llama-server` child is `Ready` before `smoke_chat`
 /// probes it. `llamastash start --json` returns as soon as the
 /// supervisor is *spawned* (see `src/ipc/methods.rs:1250-1322` —
-/// `start_model_inner` returns post-spawn, before the supervisor
+/// `compose_and_spawn` returns post-spawn, before the supervisor
 /// transitions Launching → Loading → Ready). We therefore poll
 /// `status --json` ourselves after start returns and only declare
 /// this step pass once `models[0].state == "ready"`.
@@ -499,7 +499,7 @@ async fn step_start_model(
 /// Poll `status --json` until `models[0].state == "ready"`,
 /// or fail when the supervisor transitions to a terminal error
 /// state, or the budget expires. Used by `step_start_model` to bridge
-/// the gap between `start_model_inner` returning post-spawn and the
+/// the gap between `compose_and_spawn` returning post-spawn and the
 /// `llama-server` child actually binding its port.
 async fn wait_for_ready(
   plan: &LifecyclePlan,

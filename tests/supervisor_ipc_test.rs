@@ -237,10 +237,10 @@ async fn run_foreground_with_supervisors(
   // plane that Unit 1 of the Windows+HTTP-IPC plan added so the new
   // `Client::connect(state_dir)` works against this fixture daemon.
   use llamastash::daemon::auth::IpcToken;
+  use llamastash::daemon::context::MethodContext;
   use llamastash::daemon::control_plane;
   use llamastash::daemon::runtime_file::{self, RuntimeInfo};
   use llamastash::daemon::{lockfile::acquire, lockfile::AcquireOutcome};
-  use llamastash::ipc::methods::MethodContext;
   use std::sync::Arc;
   use std::time::{SystemTime, UNIX_EPOCH};
 

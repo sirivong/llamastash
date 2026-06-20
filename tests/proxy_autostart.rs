@@ -19,13 +19,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llamastash::config::loader::PortRange;
+use llamastash::daemon::context::{LaunchEnv, MethodContext};
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
 use llamastash::discovery::{DiscoveredModel, ModelCatalog, ModelSource};
 use llamastash::gguf::metadata::{ModeHint, ModelMetadata, Quant};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
-use llamastash::ipc::methods::{LaunchEnv, MethodContext};
 use llamastash::proxy::server::{loopback_addr, new_status_cell, serve, ProxyStatus, StatusCell};
 use llamastash::proxy::state::ProxyState;
 use serde_json::Value;
@@ -261,7 +261,7 @@ async fn dormant_model_auto_starts_and_forwards_without_fallback_headers() {
 async fn slow_start_blocks_then_succeeds() {
   // The `--health-delay-ms` fixture knob makes /health return 503
   // until N ms after process start. We can't pass extra argv from
-  // `start_model_inner` (it composes its own argv), so this test
+  // `compose_and_spawn` (it composes its own argv), so this test
   // instead validates that a typical autostart's wall-clock is
   // bounded — the supervisor probe interval is 30 ms in this test
   // setup, so an unloaded process clears probe in < 200 ms. We
@@ -333,7 +333,7 @@ async fn supervisor_state_visible_to_registry_after_auto_start() {
   );
 
   // state.running snapshot should also reflect the launch
-  // (`start_model_inner` writes it). The proxy state shares the
+  // (`compose_and_spawn` writes it). The proxy state shares the
   // same `PersistedState` handle through the cloned MethodContext.
   let persisted = ctx.state.snapshot().await;
   assert_eq!(persisted.running.len(), 1);

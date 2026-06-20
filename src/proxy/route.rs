@@ -74,7 +74,7 @@ pub(crate) enum RouteDecision {
   NotRunning {
     requested_model: String,
     /// Resolved catalog entry consumed by the launch path to build
-    /// `StartParams` for `start_model_inner` without re-running the
+    /// `StartParams` for `compose_and_spawn` without re-running the
     /// resolver.
     // dead_code: consumed via destructuring in router::forward_request;
     // the field itself is moved out, not read by name.
@@ -697,7 +697,7 @@ mod tests {
 
   #[test]
   fn catalog_row_leaves_unknown_mode_hint_as_none() {
-    // Unknown stays None so the start_model_inner default (chat) is
+    // Unknown stays None so the compose_and_spawn default (chat) is
     // what kicks in — same posture as before the propagation patch
     // when the GGUF carried no signal.
     let m = discovered_with_mode(ModeHint::Unknown);

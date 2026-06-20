@@ -415,7 +415,7 @@ pub fn loopback_addr(port: u16) -> SocketAddr {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::ipc::methods::MethodContext;
+  use crate::daemon::context::MethodContext;
   use std::time::Duration;
 
   #[test]

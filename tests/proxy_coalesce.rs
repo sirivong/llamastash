@@ -7,9 +7,9 @@
 //!
 //! Instrumentation: we observe single-flight by counting supervisor
 //! registry entries after both requests complete. If coalescing
-//! works, exactly one `start_model_inner` call ran — there is
+//! works, exactly one `compose_and_spawn` call ran — there is
 //! exactly one supervisor for the path. Without coalescing, two
-//! `start_model_inner` calls race on `reserve_port`; depending on
+//! `compose_and_spawn` calls race on `reserve_port`; depending on
 //! the port range, either one would error out (and the test fails
 //! the 200 assertion) or both would succeed and the registry would
 //! contain two entries on the same path. Either failure mode is
@@ -24,13 +24,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llamastash::config::loader::PortRange;
+use llamastash::daemon::context::{LaunchEnv, MethodContext};
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
 use llamastash::discovery::{DiscoveredModel, ModelCatalog, ModelSource};
 use llamastash::gguf::metadata::{ModeHint, ModelMetadata, Quant};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
-use llamastash::ipc::methods::{LaunchEnv, MethodContext};
 use llamastash::proxy::server::{loopback_addr, new_status_cell, serve, ProxyStatus, StatusCell};
 use llamastash::proxy::state::ProxyState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

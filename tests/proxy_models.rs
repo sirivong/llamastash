@@ -31,12 +31,12 @@ use std::{
 };
 
 use llamastash::config::loader::ProxyConfig;
+use llamastash::daemon::context::MethodContext;
 use llamastash::daemon::shutdown::ShutdownToken;
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::discovery::{DiscoveredModel, ModelCatalog, ModelSource};
 use llamastash::gguf::metadata::{ModeHint, ModelMetadata, Quant};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
-use llamastash::ipc::methods::MethodContext;
 use llamastash::ipc::Client;
 use llamastash::proxy::server::{loopback_addr, new_status_cell, serve, ProxyStatus, StatusCell};
 use llamastash::proxy::state::ProxyState;

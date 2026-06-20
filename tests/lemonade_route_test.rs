@@ -23,12 +23,12 @@ use llamastash::backend::lemonade::{
   ensure_umbrella, umbrella_launch_id, LemonadeBackend, LemonadeClient,
 };
 use llamastash::backend::{Backend, LaunchPlan, ProcessLaunchSpec};
+use llamastash::daemon::context::MethodContext;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
 use llamastash::daemon::supervisor::{ManagedModel, ManagedState};
 use llamastash::discovery::{DiscoveredModel, ModelCatalog, ModelSource};
-use llamastash::ipc::methods::MethodContext;
 use llamastash::launch::mode::LaunchMode;
 use llamastash::launch::params::LaunchParams;
 use llamastash::proxy::eviction;

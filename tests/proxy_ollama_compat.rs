@@ -25,6 +25,7 @@ use std::{
 };
 
 use llamastash::backend::llama_cpp::LlamaCppBackend;
+use llamastash::daemon::context::MethodContext;
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::SupervisorRegistry;
 use llamastash::daemon::shutdown::ShutdownToken;
@@ -35,7 +36,6 @@ use llamastash::discovery::{DiscoveredModel, ModelCatalog, ModelSource};
 use llamastash::gguf::identity::ModelId;
 use llamastash::gguf::metadata::{ModeHint, ModelMetadata, Quant};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
-use llamastash::ipc::methods::MethodContext;
 use llamastash::launch::mode::LaunchMode;
 use llamastash::launch::params::LaunchParams;
 use llamastash::proxy::server::{loopback_addr, new_status_cell, serve, ProxyStatus, StatusCell};

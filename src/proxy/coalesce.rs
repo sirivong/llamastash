@@ -2,7 +2,7 @@
 //!
 //! Auto-start can fire from any number of concurrent inbound requests
 //! for the same dormant model. Without coalescing, each request would
-//! issue its own `start_model_inner` call, race the port allocator,
+//! issue its own `compose_and_spawn` call, race the port allocator,
 //! and either fail with a port collision or burn a second
 //! `llama-server` process on top of the one already launching.
 //!
@@ -82,7 +82,7 @@ pub(crate) enum AcquireOutcome {
 
 /// Token returned to the request that won the right to drive the
 /// launch. Holding this token is the marker that this request's
-/// `start_model_inner` call is the live one. Dropping it without
+/// `compose_and_spawn` call is the live one. Dropping it without
 /// calling [`Leader::finish`] is a bug; the `Drop` impl stamps
 /// `SlotState::Cancelled` and wakes followers so they don't hang.
 pub(crate) struct Leader {
