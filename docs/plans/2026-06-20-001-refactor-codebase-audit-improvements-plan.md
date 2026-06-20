@@ -400,7 +400,7 @@ src --include='*.rs'` returns effectively nothing (modulo intentional doc-links)
 
 ### Phase 2 — Knob subsystem single source of truth
 
-- [ ] **Unit 3: `KnobField` accessor over `TypedKnobs`**
+- [x] **Unit 3: `KnobField` accessor over `TypedKnobs`**
 
 **Goal:** Replace the ~16 hand-written per-knob match blocks across picker / params /
 settings / overlay with one `KnobField`-keyed accessor, and add an exhaustiveness drift
@@ -465,7 +465,7 @@ green.
 
 ### Phase 3 — Layering & decomposition
 
-- [ ] **Unit 4: Cheap layering moves (resolve, mode, auth)**
+- [x] **Unit 4: Cheap layering moves (resolve, mode, auth)**
 
 **Goal:** Remove the three low-effort layering inversions so the proxy/launch layers
 stop depending "up" on `cli`/`daemon` internals.
