@@ -2858,6 +2858,36 @@ mod tests {
     assert_eq!(daemon["active_connections"], json!(0));
   }
 
+  /// Agent-facing contract guard: pins the exact top-level key set of a
+  /// catalog-only `status` response so the status-assembly extraction
+  /// stays byte-stable (`proxy` is omitted when the cell is absent).
+  #[tokio::test]
+  async fn status_top_level_key_set_is_stable() {
+    let c = ctx();
+    let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
+    let body = resp.result.expect("status result");
+    let mut keys: Vec<&str> = body
+      .as_object()
+      .expect("status is a JSON object")
+      .keys()
+      .map(String::as_str)
+      .collect();
+    keys.sort_unstable();
+    assert_eq!(
+      keys,
+      vec![
+        "backends",
+        "daemon",
+        "device_catalog",
+        "external",
+        "gpu",
+        "host",
+        "models",
+      ],
+      "catalog-only status top-level keys drifted"
+    );
+  }
+
   #[tokio::test]
   async fn status_includes_backends_block() {
     let c = ctx();
