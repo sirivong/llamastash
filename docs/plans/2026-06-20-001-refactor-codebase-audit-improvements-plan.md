@@ -583,7 +583,7 @@ favorite handlers, not the launch body or status assembly; the
 
 ---
 
-- [ ] **Unit 6: Carve `hf_pull.rs` out of `tui/events.rs`**
+- [x] **Unit 6: Carve `hf_pull.rs` out of `tui/events.rs`**
 
 **Goal:** Extract the self-contained HF-pull / download subsystem (~24 functions + the
 `StripProgress` `DownloadProgress` impl) from the 5,487-line `events.rs` into
