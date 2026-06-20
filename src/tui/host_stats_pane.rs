@@ -120,7 +120,8 @@ fn ram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palett
   // (and, when DXGI mis-flagged discrete cards, a spurious `*`). The
   // `unified` flag below is what tells the user the pool is shared.
   let (pct, value) = if host.ram_total_bytes == 0 {
-    (0.0_f32, "—/—".to_string())
+    let d = crate::tui::glyphs::active().placeholder();
+    (0.0_f32, format!("{d}/{d}"))
   } else {
     let pct = (host.ram_used_bytes as f64 / host.ram_total_bytes as f64) as f32 * 100.0;
     (
@@ -169,7 +170,7 @@ fn gpu_summary_row<'a>(
   let bar = bar(pct, bar_width, gauge_color(pct, palette));
   let value = util
     .map(|p| format!(" {:.0}%", p))
-    .unwrap_or_else(|| " —".into());
+    .unwrap_or_else(|| format!(" {}", crate::tui::glyphs::active().placeholder()));
   let mut spans = vec![
     Span::styled(label, palette.label_style()),
     bar,
@@ -233,7 +234,10 @@ fn vram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palet
       let pct = (used as f64 / avail as f64) as f32 * 100.0;
       (pct.clamp(0.0, 100.0), format_bytes_pair(used, avail))
     }
-    _ => (0.0_f32, "—/—".into()),
+    _ => {
+      let d = crate::tui::glyphs::active().placeholder();
+      (0.0_f32, format!("{d}/{d}"))
+    }
   };
   let bar = bar(pct, bar_width, gauge_color(pct, palette));
   Line::from(vec![
@@ -246,16 +250,17 @@ fn vram_row<'a>(host: &HostMetricsSnapshot, bar_width: usize, palette: &'a Palet
 fn backend_row<'a>(host: &HostMetricsSnapshot, palette: &'a Palette) -> Line<'a> {
   use crate::daemon::host_metrics::GpuFlavor;
   use crate::init::detection::gpu_vendor_display;
+  let mid = crate::tui::glyphs::active().middot();
   let label = match host.flavor() {
     // Name the vendor (AMD / NVIDIA / Apple) consistently with
     // `status`, `doctor`, and `init` — not the metrics tool (NVML /
     // ROCm), which conflated the vendor with the llama.cpp runtime.
     GpuFlavor::Nvidia | GpuFlavor::Amd => format!(
-      "{} · {}",
+      "{} {mid} {}",
       gpu_vendor_display(&host.gpu_backend),
       pluralize_gpu(host.gpu_device_count)
     ),
-    GpuFlavor::AppleMetal => "Apple · 1 GPU".into(),
+    GpuFlavor::AppleMetal => format!("Apple {mid} 1 GPU"),
     GpuFlavor::CpuOnly => "CPU only".into(),
     GpuFlavor::Unsampled => "detecting".into(),
     GpuFlavor::Multi => {
@@ -277,22 +282,25 @@ fn backend_row<'a>(host: &HostMetricsSnapshot, palette: &'a Palette) -> Line<'a>
       }
       let parts: Vec<String> = vec![
         if nvidia_count > 0 {
-          Some(format!("NVIDIA · {}", pluralize_gpu(nvidia_count)))
+          Some(format!("NVIDIA {mid} {}", pluralize_gpu(nvidia_count)))
         } else {
           None
         },
         if amd_count > 0 {
-          Some(format!("AMD · {}", pluralize_gpu(amd_count)))
+          Some(format!("AMD {mid} {}", pluralize_gpu(amd_count)))
         } else {
           None
         },
         if metal_count > 0 {
-          Some("Apple · 1 GPU".into())
+          Some(format!("Apple {mid} 1 GPU"))
         } else {
           None
         },
         if unknown_count > 0 {
-          Some(format!("GPU (Vulkan) · {}", pluralize_gpu(unknown_count)))
+          Some(format!(
+            "GPU (Vulkan) {mid} {}",
+            pluralize_gpu(unknown_count)
+          ))
         } else {
           None
         },
@@ -345,12 +353,13 @@ fn bar(pct: f32, width: usize, fill: Color) -> Span<'static> {
   let filled = ((pct / 100.0) * width as f32).round() as usize;
   let filled = filled.min(width);
   let trough = width - filled;
+  let glyphs = crate::tui::glyphs::active();
   let mut s = String::with_capacity(width * 3);
   for _ in 0..filled {
-    s.push('█');
+    s.push(glyphs.gauge_fill());
   }
   for _ in 0..trough {
-    s.push('░');
+    s.push(glyphs.gauge_trough());
   }
   Span::styled(s, Style::default().fg(fill))
 }
@@ -378,15 +387,17 @@ fn gpu_temp_color(temp: f32, palette: &Palette) -> Color {
 }
 
 /// Severity glyph for a temperature reading. Returns `""` on the
-/// green tier (no glyph), `"△"` on yellow (warning), `"▲"` on red
-/// (critical). Pairs with [`gpu_temp_color`] so themes that can't
+/// green tier (no glyph), the warning marker on yellow, the critical
+/// marker on red. Pairs with [`gpu_temp_color`] so themes that can't
 /// carry colour information (Mono) still differentiate `92°C` from
-/// `65°C` purely on glyph shape.
+/// `65°C` purely on glyph shape — the two markers stay distinct in both
+/// the Unicode (`△`/`▲`) and the ASCII (`!`/`*`) glyph sets.
 fn temp_severity_glyph(temp: f32) -> &'static str {
+  let glyphs = crate::tui::glyphs::active();
   if temp >= 82.0 {
-    "▲"
+    glyphs.severity_critical()
   } else if temp >= 70.0 {
-    "△"
+    glyphs.severity_warn()
   } else {
     ""
   }
@@ -405,7 +416,10 @@ fn temp_spans<'a>(temp: f32, palette: &'a Palette) -> Vec<Span<'a>> {
   if !glyph.is_empty() {
     spans.push(Span::styled(glyph, style));
   }
-  spans.push(Span::styled(format!("{temp:.0}°C"), style));
+  spans.push(Span::styled(
+    format!("{temp:.0}{}C", crate::tui::glyphs::active().degree()),
+    style,
+  ));
   spans
 }
 

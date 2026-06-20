@@ -228,6 +228,7 @@ impl Palette {
     let border = if focused { self.accent } else { self.muted };
     ratatui::widgets::Block::default()
       .borders(ratatui::widgets::Borders::ALL)
+      .border_set(crate::tui::glyphs::active().border_set())
       .border_style(ratatui::style::Style::default().fg(border))
       .title(ratatui::text::Line::from(ratatui::text::Span::styled(
         title.to_string(),

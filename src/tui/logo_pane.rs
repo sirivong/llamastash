@@ -11,7 +11,6 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::banner::COMPACT_BANNER;
 use crate::theme::Palette;
 use crate::tui::app::App;
 
@@ -19,6 +18,7 @@ use crate::tui::app::App;
 pub fn render(frame: &mut Frame<'_>, area: Rect, _app: &App, palette: &Palette) {
   let block = Block::default()
     .borders(Borders::ALL)
+    .border_set(crate::tui::glyphs::active().border_set())
     .border_style(palette.accent_style());
   let inner = block.inner(area);
   frame.render_widget(block, area);
@@ -35,12 +35,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, _app: &App, palette: &Palette) 
   frame.render_widget(para, inner);
 }
 
-/// Split [`COMPACT_BANNER`] into its rendered lines, dropping the
-/// leading newline the raw string literal keeps for readability.
+/// Split the active glyph set's compact banner into its rendered
+/// lines, dropping the leading newline the raw string literal keeps for
+/// readability.
 fn glyph_lines() -> Vec<&'static str> {
-  COMPACT_BANNER
+  let banner = crate::tui::glyphs::active().compact_banner();
+  banner
     .strip_prefix('\n')
-    .unwrap_or(COMPACT_BANNER)
+    .unwrap_or(banner)
     .lines()
     .collect()
 }

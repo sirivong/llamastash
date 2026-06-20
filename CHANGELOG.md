@@ -8,6 +8,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 - HuggingFace pull dialog search rows now show `params` (model size, e.g. `35B`) and `size` (approximate download size, e.g. `5.3G`) columns, fetched in the same search request. Sort (`o`) now also cycles through File size, Params, and Repo name (reordering the current page).
 - `init` / `recommend` model picker gains a "Search HuggingFace by name…" option: prompts for a query, lists live results (params · size · downloads), and downloads the chosen repo.
+- Opt-in ASCII glyph fallback for the TUI: `LLAMASTASH_ASCII=1` (or `ascii_glyphs: true` in `config.yaml`; env wins) renders status dots, severity markers, gauge bars, the logo banner, and box borders in 7-bit ASCII for terminals / fonts that show the Unicode set as tofu. Severity stays double-encoded (`!` warning vs `*` critical). Default rendering is unchanged.
 
 ### Changed
 

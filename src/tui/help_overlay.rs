@@ -82,6 +82,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       Span::styled(format!("· {close_chip} "), palette.muted_style()),
     ]))
     .borders(Borders::ALL)
+    .border_set(crate::tui::glyphs::active().border_set())
     .border_style(palette.accent_style())
     .padding(Padding::new(2, 2, 1, 1));
   frame.render_widget(block, rect);

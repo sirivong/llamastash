@@ -46,6 +46,7 @@ pub fn render(
       Style::default().fg(tone).add_modifier(Modifier::BOLD),
     )))
     .borders(Borders::ALL)
+    .border_set(crate::tui::glyphs::active().border_set())
     .border_style(tone_style);
   let inner = block.inner(rect);
   frame.render_widget(block, rect);

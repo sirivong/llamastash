@@ -21,7 +21,7 @@ use crate::tui::launch_picker::INHERITED_LABEL;
 /// `list_pane`'s filter chip, and `tabs/input_pane`).
 pub(crate) fn caret(palette: &Palette) -> Span<'static> {
   Span::styled(
-    "▏",
+    crate::tui::glyphs::active().caret(),
     Style::default()
       .fg(palette.accent)
       .add_modifier(Modifier::REVERSED),
@@ -118,8 +118,12 @@ pub(crate) fn truncate_end(s: &str, max: usize) -> String {
   if s.chars().count() <= max {
     return s.to_string();
   }
-  let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-  out.push('…');
+  let ellipsis = crate::tui::glyphs::active().ellipsis();
+  // Reserve room for the ellipsis width so the result still fits `max`
+  // cells; the ASCII ellipsis (`...`) is three cells, not one.
+  let ell_w = ellipsis.chars().count();
+  let mut out: String = s.chars().take(max.saturating_sub(ell_w)).collect();
+  out.push_str(ellipsis);
   out
 }
 
@@ -140,7 +144,7 @@ pub(crate) fn truncate_start(s: &str, budget: usize) -> String {
   if s.width() <= budget {
     return s.to_string();
   }
-  let prefix = "…/";
+  let prefix = format!("{}/", crate::tui::glyphs::active().ellipsis());
   let prefix_w = prefix.width();
   if budget <= prefix_w {
     return take_tail_by_width(s, budget);
@@ -217,7 +221,11 @@ pub(crate) fn kv_row_focused(
   palette: &Palette,
   show_source: bool,
 ) -> Line<'static> {
-  let marker = if focused { "→ " } else { "  " };
+  let marker = if focused {
+    crate::tui::glyphs::active().focus_marker()
+  } else {
+    "  "
+  };
   let label_style = if focused {
     Style::default()
       .fg(palette.accent)
@@ -232,9 +240,16 @@ pub(crate) fn kv_row_focused(
   ));
   let v_style = kv_value_style(&value, palette);
   if focused && cyclable {
-    spans.push(Span::styled("◀ ".to_string(), palette.accent_style()));
+    let glyphs = crate::tui::glyphs::active();
+    spans.push(Span::styled(
+      format!("{} ", glyphs.cycle_left()),
+      palette.accent_style(),
+    ));
     spans.push(Span::styled(value, v_style));
-    spans.push(Span::styled(" ▶".to_string(), palette.accent_style()));
+    spans.push(Span::styled(
+      format!(" {}", glyphs.cycle_right()),
+      palette.accent_style(),
+    ));
   } else {
     spans.push(Span::styled(value, v_style));
   }

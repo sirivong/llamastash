@@ -48,15 +48,7 @@ impl SurfaceState {
 }
 
 pub fn glyph_for(state: SurfaceState) -> char {
-  match state {
-    SurfaceState::NotLaunched => ' ',
-    SurfaceState::Launching => '◌',
-    SurfaceState::Loading => '◐',
-    SurfaceState::Ready => '●',
-    SurfaceState::Error => '▲',
-    SurfaceState::Stopped => '○',
-    SurfaceState::External => '⇪',
-  }
+  crate::tui::glyphs::active().status_icon(state)
 }
 
 pub fn colour_for(state: SurfaceState, palette: &Palette) -> Color {

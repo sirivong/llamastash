@@ -139,6 +139,13 @@ pub struct Config {
   /// launches it applies to, regardless of this setting.
   #[serde(default = "default_true")]
   pub jinja: bool,
+  /// Render the TUI with the `7`-bit ASCII glyph fallback instead of
+  /// the default Unicode house style (geometric status dots, severity
+  /// triangles, box-drawing borders). For terminals / fonts that show
+  /// the Unicode set as tofu. Factory `false`. The `LLAMASTASH_ASCII=1`
+  /// env var overrides this and forces ASCII on regardless.
+  #[serde(default)]
+  pub ascii_glyphs: bool,
 }
 
 fn default_fit_ctx_floor() -> u32 {
@@ -809,6 +816,7 @@ impl Default for Config {
       fit_ctx_floor: DEFAULT_FIT_CTX_FLOOR,
       strict_fit: false,
       jinja: true,
+      ascii_glyphs: false,
     }
   }
 }

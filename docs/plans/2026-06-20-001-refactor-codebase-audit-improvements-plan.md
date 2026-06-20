@@ -737,7 +737,7 @@ visually matches the other tables; toggles toast; 80-col header render is clean;
 
 ---
 
-- [ ] **Unit 9: No-glyph / ASCII fallback**
+- [x] **Unit 9: No-glyph / ASCII fallback**
 
 **Goal:** Add the tracked no-glyph fallback so terminals/fonts without the project's
 Unicode set (legacy conhost, minimal SSH fonts, some CI ptys) still render status,

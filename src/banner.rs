@@ -19,3 +19,25 @@ pub const COMPACT_BANNER: &str = r"
 ██ ◡◡ ██
  ▀████▀ 
 ";
+
+/// 7-bit ASCII fallback for [`BANNER`], rendered when `LLAMASTASH_ASCII`
+/// / the `ascii_glyphs` config flag is set. Same line count as the
+/// Unicode banner so any width / height gating that keys off the banner
+/// stays unchanged.
+pub const BANNER_ASCII: &str = r"
+   /\_/\
+  ( o.o )    _ _                  ___ _            _
+   > ^ <    | | |__ _ _ __  __ _ / __| |_ __ _ __| |_
+            | | / _` | '  \/ _` |\__ \  _/ _` (_-< ' \
+            |_|_\__,_|_|_|_\__,_||___/\__\__,_/__/_||_|
+";
+
+/// 7-bit ASCII fallback for [`COMPACT_BANNER`]. Keeps the same 5-line
+/// inner height the logo panel reserves.
+pub const COMPACT_BANNER_ASCII: &str = r"
+ |    |
+ /^^^^\
+| o  o |
+|  vv  |
+ \____/
+";

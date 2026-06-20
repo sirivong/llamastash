@@ -442,7 +442,11 @@ fn heading<'a>(text: &'a str, palette: &Palette) -> Line<'a> {
 /// reads as a separator, not a value row.
 fn group_header(title: &str, palette: &Palette) -> Line<'static> {
   Line::from(Span::styled(
-    format!("  ── {title}"),
+    format!(
+      "  {}{} {title}",
+      crate::tui::glyphs::active().hline(),
+      crate::tui::glyphs::active().hline()
+    ),
     palette.muted_style().add_modifier(Modifier::BOLD),
   ))
 }
@@ -454,7 +458,11 @@ fn chip_label(chip: &str) -> &str {
 }
 
 fn inline_edit_row(label: &str, buffer: &str, focused: bool, palette: &Palette) -> Line<'static> {
-  let marker = if focused { "→ " } else { "  " };
+  let marker = if focused {
+    crate::tui::glyphs::active().focus_marker()
+  } else {
+    "  "
+  };
   let label_style = Style::default()
     .fg(palette.accent)
     .add_modifier(Modifier::BOLD);

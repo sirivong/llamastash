@@ -199,8 +199,12 @@ fn render_toast(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette)
     return;
   }
   let body: String = if msg.chars().count() > max_inner {
-    let mut truncated: String = msg.chars().take(max_inner.saturating_sub(1)).collect();
-    truncated.push('…');
+    let ellipsis = crate::tui::glyphs::active().ellipsis();
+    let mut truncated: String = msg
+      .chars()
+      .take(max_inner.saturating_sub(ellipsis.chars().count()))
+      .collect();
+    truncated.push_str(ellipsis);
     truncated
   } else {
     msg.to_string()
@@ -314,9 +318,15 @@ fn title_left_spans(width: u16, app: &App, palette: &Palette) -> Vec<Span<'stati
 
   let version = env!("CARGO_PKG_VERSION");
   let (dot_color, daemon_label) = if app.daemon_connected {
-    (palette.success, "daemon")
+    (palette.success, "daemon".to_string())
   } else {
-    (palette.warning, "daemon connecting…")
+    (
+      palette.warning,
+      format!(
+        "daemon connecting{}",
+        crate::tui::glyphs::active().ellipsis()
+      ),
+    )
   };
   let theme_name = app.options.theme.short_name();
   let on_accent = palette.on_accent;
@@ -340,21 +350,25 @@ fn title_left_spans(width: u16, app: &App, palette: &Palette) -> Vec<Span<'stati
   let version_w = version_text.width();
   let version_seg = vec![Span::styled(version_text, Style::default().fg(on_accent))];
 
+  let glyphs = crate::tui::glyphs::active();
+  let sep = format!(" {} ", glyphs.middot());
+  let daemon_dot = glyphs.status_icon(crate::tui::status_icons::SurfaceState::Ready);
+  let theme_dot = glyphs.status_icon(crate::tui::status_icons::SurfaceState::Loading);
   let daemon_seg = vec![
-    Span::styled(" · ", Style::default().fg(on_accent)),
-    Span::styled("●", Style::default().fg(dot_color)),
+    Span::styled(sep.clone(), Style::default().fg(on_accent)),
+    Span::styled(daemon_dot.to_string(), Style::default().fg(dot_color)),
     Span::raw(" "),
     Span::styled(daemon_label.to_string(), Style::default().fg(on_accent)),
   ];
-  let daemon_w = " · ".width() + "● ".width() + daemon_label.width();
+  let daemon_w = sep.width() + daemon_dot.to_string().width() + 1 + daemon_label.width();
 
   let theme_seg = vec![
-    Span::styled(" · ", Style::default().fg(on_accent)),
+    Span::styled(sep.clone(), Style::default().fg(on_accent)),
     // Half-filled circle glyph — visual cue for "theme" / light/dark.
-    Span::styled("◐ ", Style::default().fg(on_accent)),
+    Span::styled(format!("{theme_dot} "), Style::default().fg(on_accent)),
     Span::styled(theme_name.to_string(), Style::default().fg(on_accent)),
   ];
-  let theme_w = " · ".width() + "◐ ".width() + theme_name.width();
+  let theme_w = sep.width() + theme_dot.to_string().width() + 1 + theme_name.width();
 
   // Each segment carries its own leading separator, so daemon only
   // reads right after version and theme after daemon. Nesting the
@@ -726,6 +740,7 @@ fn render_empty_state(
   let block = Block::default()
     .title(title_line)
     .borders(Borders::ALL)
+    .border_set(crate::tui::glyphs::active().border_set())
     .border_style(Style::default().fg(border_color));
   let inner = block.inner(area);
   frame.render_widget(block, area);

@@ -44,13 +44,14 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
   let bottom_chips = crate::tui::hint_picker::pick(
     bottom_chips_ranked,
     (area.width as usize).saturating_sub(4),
-    " · ",
+    crate::tui::glyphs::active().middot_sep(),
   );
   let border_color = palette.focus_border(focused);
 
   let mut outer = Block::default()
     .title(title_line)
     .borders(Borders::ALL)
+    .border_set(crate::tui::glyphs::active().border_set())
     .border_style(Style::default().fg(border_color))
     .padding(Padding::horizontal(1));
   // All right-pane key hints live on the bottom border now —
@@ -103,7 +104,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
 /// drawing horizontal char so the strip mirrors the block's outer
 /// border but tinted with `muted` to keep it secondary.
 fn render_separator(frame: &mut Frame<'_>, area: Rect, palette: &Palette) {
-  let line: String = "─".repeat(area.width as usize);
+  let line: String = crate::tui::glyphs::active()
+    .hline()
+    .repeat(area.width as usize);
   let para = Paragraph::new(Line::from(Span::styled(line, palette.muted_style())));
   frame.render_widget(para, area);
 }
@@ -391,7 +394,10 @@ fn bottom_hint_line(chips: &[String], palette: &Palette) -> Line<'static> {
   spans.push(Span::raw(" "));
   for (i, chip) in chips.iter().enumerate() {
     if i > 0 {
-      spans.push(Span::styled(" · ", palette.muted_style()));
+      spans.push(Span::styled(
+        crate::tui::glyphs::active().middot_sep(),
+        palette.muted_style(),
+      ));
     }
     spans.push(Span::styled(chip.clone(), palette.muted_style()));
   }
@@ -595,14 +601,16 @@ fn wrap_path_chunks(s: &str, width: usize, max_lines: usize) -> Vec<String> {
     i = end;
   }
   // Overflow: the path didn't fit in `max_lines`. Replace the last
-  // chunk with a `…`-prefixed slice that keeps the path tail visible
-  // instead of cleaving off the filename.
+  // chunk with an ellipsis-prefixed slice that keeps the path tail
+  // visible instead of cleaving off the filename.
   if i < chars.len() {
     if let Some(last) = out.last_mut() {
-      let want = width.saturating_sub(1).max(1);
+      let ellipsis = crate::tui::glyphs::active().ellipsis();
+      // Reserve the ellipsis cells (1 for Unicode `…`, 3 for ASCII `...`).
+      let want = width.saturating_sub(ellipsis.chars().count()).max(1);
       let tail_start = chars.len().saturating_sub(want);
       let tail: String = chars[tail_start..].iter().collect();
-      *last = format!("…{tail}");
+      *last = format!("{ellipsis}{tail}");
     }
   }
   out
@@ -641,7 +649,10 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
         // tone as the value digits.
         Span::styled(rss, value_style),
         Span::styled(" RAM", label_style),
-        Span::styled(" · ", palette.muted_style()),
+        Span::styled(
+          crate::tui::glyphs::active().middot_sep(),
+          palette.muted_style(),
+        ),
         Span::styled(cpu, value_style),
         Span::styled(" CPU", label_style),
       ])

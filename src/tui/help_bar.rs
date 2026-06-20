@@ -80,7 +80,9 @@ const GLOBAL_CHIPS: &[GlobalChip] = &[
   },
 ];
 
-const HINT_SEP: &str = " · ";
+fn hint_sep() -> &'static str {
+  crate::tui::glyphs::active().middot_sep()
+}
 
 /// Resolve a chip's keys against the supplied keymap. Single-action
 /// chips just show the first binding's label. The `panes` chip
@@ -180,7 +182,7 @@ pub fn global_hint_slot_width(app: &App) -> u16 {
   let mut w: usize = 0;
   for (i, (keys, label)) in chips.iter().enumerate() {
     if i > 0 {
-      w += HINT_SEP.chars().count();
+      w += hint_sep().chars().count();
     }
     w += keys.chars().count() + 1 + label.chars().count();
   }
@@ -196,7 +198,7 @@ pub fn global_hint_text(app: &App) -> String {
   let mut out = String::new();
   for (i, (keys, label)) in resolved_chips(app).into_iter().enumerate() {
     if i > 0 {
-      out.push_str(HINT_SEP);
+      out.push_str(hint_sep());
     }
     out.push_str(&keys);
     out.push(':');
@@ -215,7 +217,7 @@ pub fn render_global(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pal
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(chips.len() * 2 + 1);
   for (i, (keys, label)) in chips.into_iter().enumerate() {
     if i > 0 {
-      spans.push(Span::raw(HINT_SEP));
+      spans.push(Span::raw(hint_sep()));
     }
     spans.push(hint_span(&keys, label));
   }

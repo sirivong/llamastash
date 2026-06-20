@@ -14,6 +14,7 @@ pub mod download_strip;
 pub mod events;
 pub mod filter;
 pub mod fmt;
+pub mod glyphs;
 pub mod help_bar;
 pub mod help_overlay;
 pub mod hf_dialog;

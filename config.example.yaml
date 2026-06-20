@@ -203,6 +203,20 @@ strict_fit: false
 # Sources — CLI: (none) · Env: (none, config-only).
 jinja: true
 
+# ─── ASCII glyph fallback ─────────────────────────────────────────
+#
+# Render the TUI with a 7-bit ASCII glyph set instead of the default
+# Unicode house style (geometric status dots ● ◐ ◌, severity markers
+# △ ▲, box-drawing borders ┌─┐). Turn this on for terminals or fonts
+# that show the Unicode set as tofu (legacy conhost, minimal SSH
+# fonts, some CI ptys). Severity stays double-encoded — warning (!)
+# and critical (*) keep distinct shapes so the tier survives a
+# colour-stripped terminal. Off by default.
+#
+# Sources — Env: LLAMASTASH_ASCII=1 (wins over this field) ·
+#           CLI: (none).
+ascii_glyphs: false
+
 # ─── Mouse focus ──────────────────────────────────────────────────
 #
 # Opt into terminal mouse capture. When enabled:

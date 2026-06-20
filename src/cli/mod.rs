@@ -192,6 +192,10 @@ fn report(result: CliResult) -> i32 {
 /// /path` ran with the daemon down displayed an empty Models pane
 /// and "daemon connecting…" indefinitely.
 pub(crate) async fn handle_tui(cli: &Cli, config: &crate::config::Config) -> CliResult {
+  // Pick the glyph set once, before any frame renders. Env wins over
+  // the config flag per the project's env-truthy convention. Covers
+  // both the `--render` snapshot and the interactive loop below.
+  crate::tui::glyphs::init(crate::tui::glyphs::ascii_env(), config.ascii_glyphs);
   // Ensure the daemon is up. The TUI's writer task reconnects per
   // command, so we don't hold the connection past startup priming.
   //

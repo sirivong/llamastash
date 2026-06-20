@@ -170,7 +170,7 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
   // the top of the group.
   if !inputs.running.is_empty() {
     rows.push(ListRow::Header {
-      label: "▶ Running".into(),
+      label: format!("{} Running", crate::tui::glyphs::active().section_marker()),
     });
     for launch in inputs.running {
       // If the path doesn't appear in the catalog (e.g. an
@@ -199,7 +199,7 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
     .collect();
   if !recent_visible.is_empty() {
     rows.push(ListRow::Header {
-      label: "↺ Recent".into(),
+      label: format!("{} Recent", crate::tui::glyphs::active().recent()),
     });
     for m in recent_visible {
       let fav = favorite_set.contains(&m.path);
@@ -239,7 +239,7 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
     .collect();
   if !favorites.is_empty() {
     rows.push(ListRow::Header {
-      label: "★ Favorites".into(),
+      label: format!("{} Favorites", crate::tui::glyphs::active().star()),
     });
     let mut sorted = favorites.clone();
     sorted.sort_by_key(|a| display_name(a));
@@ -691,7 +691,10 @@ fn build_status_legend(palette: &Palette) -> Line<'static> {
   spans.push(Span::raw(" "));
   for (i, (state, label)) in entries.iter().enumerate() {
     if i > 0 {
-      spans.push(Span::styled(" · ", palette.muted_style()));
+      spans.push(Span::styled(
+        crate::tui::glyphs::active().middot_sep(),
+        palette.muted_style(),
+      ));
     }
     spans.push(Span::styled(
       glyph_for(*state).to_string(),
@@ -750,6 +753,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, palette: &Palette, input: Rende
         .title(title_line)
         .title_bottom(legend)
         .borders(Borders::ALL)
+        .border_set(crate::tui::glyphs::active().border_set())
         .border_style(Style::default().fg(border_color)),
     )
     // KDash-style row highlight: paint the focused row with a
@@ -825,7 +829,11 @@ pub(crate) fn build_block_title(
   let hint_budget = budget
     .saturating_sub(structural_w)
     .saturating_sub(3 /* ` · ` before first hint */);
-  let hints = crate::tui::hint_picker::pick(input.hints.clone(), hint_budget, " · ");
+  let hints = crate::tui::hint_picker::pick(
+    input.hints.clone(),
+    hint_budget,
+    crate::tui::glyphs::active().middot_sep(),
+  );
 
   // Now build the actual Line with styled spans.
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
@@ -854,7 +862,10 @@ pub(crate) fn build_block_title(
     }
     None => spans.push(Span::styled(count, title_style)),
   }
-  spans.push(Span::styled(" · ".to_string(), palette.muted_style()));
+  spans.push(Span::styled(
+    crate::tui::glyphs::active().middot_sep(),
+    palette.muted_style(),
+  ));
 
   // Filter slot. Inactive chip uses the same muted style as the
   // other hints so the title reads as a uniform hint strip.
@@ -881,7 +892,10 @@ pub(crate) fn build_block_title(
 
   // Hint chips, separated by ` · `.
   for h in hints {
-    spans.push(Span::styled(" · ".to_string(), palette.muted_style()));
+    spans.push(Span::styled(
+      crate::tui::glyphs::active().middot_sep(),
+      palette.muted_style(),
+    ));
     spans.push(Span::styled(h, palette.muted_style()));
   }
   spans.push(Span::raw(" "));
@@ -904,9 +918,10 @@ fn cell(s: &str, w: usize) -> String {
     }
     out
   } else {
-    let keep = w.saturating_sub(1);
+    let ellipsis = crate::tui::glyphs::active().ellipsis();
+    let keep = w.saturating_sub(ellipsis.chars().count());
     let mut out: String = s.chars().take(keep).collect();
-    out.push('…');
+    out.push_str(ellipsis);
     out
   }
 }
@@ -958,7 +973,10 @@ fn marker_span(state: SurfaceState, favorite: bool, palette: &Palette) -> Span<'
     );
   }
   if favorite {
-    return Span::styled(" ★ ".to_string(), palette.warning_style());
+    return Span::styled(
+      format!(" {} ", crate::tui::glyphs::active().star()),
+      palette.warning_style(),
+    );
   }
   Span::raw("   ".to_string())
 }
@@ -981,16 +999,17 @@ fn column_value(id: ColumnId, model: &ListRow) -> String {
   else {
     return String::new();
   };
+  let dash = crate::tui::glyphs::active().placeholder();
   match id {
-    ColumnId::Device => device.as_deref().unwrap_or("—").to_string(),
+    ColumnId::Device => device.as_deref().unwrap_or(dash).to_string(),
     ColumnId::Arch => arch.clone(),
     ColumnId::Quant => quant.clone(),
-    ColumnId::Ctx => native_ctx.map(format_tokens).unwrap_or_else(|| "—".into()),
+    ColumnId::Ctx => native_ctx.map(format_tokens).unwrap_or_else(|| dash.into()),
     ColumnId::Size => weights_bytes
       .map(format_bytes)
-      .unwrap_or_else(|| "—".into()),
+      .unwrap_or_else(|| dash.into()),
     ColumnId::Mode => mode_hint.clone(),
-    ColumnId::Port => port.map(|p| format!(":{p}")).unwrap_or_else(|| "—".into()),
+    ColumnId::Port => port.map(|p| format!(":{p}")).unwrap_or_else(|| dash.into()),
   }
 }
 
@@ -1043,7 +1062,7 @@ fn render_row<'a>(
       // than data. Drawn with `─` (U+2500) so it lines up with the
       // box-drawing border characters already on the block.
       ListItem::new(Line::from(Span::styled(
-        "─".repeat(content_w),
+        crate::tui::glyphs::active().hline().repeat(content_w),
         palette.muted_style(),
       )))
     }
