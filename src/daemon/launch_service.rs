@@ -1,13 +1,13 @@
 //! The daemon-side launch pipeline.
 //!
-//! [`compose_and_spawn`] is the one code path that turns a parsed
-//! [`StartParams`] into a running supervised model: input validation →
+//! `compose_and_spawn` is the one code path that turns a parsed
+//! `StartParams` into a running supervised model: input validation →
 //! identity / arch resolution → race-safe port reservation → layered
 //! knob merge → memory admission → supervisor spawn → registry insert →
 //! last-params recorder. The IPC `start_model` handler and the proxy's
 //! auto-start path both call it, so the two surfaces can never drift in
 //! how a launch is composed. Managed-multiplexer (Lemonade) launches
-//! branch off into [`start_delegated_lemonade`], anchored on the shared
+//! branch off into `start_delegated_lemonade`, anchored on the shared
 //! umbrella rather than a per-model child.
 
 use std::ffi::OsString;
