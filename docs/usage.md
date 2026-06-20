@@ -240,7 +240,7 @@ These work on every subcommand (clap marks them `global`):
 -v, --verbose              Debug logging.
 ```
 
-The colored-output policy OR-es three off-conditions: `--no-colors`, `NO_COLOR` env (non-empty), or non-TTY stdout. Any one silences colors. `--json` output is byte-stable regardless — pin agents against `--json`, not against the human form.
+The colored-output policy OR-es three off-conditions: `--no-colors`, `NO_COLOR` env (non-empty), or non-TTY stdout. Any one silences colors. `--json` output is byte-stable regardless — pin agents against `--json`, not against the human form. `--help` follows the same policy: it shows styled section headers and flags on a TTY and stays plain bytes when piped, `NO_COLOR` is set, or `--no-colors` is passed.
 
 Report-style commands (`list`, `status`, `presets list`, `favorites list`, `last-params`, `daemon status`) render padded + colored tables on a TTY and plain tab-separated rows when piped. The padded form is purely a human affordance; the TSV path stays byte-stable so existing `awk -F\t` / `column -t` pipelines keep working unchanged. Action-style commands (`daemon start/stop`, `start`, `stop`) keep their single-line shape but pick up value-color highlights on launch-id / port / pid / state when colors are enabled.
 
@@ -910,9 +910,9 @@ inheritance is visible at the row level.
 | `←` / `→`                                                 | Settings tab: cycle the focused row's value through its preset list (no-op on other tabs) |
 | `Esc` / `Shift+M`                                         | Return focus to the Models list                                                           |
 | `Shift+L` / `Shift+C` / `Shift+S` / `Shift+E` / `Shift+R` | Jump to Logs / Chat / Settings tab. `L` and `C/E/R` are gated on a running model.         |
-| `s`                                                       | Toggle Logs auto-scroll                                                                   |
+| `s`                                                       | Toggle Logs auto-scroll (toasts `auto-scroll on` / `off`)                                 |
 | `c` (or `y`)                                              | Logs tab: copy the full log buffer to clipboard                                           |
-| `r`                                                       | Chat tab: toggle `<think>` block collapse (reasoning trace)                               |
+| `r`                                                       | Chat tab: toggle `<think>` block collapse (toasts `reasoning shown` / `collapsed`)        |
 | `Ctrl+S`                                                  | Stop the focused running launch (confirmation popup)                                      |
 | `e`                                                       | Enter edit mode on the active tab's input field                                           |
 
@@ -946,8 +946,9 @@ inheritance is visible at the row level.
 ## Toasts
 
 Transient status messages (yank confirmations, "nothing to stop" hints,
-no-op cycle attempts, theme changes) surface as a short toast string in
-the bottom-right of the active panel. Toasts:
+no-op cycle attempts, theme changes, and toggle-state changes such as
+`auto-scroll on/off` or `reasoning shown/collapsed`) surface as a short
+toast string in the bottom-right of the active panel. Toasts:
 
 - auto-clear after ~3 seconds (`TOAST_TTL` in `src/tui/app.rs`);
 - stack one-at-a-time — a newer toast replaces the previous one

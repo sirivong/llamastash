@@ -680,7 +680,7 @@ truncate helper; golden renders pass; the "reusable components" `TODO.md` item i
 
 ---
 
-- [ ] **Unit 8: CLI & TUI polish**
+- [x] **Unit 8: CLI & TUI polish**
 
 **Goal:** Close the smaller UX gaps: colorized `--help`, `show` aligned with the shared
 table look, feedback on silent toggles, header/hint collision at the 80-col floor, and

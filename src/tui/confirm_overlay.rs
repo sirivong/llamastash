@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::theme::Palette;
-use crate::tui::app::{App, ConfirmAction};
+use crate::tui::app::{App, ConfirmAction, ConfirmSeverity};
 use crate::tui::keybindings::{Action as KeyAction, Focus};
 
 /// Render the confirmation popup. Caller should only invoke this
@@ -25,6 +25,14 @@ pub fn render(
 ) {
   let (title, body) = describe(action);
 
+  // Tone the border/title off the action's severity: red for prompts
+  // that lose work (stop/kill/delete/cancel), the warning hue for
+  // neutral/additive prompts so red stays meaningful.
+  let (tone, tone_style) = match action.severity() {
+    ConfirmSeverity::Destructive => (palette.error, palette.error_style()),
+    ConfirmSeverity::Neutral => (palette.warning, palette.warning_style()),
+  };
+
   let rect = crate::tui::layout::centered_abs(area, 60, 8, 4, 2);
   frame.render_widget(Clear, rect);
   // Restore the theme surface tone after `Clear` so the popup
@@ -35,12 +43,10 @@ pub fn render(
   let block = Block::default()
     .title(Line::from(Span::styled(
       format!(" {title} "),
-      Style::default()
-        .fg(palette.error)
-        .add_modifier(Modifier::BOLD),
+      Style::default().fg(tone).add_modifier(Modifier::BOLD),
     )))
     .borders(Borders::ALL)
-    .border_style(palette.error_style());
+    .border_style(tone_style);
   let inner = block.inner(rect);
   frame.render_widget(block, rect);
 
@@ -157,6 +163,50 @@ mod tests {
       ENTER_LABEL
     );
     assert_eq!(keymap_label(&app, KeyAction::Cancel, "fallback"), ESC_LABEL);
+  }
+
+  #[test]
+  fn destructive_actions_are_red_neutral_actions_are_not() {
+    use crate::tui::app::{ConfirmSeverity, StartModelArgs};
+    // Work-losing prompts: red.
+    for action in [
+      ConfirmAction::StopModel {
+        launch_id: "L1".into(),
+        name: "qwen".into(),
+      },
+      ConfirmAction::KillDaemon,
+      ConfirmAction::RestartDaemon,
+      ConfirmAction::DeleteModel {
+        path: "/m/x.gguf".into(),
+        display_name: "x".into(),
+      },
+      ConfirmAction::CancelDownload {
+        repo_id: "owner/repo".into(),
+        friendly_name: "repo".into(),
+      },
+    ] {
+      assert_eq!(
+        action.severity(),
+        ConfirmSeverity::Destructive,
+        "{action:?} should read destructive"
+      );
+    }
+    // Additive duplicate launch: neutral, so red stays meaningful.
+    let dup = ConfirmAction::LaunchDuplicate {
+      name: "qwen".into(),
+      active_instances: 1,
+      args: Box::new(StartModelArgs {
+        model_path: "/m/x.gguf".into(),
+        ctx: None,
+        reasoning: None,
+        knobs: Default::default(),
+        extras: Vec::new(),
+        mode: None,
+        prefer_port: None,
+        backend: Default::default(),
+      }),
+    };
+    assert_eq!(dup.severity(), ConfirmSeverity::Neutral);
   }
 
   #[test]

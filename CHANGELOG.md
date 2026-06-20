@@ -12,6 +12,9 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 ### Changed
 
 - TUI Host pane now shows a single `GPU*` row on multi-GPU machines (combined usage + hottest temp) instead of one row per card; the help legend explains the marker, and `status --json .host.gpu_devices` keeps the per-card breakdown.
+- `--help` is now colorized on a TTY (styled section headers / flags), following the same color policy as the rest of the CLI — plain bytes when piped, `NO_COLOR` is set, or `--no-colors` is passed.
+- `show`'s human output now matches the `status` / `presets` tables: shared section headers and aligned labels, with on-disk sizes routed through the canonical byte formatter.
+- TUI: pressing `s` (Logs auto-scroll) or `r` (Chat reasoning collapse) now toasts the new state instead of toggling silently; the narrow title bar drops trailing brand segments (theme, then daemon, then version) instead of clipping mid-word; and the confirm popup tones its border by severity — red only for stop / kill / delete / cancel, the warning hue for neutral prompts.
 
 ### Fixed
 

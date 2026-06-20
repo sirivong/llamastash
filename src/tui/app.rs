@@ -417,6 +417,17 @@ pub struct StartModelArgs {
   pub backend: crate::launch::params::BackendChoice,
 }
 
+/// How alarming a confirm prompt is, so the overlay can tone its
+/// border/title accordingly. `Destructive` (red) is reserved for
+/// prompts that lose work or data — stopping/killing a process,
+/// deleting a file, cancelling a download. `Neutral` (accent/warning)
+/// is for reversible or additive prompts where red would cry wolf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmSeverity {
+  Destructive,
+  Neutral,
+}
+
 /// Action awaiting user confirmation in the modal popup. Captured
 /// at the moment the user presses the trigger key, applied when
 /// they confirm with `y` / Enter.
@@ -459,6 +470,23 @@ pub enum ConfirmAction {
     /// `WriterCmd::StartModel`.
     args: Box<StartModelArgs>,
   },
+}
+
+impl ConfirmAction {
+  /// Severity tier for the confirm overlay's border/title tone. Only
+  /// the work-losing prompts read red; an additive duplicate-launch
+  /// prompt stays neutral so red keeps meaning "you're about to lose
+  /// something".
+  pub fn severity(&self) -> ConfirmSeverity {
+    match self {
+      ConfirmAction::StopModel { .. }
+      | ConfirmAction::KillDaemon
+      | ConfirmAction::RestartDaemon
+      | ConfirmAction::DeleteModel { .. }
+      | ConfirmAction::CancelDownload { .. } => ConfirmSeverity::Destructive,
+      ConfirmAction::LaunchDuplicate { .. } => ConfirmSeverity::Neutral,
+    }
+  }
 }
 
 impl App {

@@ -1,10 +1,5 @@
 use anyhow::Result;
-use clap::Parser;
-use llamastash::{
-  cli::{self, Cli},
-  config::loader,
-  util::logging,
-};
+use llamastash::{cli, config::loader, util::logging};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -15,7 +10,9 @@ async fn main() -> Result<()> {
   // Parse by hand so clap's arg-rejection exit code matches our contract:
   // a usage error exits USAGE (64), not clap's default 2. `--help` /
   // `--version` are not errors — clap writes them to stdout and we exit 0.
-  let cli = match Cli::try_parse() {
+  // `parse_cli` also wires the `--no-colors` → `ColorChoice::Never` policy
+  // for styled help, which has to be decided before clap renders --help.
+  let cli = match cli::cli_args::parse_cli() {
     Ok(cli) => cli,
     Err(err) => {
       let _ = err.print();

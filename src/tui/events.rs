@@ -851,6 +851,14 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
       // press doesn't silently flip hidden state.
       if app.right_tab == RightTab::Chat {
         app.chat.collapse_thinks = !app.chat.collapse_thinks;
+        // Toast the resulting state so the flip isn't silent — the
+        // reasoning blocks may be off-screen when `r` is pressed.
+        let msg = if app.chat.collapse_thinks {
+          "reasoning collapsed"
+        } else {
+          "reasoning shown"
+        };
+        app.show_toast(msg);
       }
     }
     Action::ToggleAutoScroll => {
@@ -858,6 +866,12 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
       // (destructive policy) so bare `s` has a single meaning.
       if app.right_tab == RightTab::Logs {
         app.logs_state.auto_scroll = !app.logs_state.auto_scroll;
+        let msg = if app.logs_state.auto_scroll {
+          "auto-scroll on"
+        } else {
+          "auto-scroll off"
+        };
+        app.show_toast(msg);
       }
     }
     Action::StageRerankCandidate => {
@@ -4346,6 +4360,37 @@ mod tests {
         "`s` on {tab:?} must not toggle the Logs auto-scroll"
       );
     }
+  }
+
+  #[test]
+  fn s_on_logs_tab_toasts_the_new_auto_scroll_state() {
+    let mut app = App::new(Default::default());
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Logs;
+    app.logs_state.lines = (0..10).map(|i| format!("line {i}")).collect();
+    app.logs_state.auto_scroll = true;
+    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::NONE));
+    assert!(!app.logs_state.auto_scroll);
+    assert_eq!(app.toast_message(), Some("auto-scroll off"));
+    pump_input(&mut app, key(KeyCode::Char('s'), KeyModifiers::NONE));
+    assert!(app.logs_state.auto_scroll);
+    assert_eq!(app.toast_message(), Some("auto-scroll on"));
+  }
+
+  #[test]
+  fn r_on_chat_tab_toasts_the_new_reasoning_state() {
+    let mut app = App::new(Default::default());
+    app.focus = Focus::RightPane;
+    app.right_tab = RightTab::Chat;
+    let initial = app.chat.collapse_thinks;
+    pump_input(&mut app, key(KeyCode::Char('r'), KeyModifiers::NONE));
+    let expected = if app.chat.collapse_thinks {
+      "reasoning collapsed"
+    } else {
+      "reasoning shown"
+    };
+    assert_ne!(app.chat.collapse_thinks, initial, "r must flip the state");
+    assert_eq!(app.toast_message(), Some(expected));
   }
 
   #[test]

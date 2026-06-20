@@ -30,6 +30,28 @@ pub fn fmt_gib(bytes: u64) -> String {
   format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
+/// Canonical spelled-out multi-unit byte formatter: picks the largest
+/// binary unit that keeps the number readable and spells the suffix
+/// (`B` / `KiB` / `MiB` / `GiB`). One decimal at MiB/GiB, none at KiB,
+/// exact bytes under 1 KiB. Shared by `show` (on-disk size, per-shard
+/// rows) so a file-size surface and the `GiB`-only `fmt_gib` agree on
+/// precision at the GiB boundary.
+pub fn fmt_bytes(bytes: u64) -> String {
+  const KIB: f64 = 1024.0;
+  const MIB: f64 = KIB * 1024.0;
+  const GIB: f64 = MIB * 1024.0;
+  let b = bytes as f64;
+  if b >= GIB {
+    format!("{:.1} GiB", b / GIB)
+  } else if b >= MIB {
+    format!("{:.1} MiB", b / MIB)
+  } else if b >= KIB {
+    format!("{:.0} KiB", b / KIB)
+  } else {
+    format!("{bytes} B")
+  }
+}
+
 /// Canonical display name for a GPU backend label (the `gpu_backend`
 /// wire string / [`GpuInfo::label`]). Used wherever a GPU vendor is
 /// named so `status` / `doctor` / `init` / the TUI agree on the word.
@@ -442,6 +464,26 @@ pub fn detect_binary(inputs: DetectBinaryInputs) -> BinaryPresence {
 mod tests {
   use super::*;
   use crate::gpu::GpuDevice;
+
+  #[test]
+  fn fmt_bytes_rolls_through_units_at_threshold_boundaries() {
+    assert_eq!(fmt_bytes(0), "0 B");
+    assert_eq!(fmt_bytes(1023), "1023 B");
+    assert_eq!(fmt_bytes(1024), "1 KiB");
+    assert_eq!(fmt_bytes(1024 * 1024 - 1), "1024 KiB");
+    assert_eq!(fmt_bytes(1024 * 1024), "1.0 MiB");
+    assert_eq!(fmt_bytes(2 * 1024 * 1024), "2.0 MiB");
+    assert_eq!(fmt_bytes(1024 * 1024 * 1024), "1.0 GiB");
+    assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+  }
+
+  #[test]
+  fn fmt_bytes_gib_precision_matches_fmt_gib() {
+    // Both round 1024³ B to one decimal GiB, so the file-size surface
+    // and the canonical memory surface never disagree on the boundary.
+    let n = 40_000_000_000u64;
+    assert_eq!(fmt_bytes(n), fmt_gib(n));
+  }
 
   #[test]
   fn aggregate_vram_picks_minimum_across_nvidia_devices() {

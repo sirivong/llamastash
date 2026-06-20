@@ -20,6 +20,7 @@ use crate::cli::resolve::{fetch_catalog, resolve_model, CatalogRow};
 use crate::config::Config;
 use crate::daemon::host_metrics::GpuFlavor;
 use crate::discovery::shard_sizes::{self, ShardSize};
+use crate::init::detection::fmt_bytes;
 use crate::launch::defaults_table;
 
 pub async fn handle(args: ShowArgs, cli: &Cli, config: &Config) -> CliResult {
@@ -220,98 +221,98 @@ fn shard_breakdown(row: &CatalogRow) -> Vec<ShardSize> {
 }
 
 fn render_human(row: &CatalogRow, shards: &[ShardSize], total_bytes: u64, env: &Value) -> String {
-  use std::fmt::Write;
+  use crate::cli::format::{kv_block, section_header};
   let mut out = String::new();
-  let kv = |buf: &mut String, key: &str, val: &str| {
-    let _ = writeln!(buf, "  {}  {}", colors::dim(&format!("{key:<18}")), val);
-  };
 
-  let _ = writeln!(out, "{}", bold(&row.name()));
+  // Header row: the model name is the document title. Section bodies
+  // below route through the shared `kv_block` so labels align (and bold
+  // on a TTY) exactly like `status` / `presets`.
+  out.push_str(&section_header(&row.name(), None));
+  let mut header: Vec<(&str, String)> = Vec::new();
   // `path` covers single-file models; multi-shard sets get a full
   // per-shard listing under the `size` section below, so emit the
   // parent dir instead — shard 1's path on its own would only
   // partially describe the model on disk.
   if shards.len() == 1 {
-    kv(&mut out, "path", &row.path);
+    header.push(("path", row.path.clone()));
   }
-  kv(&mut out, "parent", &row.parent);
-  kv(&mut out, "source", &row.source);
-  kv(
-    &mut out,
+  header.push(("parent", row.parent.clone()));
+  header.push(("source", row.source.clone()));
+  header.push((
     "backend",
-    crate::cli::output::backend_for_source(&row.source),
-  );
+    crate::cli::output::backend_for_source(&row.source).to_string(),
+  ));
   if let Some(id) = &row.model_id {
-    kv(&mut out, "model_id", id);
+    header.push(("model_id", id.clone()));
   }
   if let Some(lbl) = &row.display_label {
-    kv(&mut out, "display_label", lbl);
+    header.push(("display_label", lbl.clone()));
   }
   if let Some(err) = &row.parse_error {
-    kv(&mut out, "parse_error", &colors::warning(err));
+    header.push(("parse_error", colors::warning(err)));
   }
+  out.push_str(&kv_block(&header));
 
-  let _ = writeln!(out, "\n{}", bold("metadata"));
-  kv(&mut out, "arch", row.arch.as_deref().unwrap_or("—"));
-  kv(&mut out, "quant", row.quant.as_deref().unwrap_or("—"));
-  kv(
-    &mut out,
-    "native_ctx",
-    &row
-      .native_ctx
-      .map(|n| n.to_string())
-      .unwrap_or_else(|| "—".into()),
-  );
-  kv(
-    &mut out,
-    "mode_hint",
-    row.mode_hint.as_deref().unwrap_or("—"),
-  );
-  kv(
-    &mut out,
-    "parameter_label",
-    row.parameter_label.as_deref().unwrap_or("—"),
-  );
-  kv(
-    &mut out,
-    "tokenizer_kind",
-    row.tokenizer_kind.as_deref().unwrap_or("—"),
-  );
-  kv(
-    &mut out,
-    "has_chat_template",
-    if row.has_chat_template { "yes" } else { "no" },
-  );
-  kv(
-    &mut out,
-    "has_reasoning_hint",
-    if row.has_reasoning_hint { "yes" } else { "no" },
-  );
+  out.push('\n');
+  out.push_str(&section_header("metadata", None));
+  out.push_str(&kv_block(&[
+    ("arch", row.arch.as_deref().unwrap_or("—").to_string()),
+    ("quant", row.quant.as_deref().unwrap_or("—").to_string()),
+    (
+      "native_ctx",
+      row
+        .native_ctx
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "—".into()),
+    ),
+    (
+      "mode_hint",
+      row.mode_hint.as_deref().unwrap_or("—").to_string(),
+    ),
+    (
+      "parameter_label",
+      row.parameter_label.as_deref().unwrap_or("—").to_string(),
+    ),
+    (
+      "tokenizer_kind",
+      row.tokenizer_kind.as_deref().unwrap_or("—").to_string(),
+    ),
+    (
+      "has_chat_template",
+      if row.has_chat_template { "yes" } else { "no" }.to_string(),
+    ),
+    (
+      "has_reasoning_hint",
+      if row.has_reasoning_hint { "yes" } else { "no" }.to_string(),
+    ),
+  ]));
 
-  let _ = writeln!(out, "\n{}", bold("size"));
-  kv(&mut out, "shard_count", &shards.len().to_string());
-  kv(&mut out, "on_disk_total", &format_bytes(total_bytes));
+  out.push('\n');
+  out.push_str(&section_header("size", None));
+  let mut size_rows: Vec<(String, String)> = vec![
+    ("shard_count".to_string(), shards.len().to_string()),
+    ("on_disk_total".to_string(), fmt_bytes(total_bytes)),
+  ];
   // Per-shard breakdown so a multi-shard model shows every file
   // and its individual size, not just shard 1. Single-file models
   // collapse to one row, keeping the human output tight.
   for (idx, shard) in shards.iter().enumerate() {
-    let label = format!("shard {}", idx + 1);
     let size = if shard.bytes == 0 {
       colors::warning("missing")
     } else {
-      format_bytes(shard.bytes)
+      fmt_bytes(shard.bytes)
     };
     let path = render_shard_path(&shard.path);
-    kv(&mut out, &label, &format!("{size}  {path}"));
+    size_rows.push((format!("shard {}", idx + 1), format!("{size}  {path}")));
   }
+  out.push_str(&kv_block_owned(&size_rows));
 
   // Live running block — only when a supervisor is up for this
   // model. Shows the context window `--fit` actually resolved and flags
   // a memory-driven clamp, so `show` reflects the running reality.
   if let Some(running) = env.get("running").filter(|r| !r.is_null()) {
-    let _ = writeln!(out, "\n{}", bold("running"));
-    kv(&mut out, "state", &fmt_field(running.get("state")));
-    kv(&mut out, "port", &fmt_field(running.get("port")));
+    out.push('\n');
+    out.push_str(&section_header("running", None));
     let clamped = running
       .get("ctx_clamped")
       .and_then(Value::as_bool)
@@ -323,7 +324,11 @@ fn render_human(row: &CatalogRow, shards: &[ShardSize], total_bytes: u64, env: &
       Some(Value::Number(n)) => n.to_string(),
       _ => "—".into(),
     };
-    kv(&mut out, "resolved_ctx", &resolved);
+    out.push_str(&kv_block(&[
+      ("state", fmt_field(running.get("state"))),
+      ("port", fmt_field(running.get("port"))),
+      ("resolved_ctx", resolved),
+    ]));
   }
 
   let backend = env
@@ -331,31 +336,48 @@ fn render_human(row: &CatalogRow, shards: &[ShardSize], total_bytes: u64, env: &
     .and_then(|a| a.get("gpu_backend"))
     .and_then(Value::as_str)
     .unwrap_or("");
-  let _ = writeln!(
-    out,
-    "\n{} ({})",
-    bold("arch_defaults"),
-    colors::dim(backend),
-  );
+  out.push('\n');
+  // `arch_defaults` carries the resolving GPU backend as a dim suffix
+  // on the title line, mirroring `section_header`'s `(N noun)` count
+  // suffix style so the section still reads "arch_defaults (CpuOnly)".
+  out.push_str(section_header("arch_defaults", None).trim_end());
+  out.push(' ');
+  out.push_str(&colors::dim(&format!("({backend})")));
+  out.push('\n');
   let yaml = env.get("arch_defaults").and_then(|a| a.get("yaml"));
   let builtin = env.get("arch_defaults").and_then(|a| a.get("builtin"));
-  kv(&mut out, "yaml", &knobs_one_line(yaml));
-  kv(&mut out, "builtin", &knobs_one_line(builtin));
+  out.push_str(&kv_block(&[
+    ("yaml", knobs_one_line(yaml)),
+    ("builtin", knobs_one_line(builtin)),
+  ]));
 
-  let _ = writeln!(out, "\n{}", bold("last_params"));
+  out.push('\n');
+  out.push_str(&section_header("last_params", None));
   match env.get("last_params") {
-    Some(Value::Null) | None => kv(&mut out, "(none)", "launch it once to populate"),
-    Some(v) => kv(&mut out, "ctx", &fmt_field(v.get("ctx"))),
-  }
-  if let Some(v) = env.get("last_params") {
-    if !v.is_null() {
-      kv(&mut out, "mode", &fmt_field(v.get("mode")));
-      kv(&mut out, "reasoning", &fmt_field(v.get("reasoning")));
-      kv(&mut out, "knobs", &knobs_one_line(v.get("knobs")));
+    Some(Value::Null) | None => out.push_str(&kv_block(&[(
+      "(none)",
+      "launch it once to populate".to_string(),
+    )])),
+    Some(v) => {
+      out.push_str(&kv_block(&[
+        ("ctx", fmt_field(v.get("ctx"))),
+        ("mode", fmt_field(v.get("mode"))),
+        ("reasoning", fmt_field(v.get("reasoning"))),
+        ("knobs", knobs_one_line(v.get("knobs"))),
+      ]));
     }
   }
 
   out
+}
+
+/// `kv_block` over owned `(String, String)` rows. The shared helper
+/// takes `&[(&str, String)]`; the per-shard rows below build their
+/// labels at runtime (`shard 1`, `shard 2`, …), so we borrow each
+/// owned key into that shape rather than leaking `'static` strings.
+fn kv_block_owned(rows: &[(String, String)]) -> String {
+  let borrowed: Vec<(&str, String)> = rows.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+  crate::cli::format::kv_block(&borrowed)
 }
 
 fn fmt_field(v: Option<&Value>) -> String {
@@ -386,10 +408,6 @@ fn knobs_one_line(value: Option<&Value>) -> String {
   }
 }
 
-fn bold(s: &str) -> String {
-  console::style(s).bold().to_string()
-}
-
 /// Friendly per-shard path: keep just the file basename — the row
 /// header already showed the parent dir, so repeating the full path
 /// per shard would wrap the line and bury the size column.
@@ -398,24 +416,6 @@ fn render_shard_path(path: &Path) -> String {
     .file_name()
     .map(|s| s.to_string_lossy().into_owned())
     .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-fn format_bytes(n: u64) -> String {
-  const KIB: f64 = 1024.0;
-  const MIB: f64 = KIB * 1024.0;
-  const GIB: f64 = MIB * 1024.0;
-  let nf = n as f64;
-  if nf >= GIB {
-    // One decimal, matching the canonical `detection::fmt_gib` so every
-    // memory surface prints GiB to the same precision.
-    format!("{:.1} GiB", nf / GIB)
-  } else if nf >= MIB {
-    format!("{:.1} MiB", nf / MIB)
-  } else if nf >= KIB {
-    format!("{:.0} KiB", nf / KIB)
-  } else {
-    format!("{n} B")
-  }
 }
 
 #[cfg(test)]
@@ -589,12 +589,16 @@ mod tests {
   }
 
   #[test]
-  fn format_bytes_rolls_through_units() {
-    assert_eq!(format_bytes(0), "0 B");
-    assert_eq!(format_bytes(1023), "1023 B");
-    assert_eq!(format_bytes(1024), "1 KiB");
-    assert!(format_bytes(2 * 1024 * 1024).starts_with("2.0 MiB"));
-    assert!(format_bytes(3 * 1024 * 1024 * 1024).starts_with("3.0 GiB"));
+  fn shared_fmt_bytes_rolls_through_units() {
+    // `show` now reuses the canonical `detection::fmt_bytes` so the
+    // on-disk-size column and the memory surfaces never drift; keep a
+    // boundary check here so a future change to the shared formatter
+    // that breaks `show`'s thresholds is caught at this call site too.
+    assert_eq!(fmt_bytes(0), "0 B");
+    assert_eq!(fmt_bytes(1023), "1023 B");
+    assert_eq!(fmt_bytes(1024), "1 KiB");
+    assert!(fmt_bytes(2 * 1024 * 1024).starts_with("2.0 MiB"));
+    assert!(fmt_bytes(3 * 1024 * 1024 * 1024).starts_with("3.0 GiB"));
   }
 
   #[test]

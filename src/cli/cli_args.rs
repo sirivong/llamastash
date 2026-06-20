@@ -8,9 +8,24 @@
 
 use std::{ffi::OsString, net::IpAddr, path::PathBuf};
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{builder::Styles, ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 use crate::banner::BANNER;
+
+/// `--help` color scheme. Mirrors the CLI's semantic palette (green
+/// success / cyan accents) so styled help reads like the rest of the
+/// tool. clap only emits these escapes when its `ColorChoice` resolves
+/// to on — `ColorChoice::Auto` already honors `NO_COLOR` and a non-TTY
+/// stdout, and `main` flips it to `Never` under `--no-colors`, so piped
+/// help stays byte-stable plain text.
+fn help_styles() -> Styles {
+  use clap::builder::styling::{AnsiColor, Effects};
+  Styles::styled()
+    .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default())
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -19,6 +34,7 @@ use crate::banner::BANNER;
   about = "Fast keyboard-driven local-LLM launcher: TUI + CLI for llama.cpp, with a pluggable backend seam",
   long_about = None,
   before_help = BANNER,
+  styles = help_styles(),
 )]
 pub struct Cli {
   /// Path to a YAML config file (overrides `LLAMASTASH_CONFIG`).
@@ -136,6 +152,26 @@ pub fn normalize_offline_env() {
       std::env::remove_var("LLAMASTASH_OFFLINE");
     }
   }
+}
+
+/// Parse argv with the `--help` color policy applied.
+///
+/// `--help` / `--version` are resolved *inside* clap, before any
+/// `colors::init` runs, so the color decision for styled help has to be
+/// wired here. Default `ColorChoice::Auto` already silences color when
+/// `NO_COLOR` is set or stdout isn't a TTY; passing `--no-colors`
+/// (anywhere in argv, since it's a global flag) flips clap to
+/// `ColorChoice::Never` so the third off-condition reaches help too.
+pub fn parse_cli() -> Result<Cli, clap::Error> {
+  use clap::{ColorChoice, CommandFactory, FromArgMatches};
+  let no_colors = std::env::args_os().any(|a| a == "--no-colors");
+  let choice = if no_colors {
+    ColorChoice::Never
+  } else {
+    ColorChoice::Auto
+  };
+  let matches = Cli::command().color(choice).try_get_matches()?;
+  Cli::from_arg_matches(&matches)
 }
 
 #[derive(Subcommand, Debug)]
@@ -1157,6 +1193,29 @@ mod tests {
     assert!(cli.command.is_none());
     assert!(!cli.no_scan);
     assert!(!cli.verbose);
+  }
+
+  #[test]
+  fn help_carries_styles_and_plain_form_has_no_escapes() {
+    use clap::CommandFactory;
+    // The custom `Styles` are wired: the styled (ANSI) rendering of
+    // help carries escape sequences for the section headers / literals.
+    // `ColorChoice` decides whether clap *emits* this form at the
+    // stream boundary (proven byte-stable in the piped E2E check); here
+    // we prove the styling exists to be emitted at all.
+    let help = Cli::command().render_help();
+    let ansi = help.ansi().to_string();
+    assert!(
+      ansi.contains('\u{1b}'),
+      "styled help should carry ANSI escapes"
+    );
+    // The plain `Display` form (what clap writes under `Never` / a
+    // non-TTY stdout) has no escapes, so piped help stays byte-stable.
+    let plain = help.to_string();
+    assert!(
+      !plain.contains('\u{1b}'),
+      "plain help must have no ANSI escapes: {plain:?}"
+    );
   }
 
   #[test]
