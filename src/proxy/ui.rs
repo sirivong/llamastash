@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use http_body_util::{combinators::BoxBody, BodyExt, Full, Limited};
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE};
 use hyper::{HeaderMap, Request, Response, StatusCode};
@@ -147,15 +147,7 @@ fn resolve_target(headers: &HeaderMap, mut running: Vec<RunningEntry>) -> UiTarg
 async fn collect_running(state: &Arc<ProxyState>) -> Vec<RunningEntry> {
   let sup_snap = state.ctx.supervisors.snapshot().await;
   let cat_snap = state.ctx.catalog.snapshot().await;
-  let mut name_by_path: std::collections::HashMap<String, String> =
-    std::collections::HashMap::with_capacity(cat_snap.len());
-  for m in cat_snap.iter() {
-    let name = m
-      .display_label
-      .clone()
-      .unwrap_or_else(|| crate::util::paths::model_display_name(&m.path));
-    name_by_path.insert(m.path.to_string_lossy().into_owned(), name);
-  }
+  let by_path = route::index_catalog_by_path(&cat_snap);
 
   let umbrella_id = crate::backend::lemonade::umbrella_launch_id();
   let mut out = Vec::new();
@@ -168,9 +160,13 @@ async fn collect_running(state: &Arc<ProxyState>) -> Vec<RunningEntry> {
     }
     let id = model.id().clone();
     let path_key = id.path.to_string_lossy().into_owned();
-    let name = name_by_path
+    let name = by_path
       .get(&path_key)
-      .cloned()
+      .map(|m| {
+        m.display_label
+          .clone()
+          .unwrap_or_else(|| crate::util::paths::model_display_name(&m.path))
+      })
       .unwrap_or_else(|| crate::util::paths::model_display_name(&id.path));
     out.push(RunningEntry {
       launch_id: launch_id.as_str().to_string(),
@@ -192,28 +188,12 @@ async fn forward_ui(
   entry: RunningEntry,
 ) -> ProxyResponse {
   let (method, uri, headers, body) = forward::deconstruct(req);
-  // Buffer the body under the shared 2 MiB cap. UI asset GETs are
-  // bodyless; the base-relative API POSTs carry a JSON payload we pass
-  // through untouched.
-  let body_bytes = match Limited::new(body, route::BODY_LIMIT_BYTES).collect().await {
-    Ok(c) => c.to_bytes(),
-    Err(err) => {
-      if err
-        .downcast_ref::<http_body_util::LengthLimitError>()
-        .is_some()
-      {
-        return super::router::error_response(
-          StatusCode::PAYLOAD_TOO_LARGE,
-          "payload_too_large",
-          "request body exceeds the proxy limit",
-        );
-      }
-      return super::router::error_response(
-        StatusCode::BAD_REQUEST,
-        "invalid_request",
-        "failed to read request body",
-      );
-    }
+  // Buffer the body under the shared 2 MiB cap via the same helper the
+  // data plane uses. UI asset GETs are bodyless; the base-relative API
+  // POSTs carry a JSON payload we pass through untouched.
+  let body_bytes = match route::buffer_body(body, route::BODY_LIMIT_BYTES).await {
+    Ok(b) => b,
+    Err(e) => return route::body_error_response(e),
   };
 
   let stripped = strip_ui_prefix(&uri);

@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use futures::TryStreamExt;
-use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
+use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
 use hyper::body::{Bytes, Frame};
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{HeaderMap, Method, Request, Response, StatusCode};
@@ -407,11 +407,9 @@ fn sanitize_header_value(input: &str) -> String {
     .collect()
 }
 
-/// Construct an OpenAI-shaped error response with a [`BoxBody`] body
-/// alias compatible with the streaming arm. Mirrors the helper in
-/// `router.rs` but lives here so the forwarding arm can emit 502s
-/// for upstream-unreachable cases without bouncing through the
-/// router (which is where the public error-envelope helper lives).
+/// Construct an OpenAI-shaped error response for the forwarding arm's
+/// upstream-unreachable (502) cases, sharing the router's
+/// `json_response` builder so the envelope shape stays identical.
 fn error_envelope(
   status: StatusCode,
   kind: &str,
@@ -421,14 +419,7 @@ fn error_envelope(
     error: super::openai::ErrorObject::new(kind, message),
   };
   let bytes = serde_json::to_vec(&envelope).expect("json encoding of fixed shape");
-  let body: BoxBody<Bytes, BodyError> = Full::new(Bytes::from(bytes))
-    .map_err(|never| match never {})
-    .boxed();
-  Response::builder()
-    .status(status)
-    .header(hyper::header::CONTENT_TYPE, "application/json")
-    .body(body)
-    .expect("static headers always parse")
+  super::router::json_response(status, bytes)
 }
 
 /// Helper to massage a hyper::Request<Incoming> into the parts the

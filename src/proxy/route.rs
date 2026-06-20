@@ -148,25 +148,7 @@ pub(crate) struct ParsedBody {
 /// `model` field with a single tolerant parse. The body bytes are
 /// kept as-is for verbatim forwarding.
 pub(crate) async fn buffer_and_extract(body: Incoming) -> Result<ParsedBody, BodyError> {
-  let collected = match Limited::new(body, BODY_LIMIT_BYTES).collect().await {
-    Ok(c) => c,
-    Err(err) => {
-      // `http-body-util::Limited` wraps the inner error inside a
-      // `Box<dyn Error + Send + Sync>`. The cap-overflow case is
-      // exposed as `LengthLimitError`; distinguishing it lets us
-      // emit 413 vs 400 with the right message.
-      if err
-        .downcast_ref::<http_body_util::LengthLimitError>()
-        .is_some()
-      {
-        return Err(BodyError::TooLarge);
-      }
-      return Err(BodyError::Read {
-        message: format!("failed to read request body: {err}"),
-      });
-    }
-  };
-  let bytes = collected.to_bytes();
+  let bytes = buffer_body(body, BODY_LIMIT_BYTES).await?;
 
   // An empty body is allowed in principle — `model` extraction
   // then returns None and the caller emits `model_required`.
@@ -187,6 +169,49 @@ pub(crate) async fn buffer_and_extract(body: Incoming) -> Result<ParsedBody, Bod
   };
 
   Ok(ParsedBody { bytes, model })
+}
+
+/// Drain an inbound body under `cap`, distinguishing the cap-overflow
+/// (413) case from a read failure (400). `http-body-util::Limited`
+/// wraps the inner error in a `Box<dyn Error>`; the overflow case is
+/// exposed as `LengthLimitError`.
+pub(crate) async fn buffer_body(body: Incoming, cap: usize) -> Result<Bytes, BodyError> {
+  match Limited::new(body, cap).collect().await {
+    Ok(c) => Ok(c.to_bytes()),
+    Err(err) => {
+      if err
+        .downcast_ref::<http_body_util::LengthLimitError>()
+        .is_some()
+      {
+        Err(BodyError::TooLarge)
+      } else {
+        Err(BodyError::Read {
+          message: format!("failed to read request body: {err}"),
+        })
+      }
+    }
+  }
+}
+
+/// Map a body-buffering [`BodyError`] to its proxy error response, so
+/// every surface that drains a request body (data plane + `/ui`) emits
+/// the same status + message for an oversized / unreadable / malformed
+/// payload.
+pub(crate) fn body_error_response(err: BodyError) -> ProxyResponse {
+  use hyper::StatusCode;
+  match err {
+    BodyError::TooLarge => super::router::error_response(
+      StatusCode::PAYLOAD_TOO_LARGE,
+      "payload_too_large",
+      &format!(
+        "request body exceeds the {} MiB limit",
+        BODY_LIMIT_BYTES / (1024 * 1024)
+      ),
+    ),
+    BodyError::Malformed { message } | BodyError::Read { message } => {
+      super::router::error_response(StatusCode::BAD_REQUEST, "invalid_request", &message)
+    }
+  }
 }
 
 /// Build a [`RouteDecision`] from the parsed body. Does no I/O
@@ -300,7 +325,7 @@ async fn decide_lemonade(
 /// `cli::resolve::parse_catalog_row` (which goes through the JSON
 /// wire); kept here so the proxy doesn't pay a serialize/deserialize
 /// round-trip on the hot path.
-fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
+pub(crate) fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
   let path = m.path.to_string_lossy().into_owned();
   let parent = m.parent.to_string_lossy().into_owned();
   let arch = m.metadata.as_ref().and_then(|md| md.arch.clone());
@@ -482,24 +507,15 @@ fn fallback_reason_for(requested: Option<&str>, picked: Option<&str>) -> &'stati
 /// the supervisor's `cause` so clients see *why* the launch failed.
 pub(crate) fn launch_failed_response(cause: &str, requested_model: &str) -> ProxyResponse {
   use super::openai::{ErrorObject, ErrorResponse};
-  use http_body_util::{combinators::BoxBody, BodyExt, Full};
-  use hyper::body::Bytes;
-  use hyper::Response;
 
   let message =
     format!("auto-start of `{requested_model}` failed and no running model is available: {cause}");
   let error = ErrorObject::new("launch_failed", message).with_running(Vec::<String>::new());
   let bytes = serde_json::to_vec(&ErrorResponse { error }).expect("json encoding of fixed shape");
-  let body: BoxBody<Bytes, super::router::BodyError> = Full::new(Bytes::from(bytes))
-    .map_err(|never| match never {})
-    .boxed();
-  Ok(
-    Response::builder()
-      .status(hyper::StatusCode::SERVICE_UNAVAILABLE)
-      .header(hyper::header::CONTENT_TYPE, "application/json")
-      .body(body)
-      .expect("static headers always parse"),
-  )
+  Ok(super::router::json_response(
+    hyper::StatusCode::SERVICE_UNAVAILABLE,
+    bytes,
+  ))
 }
 
 /// Resolve a display name for a CatalogRow that mirrors what
@@ -515,23 +531,29 @@ fn served_name_for_row(row: &CatalogRow) -> String {
   crate::util::paths::model_display_name(std::path::Path::new(&row.path))
 }
 
+/// Index a catalog snapshot by canonical path string for O(1) metadata
+/// lookup keyed off a supervisor's `ModelId::path`. The catalog is small
+/// (tens to hundreds of rows), so the build is cheap.
+pub(crate) fn index_catalog_by_path(
+  catalog: &[DiscoveredModel],
+) -> std::collections::HashMap<String, &DiscoveredModel> {
+  let mut by_path = std::collections::HashMap::with_capacity(catalog.len());
+  for m in catalog.iter() {
+    by_path.insert(m.path.to_string_lossy().into_owned(), m);
+  }
+  by_path
+}
+
 /// Build the candidate list the fallback selector picks from. Reads
 /// the supervisor snapshot (filtering to Ready), joins each row
 /// against the catalog snapshot to find the matching `arch`, and
 /// stamps the latest MRU timestamp.
 async fn collect_fallback_candidates(state: &Arc<ProxyState>) -> Vec<FallbackCandidate> {
   let sup_snap = state.ctx.supervisors.snapshot().await;
-  // Build a `path -> CatalogRow` lookup from the catalog snapshot
-  // so we can attach arch + display label without re-walking the
-  // catalog for each supervisor entry. The catalog is small (tens
-  // to hundreds of rows in v1) so a HashMap build is fine on this
-  // path — only triggered when an auto-start has just failed.
+  // Index the catalog by canonical path so each supervisor entry can
+  // attach arch + display label without re-walking the catalog.
   let cat_snap = state.ctx.catalog.snapshot().await;
-  let mut by_path: std::collections::HashMap<String, &DiscoveredModel> =
-    std::collections::HashMap::with_capacity(cat_snap.len());
-  for m in cat_snap.iter() {
-    by_path.insert(m.path.to_string_lossy().into_owned(), m);
-  }
+  let by_path = index_catalog_by_path(&cat_snap);
 
   let umbrella_id = crate::backend::lemonade::umbrella_launch_id();
   let mut out: Vec<FallbackCandidate> = Vec::with_capacity(sup_snap.len());

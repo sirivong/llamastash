@@ -36,7 +36,7 @@ use super::ollama_compat::{
   TagsResponse, VersionResponse, FAR_FUTURE_EXPIRY, UNKNOWN_MTIME,
 };
 use super::openai::{ErrorObject, ErrorResponse, ModelList, ModelObject};
-use super::route::{self, BodyError as RouteBodyError, RouteDecision};
+use super::route::{self, RouteDecision};
 use super::state::ProxyState;
 use crate::cli::resolve::{resolve_model_with_candidates, CatalogRow, ResolveError};
 use crate::daemon::supervisor::ManagedState;
@@ -165,22 +165,7 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
 
   let parsed = match route::buffer_and_extract(body).await {
     Ok(p) => p,
-    Err(RouteBodyError::TooLarge) => {
-      return error_response(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "payload_too_large",
-        &format!(
-          "request body exceeds the {} MiB limit",
-          route::BODY_LIMIT_BYTES / (1024 * 1024)
-        ),
-      );
-    }
-    Err(RouteBodyError::Malformed { message }) => {
-      return error_response(StatusCode::BAD_REQUEST, "invalid_request", &message);
-    }
-    Err(RouteBodyError::Read { message }) => {
-      return error_response(StatusCode::BAD_REQUEST, "invalid_request", &message);
-    }
+    Err(e) => return route::body_error_response(e),
   };
 
   let decision = route::decide(&state, parsed.model).await;
@@ -386,16 +371,16 @@ fn ollama_version() -> ProxyResponse {
 async fn ollama_ps(state: Arc<ProxyState>) -> ProxyResponse {
   let sup_snap = state.ctx.supervisors.snapshot().await;
   let cat_snap = state.ctx.catalog.snapshot().await;
-  // Index the catalog by canonical path so each Ready supervisor can
-  // look up its metadata without re-walking the catalog. Same shape as
-  // route::collect_fallback_candidates.
-  let mut by_path: std::collections::HashMap<String, &DiscoveredModel> =
-    std::collections::HashMap::with_capacity(cat_snap.len());
-  for m in cat_snap.iter() {
-    by_path.insert(m.path.to_string_lossy().into_owned(), m);
-  }
+  let by_path = route::index_catalog_by_path(&cat_snap);
+  let umbrella_id = crate::backend::lemonade::umbrella_launch_id();
   let mut models: Vec<PsModel> = Vec::new();
-  for (_launch_id, sup) in sup_snap.into_iter() {
+  for (launch_id, sup) in sup_snap.into_iter() {
+    // The Lemonade umbrella is a multiplexer process, not a servable
+    // model — exclude it from /api/ps just as the fallback and /ui
+    // walkers do.
+    if launch_id == umbrella_id {
+      continue;
+    }
     if !matches!(sup.state().await, ManagedState::Ready) {
       continue;
     }
@@ -443,19 +428,7 @@ async fn ollama_show(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRes
   let (_method, _uri, _headers, body) = forward::deconstruct(req);
   let parsed = match route::buffer_and_extract(body).await {
     Ok(p) => p,
-    Err(RouteBodyError::TooLarge) => {
-      return error_response(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        "payload_too_large",
-        &format!(
-          "request body exceeds the {} MiB limit",
-          route::BODY_LIMIT_BYTES / (1024 * 1024)
-        ),
-      );
-    }
-    Err(RouteBodyError::Malformed { message }) | Err(RouteBodyError::Read { message }) => {
-      return error_response(StatusCode::BAD_REQUEST, "invalid_request", &message);
-    }
+    Err(e) => return route::body_error_response(e),
   };
   // Re-parse the body bytes into the Ollama-shape ShowRequest. The
   // proxy's `JustModel` peek picked out `body.model`; for /api/show we
@@ -495,7 +468,7 @@ async fn ollama_show(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRes
   let snap = state.ctx.catalog.snapshot().await;
   let rows: Vec<CatalogRow> = snap
     .iter()
-    .map(catalog_row_for_resolver)
+    .map(route::catalog_row_from_discovered)
     .collect::<Vec<_>>();
   match resolve_model_with_candidates(&rows, &reference) {
     Ok(resolved) => {
@@ -589,58 +562,6 @@ fn ollama_tag_from_discovered(m: &DiscoveredModel) -> TagModel {
     size,
     digest,
     details: ollama_details_from_metadata(m.metadata.as_ref()),
-  }
-}
-
-/// Project a [`DiscoveredModel`] onto the `CatalogRow` shape the
-/// resolver expects. Inline equivalent of
-/// `proxy::route::catalog_row_from_discovered`; kept private here so
-/// the show handler doesn't depend on the route module's internals.
-fn catalog_row_for_resolver(m: &DiscoveredModel) -> CatalogRow {
-  let path = m.path.to_string_lossy().into_owned();
-  let parent = m.parent.to_string_lossy().into_owned();
-  let arch = m.metadata.as_ref().and_then(|md| md.arch.clone());
-  let quant = m.metadata.as_ref().map(|md| md.quant.label().to_string());
-  let native_ctx = m.metadata.as_ref().and_then(|md| md.native_ctx);
-  let parameter_label = m
-    .metadata
-    .as_ref()
-    .and_then(|md| md.parameter_label.clone());
-  let weights_bytes = m.metadata.as_ref().and_then(|md| md.weights_bytes);
-  let has_chat_template = m
-    .metadata
-    .as_ref()
-    .map(|md| md.chat_template.is_some())
-    .unwrap_or(false);
-  let has_reasoning_hint = m
-    .metadata
-    .as_ref()
-    .map(|md| md.reasoning_hint)
-    .unwrap_or(false);
-  let tokenizer_kind = m.metadata.as_ref().and_then(|md| md.tokenizer_kind.clone());
-  let total_parameters = m.metadata.as_ref().and_then(|md| md.total_parameters);
-  CatalogRow {
-    path,
-    model_id: None,
-    parent,
-    source: m.source.label().to_string(),
-    arch,
-    quant,
-    native_ctx,
-    mode_hint: None,
-    parameter_label,
-    weights_bytes,
-    display_label: m.display_label.clone(),
-    parse_error: m.parse_error.clone(),
-    split_siblings: m
-      .split_siblings
-      .iter()
-      .map(|p| p.to_string_lossy().into_owned())
-      .collect(),
-    has_chat_template,
-    has_reasoning_hint,
-    tokenizer_kind,
-    total_parameters,
   }
 }
 
@@ -805,7 +726,10 @@ where
   Ok(json_response(status, bytes))
 }
 
-fn json_response(status: StatusCode, body: Vec<u8>) -> Response<BoxBody<Bytes, BodyError>> {
+pub(crate) fn json_response(
+  status: StatusCode,
+  body: Vec<u8>,
+) -> Response<BoxBody<Bytes, BodyError>> {
   let body = full_body(Bytes::from(body));
   Response::builder()
     .status(status)
