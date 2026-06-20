@@ -26,7 +26,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   if app.launch_picker.is_none() {
     if let Some(m) = app.focused_managed() {
       lines.push(heading("Running launch", palette));
-      lines.push(kv("launch", m.launch_id.clone(), palette));
+      lines.push(crate::tui::fmt::kv_row(
+        "launch",
+        m.launch_id.clone(),
+        palette,
+      ));
       // port / state / rss / cpu already render in the header info
       // row above the divider — dropping them here removes the
       // duplication that bloated the running-launch view.
@@ -61,7 +65,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
               .unwrap_or_else(|| format_persisted_knob_value(dispatched, KnobField::Ctx)),
             _ => format_persisted_knob_value(dispatched, *field),
           };
-          lines.push(kv(field.field_name(), value, palette));
+          lines.push(crate::tui::fmt::kv_row(field.field_name(), value, palette));
         }
       }
       let extras: String = app
@@ -70,7 +74,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         .map(|p| p.extras.join(" "))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "(none)".into());
-      lines.push(kv("extras", extras, palette));
+      lines.push(crate::tui::fmt::kv_row("extras", extras, palette));
       lines.push(Line::default());
       let edit_chip = app
         .hint_with(Focus::RightPane, Action::EnterEdit, "edit for launch")
@@ -204,7 +208,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       } else {
         let value = format_knob_value(picker_view, field);
         let source = picker_view.source_for(field).label();
-        lines.push(kv_focused(
+        lines.push(crate::tui::fmt::kv_row_focused(
           field.field_name(),
           value,
           Some(source),
@@ -240,7 +244,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
         .collect::<Vec<_>>()
         .join(" ")
     };
-    lines.push(kv_focused(
+    lines.push(crate::tui::fmt::kv_row_focused(
       "extras",
       extras_text,
       None,
@@ -445,78 +449,8 @@ fn group_header(title: &str, palette: &Palette) -> Line<'static> {
 
 const LABEL_W: usize = 16;
 
-/// Inherited / empty value sentinels rendered when no override exists.
-/// Tracked in one place so `kv` / `kv_focused` agree on which strings
-/// deserve the muted tone.
-fn is_default_value(value: &str) -> bool {
-  value == INHERITED_LABEL || value == "(none)"
-}
-
-/// Style to paint a settings value with — muted when the row falls
-/// through to its layered default (`inherited`, `(none)`), normal text
-/// when the value is overridden by the user or carries a real reading.
-fn value_style(value: &str, palette: &Palette) -> Style {
-  if is_default_value(value) {
-    palette.muted_style()
-  } else {
-    palette.text_style()
-  }
-}
-
-fn kv(label: &str, value: String, palette: &Palette) -> Line<'static> {
-  let style = value_style(&value, palette);
-  Line::from(vec![
-    Span::styled(
-      format!("  {label:<width$}", width = LABEL_W),
-      palette.label_style(),
-    ),
-    Span::styled(value, style),
-  ])
-}
-
 fn chip_label(chip: &str) -> &str {
   chip.split(':').next().unwrap_or(chip)
-}
-
-/// Editable form row. When focused and `cyclable`, the value is
-/// wrapped in `◀ … ▶` so the user sees that Left/Right change it.
-/// When `source_label` is `Some` and `show_source` is true, a
-/// right-aligned `(<label>)` chip is appended.
-#[allow(clippy::too_many_arguments)]
-fn kv_focused(
-  label: &str,
-  value: String,
-  source_label: Option<&str>,
-  focused: bool,
-  cyclable: bool,
-  palette: &Palette,
-  show_source: bool,
-) -> Line<'static> {
-  let marker = if focused { "→ " } else { "  " };
-  let label_style = if focused {
-    Style::default()
-      .fg(palette.accent)
-      .add_modifier(Modifier::BOLD)
-  } else {
-    palette.label_style()
-  };
-  let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
-  spans.push(Span::styled(
-    format!("{marker}{label:<width$}", width = LABEL_W),
-    label_style,
-  ));
-  let v_style = value_style(&value, palette);
-  if focused && cyclable {
-    spans.push(Span::styled("◀ ".to_string(), palette.accent_style()));
-    spans.push(Span::styled(value, v_style));
-    spans.push(Span::styled(" ▶".to_string(), palette.accent_style()));
-  } else {
-    spans.push(Span::styled(value, v_style));
-  }
-  if let (true, Some(src)) = (show_source, source_label) {
-    spans.push(Span::styled(format!("  ({src})"), palette.muted_style()));
-  }
-  Line::from(spans)
 }
 
 fn inline_edit_row(label: &str, buffer: &str, focused: bool, palette: &Palette) -> Line<'static> {

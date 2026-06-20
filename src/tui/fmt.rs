@@ -8,9 +8,11 @@
 // during the Tier-B sweep — see `src/theme/palette.rs`.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Palette;
+use crate::tui::launch_picker::INHERITED_LABEL;
 
 /// Single caret span (`▏` painted in `palette.accent` + REVERSED).
 /// Used by every single-line text input so the cursor reads
@@ -108,6 +110,140 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
   }
 }
 
+/// Truncate `s` to `max` **characters**, replacing the dropped tail
+/// with a single `…`. Char-count based (not display width) — used by
+/// the fixed-column HF picker rows where every glyph is one cell.
+/// Returns the original string when it already fits.
+pub(crate) fn truncate_end(s: &str, max: usize) -> String {
+  if s.chars().count() <= max {
+    return s.to_string();
+  }
+  let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+  out.push('…');
+  out
+}
+
+/// Truncate `s` to fit `budget` terminal columns from the **left**,
+/// prepending `…/` so the trailing component (the binary name, the
+/// launch id) stays visible. Returns the original string unmodified
+/// when it already fits.
+///
+/// Measures in unicode display width (`UnicodeWidthStr`), not char
+/// count: a CJK character occupies two cells, so on a CJK install
+/// prefix like `/Users/张伟/.../llama-server` char-count truncation
+/// would overflow the reserved budget and push a trailing chunk
+/// off-screen.
+pub(crate) fn truncate_start(s: &str, budget: usize) -> String {
+  if budget == 0 {
+    return String::new();
+  }
+  if s.width() <= budget {
+    return s.to_string();
+  }
+  let prefix = "…/";
+  let prefix_w = prefix.width();
+  if budget <= prefix_w {
+    return take_tail_by_width(s, budget);
+  }
+  let keep_budget = budget - prefix_w;
+  let tail = take_tail_by_width(s, keep_budget);
+  format!("{prefix}{tail}")
+}
+
+/// Take the longest suffix of `s` whose display width is `<= budget`.
+/// Iterates chars in reverse so a wide character that wouldn't fit is
+/// dropped rather than splitting it.
+pub(crate) fn take_tail_by_width(s: &str, budget: usize) -> String {
+  let mut acc_w = 0usize;
+  let mut start = s.len();
+  for (idx, ch) in s.char_indices().rev() {
+    let w = ch.to_string().width();
+    if acc_w + w > budget {
+      break;
+    }
+    acc_w += w;
+    start = idx;
+  }
+  s[start..].to_string()
+}
+
+/// Label column width for the `kv_row` / `kv_row_focused` settings
+/// rows. Wide enough for the longest knob name.
+const KV_LABEL_W: usize = 16;
+
+/// Inherited / empty value sentinels rendered when no override exists.
+/// Tracked in one place so `kv_row` / `kv_row_focused` agree on which
+/// strings deserve the muted tone.
+fn is_default_value(value: &str) -> bool {
+  value == INHERITED_LABEL || value == "(none)"
+}
+
+/// Style to paint a settings value with — muted when the row falls
+/// through to its layered default (`inherited`, `(none)`), normal text
+/// when the value is overridden by the user or carries a real reading.
+fn kv_value_style(value: &str, palette: &Palette) -> Style {
+  if is_default_value(value) {
+    palette.muted_style()
+  } else {
+    palette.text_style()
+  }
+}
+
+/// `  label            value` row used by the Settings running-launch
+/// view. Label padded to [`KV_LABEL_W`] in the label tone; value muted
+/// when it reads as a layered default.
+pub(crate) fn kv_row(label: &str, value: String, palette: &Palette) -> Line<'static> {
+  let style = kv_value_style(&value, palette);
+  Line::from(vec![
+    Span::styled(
+      format!("  {label:<width$}", width = KV_LABEL_W),
+      palette.label_style(),
+    ),
+    Span::styled(value, style),
+  ])
+}
+
+/// Editable Settings form row. When focused and `cyclable`, the value
+/// is wrapped in `◀ … ▶` so the user sees that Left/Right change it.
+/// When `source_label` is `Some` and `show_source` is true, a
+/// right-aligned `(<label>)` chip is appended.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn kv_row_focused(
+  label: &str,
+  value: String,
+  source_label: Option<&str>,
+  focused: bool,
+  cyclable: bool,
+  palette: &Palette,
+  show_source: bool,
+) -> Line<'static> {
+  let marker = if focused { "→ " } else { "  " };
+  let label_style = if focused {
+    Style::default()
+      .fg(palette.accent)
+      .add_modifier(Modifier::BOLD)
+  } else {
+    palette.label_style()
+  };
+  let mut spans: Vec<Span<'static>> = Vec::with_capacity(6);
+  spans.push(Span::styled(
+    format!("{marker}{label:<width$}", width = KV_LABEL_W),
+    label_style,
+  ));
+  let v_style = kv_value_style(&value, palette);
+  if focused && cyclable {
+    spans.push(Span::styled("◀ ".to_string(), palette.accent_style()));
+    spans.push(Span::styled(value, v_style));
+    spans.push(Span::styled(" ▶".to_string(), palette.accent_style()));
+  } else {
+    spans.push(Span::styled(value, v_style));
+  }
+  if let (true, Some(src)) = (show_source, source_label) {
+    spans.push(Span::styled(format!("  ({src})"), palette.muted_style()));
+  }
+  Line::from(spans)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -185,5 +321,50 @@ mod tests {
   #[test]
   fn format_bytes_pair_falls_back_to_bytes_for_tiny_totals() {
     assert_eq!(format_bytes_pair(0, 512), "0.0/512B");
+  }
+
+  #[test]
+  fn truncate_end_inserts_ellipsis_for_long_strings() {
+    let out = truncate_end("supercalifragilisticexpialidocious", 10);
+    assert_eq!(out.chars().count(), 10);
+    assert!(out.ends_with('…'));
+  }
+
+  #[test]
+  fn truncate_end_leaves_short_strings_unchanged() {
+    assert_eq!(truncate_end("ok", 10), "ok");
+    assert_eq!(truncate_end("", 10), "");
+  }
+
+  #[test]
+  fn truncate_start_pads_short_strings_unchanged() {
+    assert_eq!(truncate_start("ok", 10), "ok");
+    assert_eq!(truncate_start("", 10), "");
+  }
+
+  #[test]
+  fn truncate_start_left_truncates_long_paths() {
+    let truncated = truncate_start("/usr/local/lib/llama-cpp-cuda/bin/llama-server", 20);
+    assert!(truncated.starts_with("…/"));
+    assert!(truncated.ends_with("llama-server"));
+    assert!(truncated.width() <= 20);
+  }
+
+  #[test]
+  fn truncate_start_measures_in_display_columns_not_char_count() {
+    // CJK characters occupy two terminal cells each. A char-count
+    // implementation would let `/张伟/llama-server` (15 chars, 17
+    // cells) "fit" inside a 16-column budget; ratatui would then
+    // clip the flavor chunk that the caller appends. Width-based
+    // measurement keeps the truncated string inside the requested
+    // budget so the trailing chunk renders intact.
+    let s = "/usr/local/张伟/bin/llama-server";
+    let out = truncate_start(s, 20);
+    assert!(
+      out.width() <= 20,
+      "expected width <= 20, got {} for {out:?}",
+      out.width()
+    );
+    assert!(out.ends_with("llama-server"));
   }
 }

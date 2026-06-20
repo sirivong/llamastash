@@ -180,7 +180,7 @@ fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a>
     let flavor_chunk = format!(" ({})", dev.backend.to_lowercase());
     let path = dev.binary.display().to_string();
     let path_budget = budget.saturating_sub(flavor_chunk.width());
-    let path_truncated = ellipsise(&path, path_budget);
+    let path_truncated = crate::tui::fmt::truncate_start(&path, path_budget);
     let path_style = palette
       .success_style()
       .add_modifier(ratatui::style::Modifier::BOLD);
@@ -222,7 +222,8 @@ fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a>
         if i > 0 {
           spans.push(Span::styled(SEP, palette.muted_style()));
         }
-        let path_truncated = ellipsise(path, per_entry.saturating_sub(tag.width()));
+        let path_truncated =
+          crate::tui::fmt::truncate_start(path, per_entry.saturating_sub(tag.width()));
         spans.push(Span::styled(path_truncated, palette.text_style()));
         spans.push(Span::styled(tag.clone(), palette.muted_style()));
       }
@@ -289,7 +290,7 @@ fn middle_ellipsise(s: &str, budget: usize) -> String {
   }
   let keep = budget - 1; // reserve the `…` cell
   let head = take_head_by_width(s, keep.div_ceil(2));
-  let tail = take_tail_by_width(s, keep / 2);
+  let tail = crate::tui::fmt::take_tail_by_width(s, keep / 2);
   format!("{head}…{tail}")
 }
 
@@ -431,50 +432,6 @@ fn flavor_label(app: &App) -> Option<&'static str> {
   }
 }
 
-/// Truncate `s` to fit `budget` terminal columns from the **left**,
-/// prepending `…/` so the trailing component (the binary name, the
-/// launch id) stays visible. Returns the original string unmodified
-/// when it already fits.
-///
-/// Measures in unicode display width (`UnicodeWidthStr`), not char
-/// count: a CJK character occupies two cells, so on a CJK install
-/// prefix like `/Users/张伟/.../llama-server` char-count truncation
-/// would overflow the reserved budget and push the trailing flavor
-/// chunk off-screen.
-fn ellipsise(s: &str, budget: usize) -> String {
-  if budget == 0 {
-    return String::new();
-  }
-  if s.width() <= budget {
-    return s.to_string();
-  }
-  let prefix = "…/";
-  let prefix_w = prefix.width();
-  if budget <= prefix_w {
-    return take_tail_by_width(s, budget);
-  }
-  let keep_budget = budget - prefix_w;
-  let tail = take_tail_by_width(s, keep_budget);
-  format!("{prefix}{tail}")
-}
-
-/// Take the longest suffix of `s` whose display width is `<= budget`.
-/// Iterates chars in reverse so a wide character that wouldn't fit is
-/// dropped rather than splitting it.
-fn take_tail_by_width(s: &str, budget: usize) -> String {
-  let mut acc_w = 0usize;
-  let mut start = s.len();
-  for (idx, ch) in s.char_indices().rev() {
-    let w = ch.to_string().width();
-    if acc_w + w > budget {
-      break;
-    }
-    acc_w += w;
-    start = idx;
-  }
-  s[start..].to_string()
-}
-
 fn format_uptime(secs: u64) -> String {
   let hours = secs / 3600;
   let minutes = (secs % 3600) / 60;
@@ -551,38 +508,6 @@ mod tests {
       rows.push(row.trim_end().to_string());
     }
     rows
-  }
-
-  #[test]
-  fn ellipsise_pads_short_strings_unchanged() {
-    assert_eq!(ellipsise("ok", 10), "ok");
-    assert_eq!(ellipsise("", 10), "");
-  }
-
-  #[test]
-  fn ellipsise_left_truncates_long_paths() {
-    let truncated = ellipsise("/usr/local/lib/llama-cpp-cuda/bin/llama-server", 20);
-    assert!(truncated.starts_with("…/"));
-    assert!(truncated.ends_with("llama-server"));
-    assert!(truncated.width() <= 20);
-  }
-
-  #[test]
-  fn ellipsise_measures_in_display_columns_not_char_count() {
-    // CJK characters occupy two terminal cells each. A char-count
-    // implementation would let `/张伟/llama-server` (15 chars, 17
-    // cells) "fit" inside a 16-column budget; ratatui would then
-    // clip the flavor chunk that the caller appends. Width-based
-    // measurement keeps the truncated string inside the requested
-    // budget so the trailing chunk renders intact.
-    let s = "/usr/local/张伟/bin/llama-server";
-    let out = ellipsise(s, 20);
-    assert!(
-      out.width() <= 20,
-      "expected width <= 20, got {} for {out:?}",
-      out.width()
-    );
-    assert!(out.ends_with("llama-server"));
   }
 
   #[test]

@@ -632,7 +632,7 @@ TUI smoke tests green.
 
 ### Phase 4 — UI/UX consolidation & polish
 
-- [ ] **Unit 7: Reusable TUI components (block, row, center, truncate)**
+- [x] **Unit 7: Reusable TUI components (block, row, center, truncate)**
 
 **Goal:** Finish the tracked "make custom UI components reusable and consistent" item:
 one block builder, one `label:value` row, one centering helper, one truncation helper —

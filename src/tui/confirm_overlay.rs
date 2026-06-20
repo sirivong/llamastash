@@ -25,7 +25,7 @@ pub fn render(
 ) {
   let (title, body) = describe(action);
 
-  let rect = centred(area, 60, 8);
+  let rect = crate::tui::layout::centered_abs(area, 60, 8, 4, 2);
   frame.render_widget(Clear, rect);
   // Restore the theme surface tone after `Clear` so the popup
   // body reads on `palette.bg` instead of the terminal default.
@@ -139,14 +139,6 @@ fn describe(action: &ConfirmAction) -> (&'static str, String) {
 /// unbound the action entirely so the popup still reads sensibly.
 fn keymap_label(app: &App, action: KeyAction, fallback: &str) -> String {
   app.resolve_label(Focus::ConfirmPopup, action, fallback)
-}
-
-fn centred(area: Rect, w: u16, h: u16) -> Rect {
-  let w = w.min(area.width.saturating_sub(4));
-  let h = h.min(area.height.saturating_sub(2));
-  let x = area.x + (area.width.saturating_sub(w)) / 2;
-  let y = area.y + (area.height.saturating_sub(h)) / 2;
-  Rect::new(x, y, w, h)
 }
 
 #[cfg(test)]

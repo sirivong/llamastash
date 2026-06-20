@@ -685,7 +685,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let Some(state) = app.hf_dialog.as_ref() else {
     return;
   };
-  let modal = centered_rect(86, 70, area);
+  let modal = crate::tui::layout::centered_rect(86, 70, area);
   frame.render_widget(Clear, modal);
   crate::tui::render::paint_theme_bg(frame, modal, palette);
   let title = match state.stage {
@@ -895,11 +895,14 @@ fn render_search_row(
     .unwrap_or_else(|| "—".to_string());
   Line::from(vec![
     Span::styled(prefix.to_string(), style),
-    Span::styled(format!("{:<36}  ", truncate(&r.repo_id, 36)), style),
+    Span::styled(
+      format!("{:<36}  ", crate::tui::fmt::truncate_end(&r.repo_id, 36)),
+      style,
+    ),
     Span::styled(format!("{params:>6}  "), style),
     Span::styled(format!("{size:>6}  "), style),
     Span::styled(
-      format!("{:<16}  ", truncate(&tag, 16)),
+      format!("{:<16}  ", crate::tui::fmt::truncate_end(&tag, 16)),
       palette.muted_style(),
     ),
     Span::styled(metric, palette.label_style()),
@@ -1057,7 +1060,10 @@ fn render_picker_body(
         };
         lines.push(Line::from(vec![
           Span::styled(prefix.to_string(), row_style),
-          Span::styled(format!("{:<58}  ", truncate(&label, 58)), row_style),
+          Span::styled(
+            format!("{:<58}  ", crate::tui::fmt::truncate_end(&label, 58)),
+            row_style,
+          ),
           Span::styled(format!("{size:>9}  "), palette.label_style()),
           Span::styled(fit_glyph.to_string(), fit_style),
         ]));
@@ -1147,35 +1153,6 @@ fn render_footer(
   };
   let line = Line::from(Span::styled(hints, palette.muted_style()));
   frame.render_widget(Paragraph::new(line).alignment(Alignment::Right), area);
-}
-
-fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
-  let v = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([
-      Constraint::Percentage((100 - pct_y) / 2),
-      Constraint::Percentage(pct_y),
-      Constraint::Percentage((100 - pct_y) / 2),
-    ])
-    .split(area);
-  Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints([
-      Constraint::Percentage((100 - pct_x) / 2),
-      Constraint::Percentage(pct_x),
-      Constraint::Percentage((100 - pct_x) / 2),
-    ])
-    .split(v[1])[1]
-}
-
-/// Truncate with a single-char ellipsis when necessary.
-fn truncate(s: &str, max: usize) -> String {
-  if s.chars().count() <= max {
-    return s.to_string();
-  }
-  let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-  out.push('…');
-  out
 }
 
 /// Short K/M/B counter for download / like totals so the row stays
@@ -1733,12 +1710,5 @@ mod tests {
     assert_eq!(short_count(1500), "1.5K");
     assert_eq!(short_count(2_500_000), "2.5M");
     assert_eq!(short_count(3_500_000_000), "3.5B");
-  }
-
-  #[test]
-  fn truncate_inserts_ellipsis_for_long_strings() {
-    let out = truncate("supercalifragilisticexpialidocious", 10);
-    assert_eq!(out.chars().count(), 10);
-    assert!(out.ends_with('…'));
   }
 }

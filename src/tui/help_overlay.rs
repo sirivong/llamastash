@@ -23,10 +23,12 @@ use crate::tui::keybindings::{Action, Binding, Category, Focus};
 /// this when `app.show_help` is true. Layout is static — the active
 /// focus does not change which sections appear or where.
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-  let rect = centred(
+  let rect = crate::tui::layout::centered_abs(
     area,
     area.width.saturating_sub(4).min(130),
     area.height.saturating_sub(4).max(20),
+    2,
+    2,
   );
   frame.render_widget(Clear, rect);
   crate::tui::render::paint_theme_bg(frame, rect, palette);
@@ -279,16 +281,6 @@ fn render_binding_line(keys: &str, description: &str, palette: &Palette) -> Line
     Span::styled("  ".to_string(), Style::default()),
     Span::styled(description.to_string(), palette.text_style()),
   ])
-}
-
-/// Centre a `w × h` rect within `area`, clamping to the available
-/// space so a narrow terminal still sees the overlay (just snug).
-fn centred(area: Rect, w: u16, h: u16) -> Rect {
-  let w = w.min(area.width.saturating_sub(2));
-  let h = h.min(area.height.saturating_sub(2));
-  let x = area.x + (area.width.saturating_sub(w)) / 2;
-  let y = area.y + (area.height.saturating_sub(h)) / 2;
-  Rect::new(x, y, w, h)
 }
 
 #[cfg(test)]
