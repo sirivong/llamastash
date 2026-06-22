@@ -166,6 +166,13 @@ places.
 ## R5 (v0.0.5 checklist)
 
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
+- [x] Architecture/UX improvements
+  - [ ] Top hints to non-bold, audit other bolds
+  - [x] ~~**Unify hand-rolled pane `Block` constructions onto a padding-aware `panel_block`** (U7 follow-up).~~ — added a `Palette::panel()` builder (`src/theme/palette.rs`: optional title/footer `Line`, passable border `Color`, optional `Padding`) that owns the `Borders::ALL` + glyph border-set boilerplate, and migrated all 7 open-coded sites (confirm/help overlays, logo, list/right/render panes) onto it. The 6 dashboard panes stay byte-identical (golden unchanged); help overlay drops the `j/k:scroll` chip + tightens padding, and the HF dialog gets a shorter title with its hints moved into the header.
+  - [ ] add scroll: global hints. audit existing and remove any that are redundant with the top hints  
+  - [ ] right pane header to mute color when inactive       
+  - [ ] hf header hints missing. 
+  - [ ] add a golden test for HF pages, logs/chat page and help page    
 - [x] why not pick last available upstream? `• [snapshot_stale] benchmark snapshot was bundled 21 days ago — the daily CI refresh has not landed; recommender picks may be stale → fix with: (no action — daily CI refresh will heal automatically; re-run `llamastash doctor` later)`
 - [x] TUI: for multi gpu, dont show a row for each. instead show combined usage and hottest temp in a single gpu row. when multi gpu, show GPU\* with legend entry in help
 - [x] Validate `gpu::is_cross_probe_duplicate` name-matching on more GPUs — closed: `normalize_card_name` now strips a leading vendor token (rocm-smi `Radeon …` vs Vulkan `AMD Radeon …`), and the pure `resolve_devices` core is table-tested across every backend combo (`src/gpu/mod.rs` tests). The PCI-id path (vendor:device parsing) was the actual Strix Halo dedup miss and is fixed + regression-tested.
@@ -231,7 +238,6 @@ places.
   - [ ] **MCP server surface.** Tracked under R34 alongside LAN exposure. The CLI is already agent-friendly via `--json`; MCP would add a Model Context Protocol server endpoint for agents that prefer it.
   - [ ] check and make sure HTTP and CLI surfaces are consistent and reuses code and flow where it makes sense.
 - [ ] **Need brainstorm/plan**: Docker-ready packaging.
-- [ ] **Unify hand-rolled pane `Block` constructions onto a padding-aware `panel_block`** (U7 follow-up): the ~5 open-coded `Block` sites (confirm/help overlays, logo, list/right/render panes) each differ from `panel_block`'s output today (custom title spans, error-tone borders, no title, focus-aware colours), so this is a deliberate visual-consistency change with golden updates, not a byte-identical move. See `src/theme/palette.rs::panel_block`.
 - [ ] Investigate the NVIDIA +12-16% defaults-mode gap. It's now disclaimed in two places (blog-benchmarks.md NVIDIA Suite B + linux-nvidia-final.md top-of-file). If you want to upgrade the framing from "open question" to "explained finding" before Wednesday's benchmark blog publishes, the investigation is: on the NVIDIA box, run LlamaStash's spawn against raw llama-server with both invocations logged at maximum verbosity, then diff the effective argv (including what each side resolves n_gpu_layers to in defaults mode). 30-60 min of bench work. Not blocking — the open-question framing is honest and ship-ready as-is.
 - [ ] Windows follow-ups deferred from 0.0.2 (post-0.0.2)
   - [ ] UI is slow and glitchy and random crashes as well sometimes. (needs more testing and hardening) — code review 2026-06-03 surfaced two leading culprits (Windows-only, so they can't be why Linux/macOS stay stable):
