@@ -17,6 +17,7 @@ pub mod launch_service;
 pub mod lockfile;
 pub mod orphans;
 pub mod ports;
+pub mod preset_store;
 pub mod probe;
 pub mod registry;
 pub mod resources;

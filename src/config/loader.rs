@@ -11,6 +11,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::launch::flag_aliases::{knob_specs, KnobField};
+use crate::launch::mode::LaunchMode;
 use crate::theme::{CustomThemeConfig, ThemeName};
 use crate::util::paths::user_config_file;
 
@@ -146,6 +147,17 @@ pub struct Config {
   /// env var overrides this and forces ASCII on regardless.
   #[serde(default)]
   pub ascii_glyphs: bool,
+  /// Named launch presets, the single writable home for presets. Map
+  /// keys are classified per-resolution against the live model catalog
+  /// (see [`crate::launch::presets::classify_preset_key`]): a key that
+  /// names a discovered model (by basename, path fallback) is **per
+  /// model**; otherwise it is read as a GGUF `general.architecture` id
+  /// and applies to **every model of that arch**. Model wins on a name
+  /// collision. The CLI `presets save/delete` and the TUI `Ctrl+P` write
+  /// per-model keys here (comment-safe, via
+  /// [`crate::config::presets_writer`]); arch keys are hand-authored.
+  #[serde(default)]
+  pub presets: BTreeMap<String, ConfigPresetBlock>,
 }
 
 fn default_fit_ctx_floor() -> u32 {
@@ -779,6 +791,41 @@ fn overlay_slot(dst: KnobSlotMut<'_>, over: KnobSlotMut<'_>) {
   }
 }
 
+/// One model-or-arch key's preset block in the config `presets:` map.
+///
+/// `entries` is keyed by preset **name** (a map, not a sequence) so the
+/// comment-safe writer can `Add`/`Replace`/`Remove` one entry without
+/// touching siblings. `default` names the entry the TUI cycle opens on;
+/// it is hand-edited only (no CLI/TUI set-default op) and is ignored when
+/// it names an absent entry.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct ConfigPresetBlock {
+  pub default: Option<String>,
+  pub entries: BTreeMap<String, PresetBody>,
+}
+
+/// A single named preset's launch settings, as authored in `config.yaml`.
+///
+/// The typed knobs are flattened so `ctx: 65536` / `flash_attn: true` read
+/// flat under the entry. `ctx` and `reasoning` are part of [`TypedKnobs`]
+/// already, so they ride in `knobs` here (a `ctx: 65536` is
+/// `knobs.ctx = Set(65536)`); materialisation pulls them into the
+/// [`crate::launch::params::LaunchParams`] sibling fields so the IPC/CLI
+/// wire shape is unchanged. `mode` (launch mode) and `extras` (the
+/// free-form llama-server argv tail) are the only non-knob settings an
+/// entry carries. Every field is optional — an entry only stores what it
+/// pins.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PresetBody {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mode: Option<LaunchMode>,
+  #[serde(flatten)]
+  pub knobs: TypedKnobs,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub extras: Option<Vec<String>>,
+}
+
 /// How a knob *no layer supplied a value for* is seeded at launch
 /// composition (R1 seeding rule). Selects only the seed for layer-less
 /// knobs — knobs any layer set (user / last-used / arch / preset) keep
@@ -817,6 +864,7 @@ impl Default for Config {
       strict_fit: false,
       jinja: true,
       ascii_glyphs: false,
+      presets: BTreeMap::new(),
     }
   }
 }
@@ -1022,6 +1070,91 @@ mod tests {
   };
 
   use super::*;
+
+  #[test]
+  fn preset_body_deserialises_flattened_knobs() {
+    // The serde-flatten + KnobValue (untagged) combination is a known
+    // footgun; pin that ctx/reasoning/knobs flatten flat, integers stay
+    // integers, the Auto sentinel round-trips, and `mode` stays a sibling.
+    let body: PresetBody = serde_yaml::from_str(
+      "ctx: 65536\nreasoning: true\nmode: embedding\nflash_attn: true\nn_gpu_layers: { auto: true }\nthreads: 8\nextras: [--rope-freq-base, \"10000\"]\n",
+    )
+    .unwrap();
+    assert_eq!(body.mode, Some(LaunchMode::Embedding));
+    assert_eq!(body.knobs.ctx, Some(KnobValue::Set(65536)));
+    assert_eq!(body.knobs.reasoning, Some(KnobValue::Set(true)));
+    assert_eq!(body.knobs.flash_attn, Some(KnobValue::Set(true)));
+    assert_eq!(body.knobs.threads, Some(KnobValue::Set(8)));
+    assert_eq!(body.knobs.n_gpu_layers, Some(KnobValue::Auto));
+    assert_eq!(
+      body.extras.as_deref(),
+      Some(&["--rope-freq-base".to_string(), "10000".to_string()][..])
+    );
+  }
+
+  #[test]
+  fn preset_body_serialises_back_to_a_flat_mapping() {
+    let body = PresetBody {
+      mode: None,
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Set(32768)),
+        flash_attn: Some(KnobValue::Set(true)),
+        n_gpu_layers: Some(KnobValue::Auto),
+        ..TypedKnobs::default()
+      },
+      extras: None,
+    };
+    let value = serde_json::to_value(&body).unwrap();
+    let obj = value.as_object().unwrap();
+    assert_eq!(
+      obj.get("ctx").and_then(serde_json::Value::as_u64),
+      Some(32768)
+    );
+    assert_eq!(
+      obj.get("flash_attn").and_then(serde_json::Value::as_bool),
+      Some(true)
+    );
+    assert!(
+      obj.get("n_gpu_layers").unwrap().get("auto").is_some(),
+      "Auto sentinel survives flatten"
+    );
+    assert!(obj.get("mode").is_none(), "None siblings are skipped");
+    assert!(obj.get("extras").is_none());
+  }
+
+  #[test]
+  fn config_presets_block_round_trips_through_yaml() {
+    let yaml = "\
+presets:
+  qwen-coder:
+    default: long-ctx
+    entries:
+      short-ctx: { ctx: 8192 }
+      long-ctx: { ctx: 65536, flash_attn: true }
+  qwen2:
+    entries:
+      balanced: { ctx: 16384 }
+";
+    let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+    let block = cfg.presets.get("qwen-coder").unwrap();
+    assert_eq!(block.default.as_deref(), Some("long-ctx"));
+    assert_eq!(block.entries.len(), 2);
+    let long = block.entries.get("long-ctx").unwrap();
+    assert_eq!(long.knobs.ctx, Some(KnobValue::Set(65536)));
+    assert_eq!(long.knobs.flash_attn, Some(KnobValue::Set(true)));
+    let arch = cfg.presets.get("qwen2").unwrap();
+    assert!(arch.default.is_none());
+    assert_eq!(
+      arch.entries.get("balanced").unwrap().knobs.ctx,
+      Some(KnobValue::Set(16384))
+    );
+  }
+
+  #[test]
+  fn config_without_presets_key_defaults_to_empty() {
+    let cfg: Config = serde_yaml::from_str("theme: latte\n").unwrap();
+    assert!(cfg.presets.is_empty());
+  }
 
   #[test]
   fn field_name_matches_the_serde_keys_exactly() {

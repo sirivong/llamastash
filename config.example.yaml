@@ -548,3 +548,47 @@ keybindings: {}
 #   llama:
 #     threads: 8
 #     parallel: 4
+
+# ─── presets ──────────────────────────────────────────────────────
+#
+# Named launch presets — the single writable home for presets. The CLI
+# (`llamastash presets save/list/show/delete`) and the TUI (`Ctrl+P`)
+# write here; you can also hand-author entries (and comments). Edits
+# the app makes preserve every surrounding comment, so this section is
+# yours to annotate.
+#
+# Each top-level key is classified against your discovered models when a
+# preset is resolved:
+#   • names a model (by file basename, or full path)  → applies to that
+#     model only (a "per-model" preset);
+#   • otherwise read as a GGUF `general.architecture` → applies to every
+#     model of that arch (an "arch" preset, hand-authored only).
+# A model's effective set is its per-model entries ∪ its arch entries;
+# on a name collision the per-model entry wins.
+#
+# `entries` is a map keyed by preset name. Each entry holds the same
+# typed knobs as `arch_defaults` (flat: `ctx`, `flash_attn`, `threads`,
+# …) plus an optional `mode` (chat | embedding | rerank) and an `extras`
+# argv tail. Apply one with `llamastash start <model> --preset <name>`.
+#
+# `default:` names the entry the TUI's preset cycle opens on. It is
+# hand-edited only (there is no set-default command) and is ignored if it
+# names an entry that doesn't exist. The CLI never auto-applies it — a
+# plain `start` with no `--preset` launches with pure auto-fit defaults.
+#
+# Changes the app writes are live immediately; hand-edits here need a
+# `llamastash daemon restart` to be picked up.
+#
+# presets:
+#   # per-model preset, keyed by the GGUF file's basename
+#   Qwen3-Coder-30B-Q4_K_M.gguf:
+#     default: long-ctx               # TUI cycle opens here
+#     entries:
+#       short-ctx: { ctx: 8192 }
+#       long-ctx:  { ctx: 65536, flash_attn: true }
+#       embed:     { mode: embedding, ctx: 4096 }
+#   # arch preset, keyed by `general.architecture` — applies to every
+#   # qwen3 model that has no per-model entry of the same name
+#   qwen3:
+#     entries:
+#       balanced: { ctx: 16384, extras: [--rope-freq-base, "10000"] }

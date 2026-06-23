@@ -6,11 +6,16 @@
 //! "clone these params, then layer per-invocation overrides on top".
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::backend::identity::ModelIdentity;
+use crate::config::{ConfigPresetBlock, KnobValue, PresetBody};
+use crate::launch::mode::LaunchMode;
 use crate::launch::params::LaunchParams;
+use crate::launch::resolve::CatalogRow;
 
 /// One saved preset. `name` is unique within a single model's preset
 /// list and is the handle users type at the CLI / TUI.
@@ -70,7 +75,175 @@ impl Presets {
 
 /// Top-level map from model identity → that model's preset list.
 /// Serialised in `state.json` under `presets`.
+///
+/// Migration-only: the `config.yaml` `presets:` block is the live source
+/// (see [`crate::config::ConfigPresetBlock`]); this type only survives to
+/// read the legacy `state.json` rows during the one-time migration and is
+/// slated for removal with it (see `TODO.md`).
 pub type PresetStore = BTreeMap<ModelIdentity, Presets>;
+
+/// Fold a launch's settings into the config-layer [`PresetBody`]. `ctx`
+/// and `reasoning` live inside [`crate::config::TypedKnobs`] at the config
+/// layer (the flat `ctx:` / `reasoning:` keys), so a pinned ctx becomes
+/// `Set` and an `--ctx auto` keeps its `Auto`; `mode` is stored only when
+/// it differs from the default `Chat`, and `extras` only when non-empty.
+/// The inverse of [`materialize_preset`].
+pub fn preset_body_from_launch_params(params: &LaunchParams) -> PresetBody {
+  let mut knobs = params.knobs.clone();
+  if let Some(c) = params.ctx {
+    knobs.ctx = Some(KnobValue::Set(c));
+  }
+  if params.reasoning {
+    knobs.reasoning = Some(KnobValue::Set(true));
+  }
+  let extras: Vec<String> = params
+    .extras
+    .iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
+  PresetBody {
+    mode: (params.mode != LaunchMode::Chat).then_some(params.mode),
+    knobs,
+    extras: (!extras.is_empty()).then_some(extras),
+  }
+}
+
+/// Materialise a stored [`PresetBody`] back into a [`NamedPreset`] over
+/// `model_path`. `ctx` / `reasoning` move out of the knobs into the
+/// [`LaunchParams`] sibling fields so the IPC/CLI wire shape is unchanged;
+/// an `Auto` ctx stays in the knob so `--fit` still governs the window.
+/// The inverse of [`preset_body_from_launch_params`].
+pub fn materialize_preset(name: &str, body: &PresetBody, model_path: PathBuf) -> NamedPreset {
+  let mut knobs = body.knobs.clone();
+  let ctx = if let Some(KnobValue::Set(n)) = knobs.ctx {
+    knobs.ctx = None;
+    Some(n)
+  } else {
+    // Auto ctx stays in the knob (fit governs it); None stays None.
+    None
+  };
+  // Reasoning is a plain bool sibling on LaunchParams; pull it out so it
+  // doesn't double up with the knob.
+  let reasoning = matches!(knobs.reasoning.take(), Some(KnobValue::Set(true)));
+  let mut params = LaunchParams::new(model_path, body.mode.unwrap_or(LaunchMode::Chat));
+  params.ctx = ctx;
+  params.reasoning = reasoning;
+  params.knobs = knobs;
+  params.extras = body
+    .extras
+    .clone()
+    .unwrap_or_default()
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+  NamedPreset {
+    name: name.to_string(),
+    params,
+  }
+}
+
+/// How a config `presets:` key resolves against the live model catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyClass {
+  /// Names exactly one discovered model — a per-model key (carries the
+  /// matched model's canonical path).
+  Model { path: String },
+  /// Matches no discovered model — read as a GGUF `general.architecture`
+  /// id that applies to every model of that arch.
+  Arch,
+  /// Names more than one discovered model — skipped (caller may warn).
+  Ambiguous,
+}
+
+/// Classify a config `presets:` key against the live catalog. Matching is
+/// **exact** (case-insensitive basename, or exact canonical path), never a
+/// fuzzy substring, so an arch id like `qwen2` is not accidentally
+/// captured by a model file named `qwen2.5-7b.gguf`: a key naming exactly
+/// one model is per-model, one naming none is an arch id, one naming
+/// several is ambiguous.
+pub fn classify_preset_key(key: &str, catalog: &[CatalogRow]) -> KeyClass {
+  if let Some(row) = catalog.iter().find(|r| r.path == key) {
+    return KeyClass::Model {
+      path: row.path.clone(),
+    };
+  }
+  let mut named = catalog
+    .iter()
+    .filter(|r| r.name().eq_ignore_ascii_case(key));
+  match (named.next(), named.next()) {
+    (Some(row), None) => KeyClass::Model {
+      path: row.path.clone(),
+    },
+    (Some(_), Some(_)) => KeyClass::Ambiguous,
+    (None, _) => KeyClass::Arch,
+  }
+}
+
+/// A model's resolved preset set plus its default name.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EffectivePresets {
+  pub presets: Presets,
+  /// The default preset's name — per-model `default` else arch `default`,
+  /// kept only when it names a present entry. Drives the TUI cycle's
+  /// opening selection; never auto-applied on the CLI.
+  pub default: Option<String>,
+}
+
+/// Resolve a model's effective preset set from the config store: the union
+/// of its per-model entries and its arch entries, with per-model winning
+/// on a name collision. `model_path` is the canonical path; `model_arch`
+/// the GGUF `general.architecture` (compared case-insensitively).
+pub fn effective_presets(
+  model_path: &str,
+  model_arch: Option<&str>,
+  store: &BTreeMap<String, ConfigPresetBlock>,
+  catalog: &[CatalogRow],
+) -> EffectivePresets {
+  // BTreeMap keeps the merged set name-sorted (config entries are an
+  // unordered map, so a deterministic order is the right surface).
+  let mut merged: BTreeMap<String, NamedPreset> = BTreeMap::new();
+  let mut arch_default = None;
+  let mut model_default = None;
+
+  // Arch layer first (lower precedence).
+  if let Some(arch) = model_arch {
+    for (key, block) in store {
+      if classify_preset_key(key, catalog) == KeyClass::Arch && key.eq_ignore_ascii_case(arch) {
+        merge_block(&mut merged, block, model_path);
+        arch_default = arch_default.or_else(|| block.default.clone());
+      }
+    }
+  }
+  // Per-model layer (higher precedence) — overwrites colliding names.
+  for (key, block) in store {
+    if matches!(classify_preset_key(key, catalog), KeyClass::Model { path } if path == model_path) {
+      merge_block(&mut merged, block, model_path);
+      model_default = model_default.or_else(|| block.default.clone());
+    }
+  }
+
+  let mut presets = Presets::new();
+  for np in merged.into_values() {
+    presets.upsert(np);
+  }
+  let default = model_default
+    .or(arch_default)
+    .filter(|d| presets.get(d).is_some());
+  EffectivePresets { presets, default }
+}
+
+fn merge_block(
+  merged: &mut BTreeMap<String, NamedPreset>,
+  block: &ConfigPresetBlock,
+  model_path: &str,
+) {
+  for (name, body) in &block.entries {
+    merged.insert(
+      name.clone(),
+      materialize_preset(name, body, PathBuf::from(model_path)),
+    );
+  }
+}
 
 #[cfg(test)]
 mod tests {
@@ -119,5 +292,203 @@ mod tests {
     assert_eq!(back, store);
     let names: Vec<_> = back.iter().map(|p| p.name.clone()).collect();
     assert_eq!(names, vec!["a", "b"]);
+  }
+
+  // ---- materialization / capture / resolution ----
+
+  use crate::config::TypedKnobs;
+
+  fn catalog_row(path: &str, arch: &str) -> CatalogRow {
+    CatalogRow {
+      path: path.to_string(),
+      model_id: None,
+      parent: String::new(),
+      source: "user".into(),
+      arch: Some(arch.to_string()),
+      quant: None,
+      native_ctx: None,
+      mode_hint: Some("chat".into()),
+      parameter_label: None,
+      weights_bytes: None,
+      display_label: None,
+      parse_error: None,
+      split_siblings: Vec::new(),
+      has_chat_template: false,
+      has_reasoning_hint: false,
+      tokenizer_kind: None,
+      total_parameters: None,
+    }
+  }
+
+  fn block(entries: &[(&str, PresetBody)], default: Option<&str>) -> ConfigPresetBlock {
+    ConfigPresetBlock {
+      default: default.map(str::to_string),
+      entries: entries
+        .iter()
+        .map(|(n, b)| (n.to_string(), b.clone()))
+        .collect(),
+    }
+  }
+
+  fn body_ctx(ctx: u32) -> PresetBody {
+    PresetBody {
+      mode: None,
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Set(ctx)),
+        ..TypedKnobs::default()
+      },
+      extras: None,
+    }
+  }
+
+  #[test]
+  fn materialize_then_capture_round_trips_ctx_reasoning_extras() {
+    let body = PresetBody {
+      mode: Some(LaunchMode::Embedding),
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Set(65536)),
+        reasoning: Some(KnobValue::Set(true)),
+        flash_attn: Some(KnobValue::Set(true)),
+        ..TypedKnobs::default()
+      },
+      extras: Some(vec!["--rope-freq-base".into(), "10000".into()]),
+    };
+    let np = materialize_preset("p", &body, PathBuf::from("/m/a.gguf"));
+    // ctx/reasoning landed on the LaunchParams siblings, out of the knobs.
+    assert_eq!(np.params.ctx, Some(65536));
+    assert!(np.params.reasoning);
+    assert_eq!(np.params.mode, LaunchMode::Embedding);
+    assert_eq!(np.params.knobs.ctx, None);
+    assert_eq!(np.params.knobs.reasoning, None);
+    assert_eq!(np.params.knobs.flash_attn, Some(KnobValue::Set(true)));
+    assert_eq!(np.params.extras.len(), 2);
+    // Capture is the inverse — back to a flat body with ctx/reasoning in knobs.
+    let back = preset_body_from_launch_params(&np.params);
+    assert_eq!(back, body);
+  }
+
+  #[test]
+  fn materialize_keeps_auto_ctx_in_the_knob() {
+    let body = PresetBody {
+      mode: None,
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Auto),
+        ..TypedKnobs::default()
+      },
+      extras: None,
+    };
+    let np = materialize_preset("p", &body, PathBuf::from("/m/a.gguf"));
+    assert_eq!(np.params.ctx, None, "Auto ctx never pins the -c sibling");
+    assert_eq!(
+      np.params.knobs.ctx,
+      Some(KnobValue::Auto),
+      "Auto stays for --fit"
+    );
+  }
+
+  #[test]
+  fn classify_exact_name_is_per_model_arch_id_is_arch() {
+    let catalog = vec![catalog_row("/m/qwen2.5-7b.gguf", "qwen2")];
+    // An arch id must NOT be captured by a substring of a model file name.
+    assert_eq!(classify_preset_key("qwen2", &catalog), KeyClass::Arch);
+    assert_eq!(
+      classify_preset_key("qwen2.5-7b.gguf", &catalog),
+      KeyClass::Model {
+        path: "/m/qwen2.5-7b.gguf".into()
+      }
+    );
+    assert_eq!(
+      classify_preset_key("/m/qwen2.5-7b.gguf", &catalog),
+      KeyClass::Model {
+        path: "/m/qwen2.5-7b.gguf".into()
+      }
+    );
+  }
+
+  #[test]
+  fn classify_duplicate_basename_is_ambiguous() {
+    let catalog = vec![
+      catalog_row("/a/model.gguf", "llama"),
+      catalog_row("/b/model.gguf", "llama"),
+    ];
+    assert_eq!(
+      classify_preset_key("model.gguf", &catalog),
+      KeyClass::Ambiguous
+    );
+  }
+
+  #[test]
+  fn effective_presets_unions_model_and_arch_model_wins() {
+    let catalog = vec![catalog_row("/m/coder.gguf", "qwen2")];
+    let mut store = BTreeMap::new();
+    store.insert(
+      "coder.gguf".to_string(),
+      block(
+        &[("shared", body_ctx(100)), ("only-model", body_ctx(1))],
+        Some("only-model"),
+      ),
+    );
+    store.insert(
+      "qwen2".to_string(),
+      block(
+        &[("shared", body_ctx(999)), ("only-arch", body_ctx(2))],
+        Some("only-arch"),
+      ),
+    );
+    let eff = effective_presets("/m/coder.gguf", Some("qwen2"), &store, &catalog);
+    let names: Vec<_> = eff.presets.iter().map(|p| p.name.clone()).collect();
+    assert_eq!(
+      names,
+      vec!["only-arch", "only-model", "shared"],
+      "union, name-sorted"
+    );
+    // Model wins the `shared` name collision.
+    assert_eq!(eff.presets.get("shared").unwrap().params.ctx, Some(100));
+    // Per-model default beats arch default.
+    assert_eq!(eff.default.as_deref(), Some("only-model"));
+  }
+
+  #[test]
+  fn effective_presets_falls_back_to_arch_default() {
+    let catalog = vec![catalog_row("/m/coder.gguf", "qwen2")];
+    let mut store = BTreeMap::new();
+    store.insert("coder.gguf".into(), block(&[("m1", body_ctx(1))], None));
+    store.insert("qwen2".into(), block(&[("a1", body_ctx(2))], Some("a1")));
+    let eff = effective_presets("/m/coder.gguf", Some("qwen2"), &store, &catalog);
+    assert_eq!(eff.default.as_deref(), Some("a1"));
+  }
+
+  #[test]
+  fn effective_presets_drops_default_naming_absent_entry() {
+    let catalog = vec![catalog_row("/m/coder.gguf", "qwen2")];
+    let mut store = BTreeMap::new();
+    store.insert(
+      "coder.gguf".into(),
+      block(&[("m1", body_ctx(1))], Some("ghost")),
+    );
+    let eff = effective_presets("/m/coder.gguf", Some("qwen2"), &store, &catalog);
+    assert_eq!(
+      eff.default, None,
+      "a default naming a missing entry is ignored"
+    );
+  }
+
+  #[test]
+  fn effective_presets_ignores_other_models_and_other_archs() {
+    let catalog = vec![
+      catalog_row("/m/a.gguf", "qwen2"),
+      catalog_row("/m/b.gguf", "llama"),
+    ];
+    let mut store = BTreeMap::new();
+    store.insert(
+      "b.gguf".into(),
+      block(&[("other-model", body_ctx(1))], None),
+    );
+    store.insert("llama".into(), block(&[("other-arch", body_ctx(2))], None));
+    let eff = effective_presets("/m/a.gguf", Some("qwen2"), &store, &catalog);
+    assert!(
+      eff.presets.is_empty(),
+      "no presets apply to this model/arch"
+    );
   }
 }
