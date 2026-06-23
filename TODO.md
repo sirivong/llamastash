@@ -167,8 +167,8 @@ places.
 
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
 - [x] help legends as new row with 1 column
-- [ ] Presets feature from PR #18 — plan: `docs/plans/2026-06-22-001-feat-config-presets-per-model-plan.md` (config.yaml as source of truth, `yamlpatch` comment-safe writes, per-model/arch keys, TUI cycle + `Ctrl+P` save)
-  - [ ] **Remove the one-time `state.json`→`config.yaml` presets migration** — the marked `// ONE-TIME MIGRATION` fn (`src/daemon/`) + the now-dead `state.json` `presets` field — in a later version once it has shipped a release cycle. Source: plan Unit 3.
+- [x] ~~Presets feature from PR #18~~ — shipped. Plan: `docs/plans/2026-06-22-001-feat-config-presets-per-model-plan.md` (config.yaml as the writable source of truth, `yamlpath`+`yamlpatch` comment-safe writes, per-model/arch keys, in-memory store + write-through, one-time `state.json`→config migration, TUI preset cycle row + `Ctrl+P` save). Remaining follow-ups below.
+  - [ ] **Remove the one-time `state.json`→`config.yaml` presets migration** — the marked `// ONE-TIME MIGRATION` module (`src/daemon/preset_migration.rs`) + its call in `daemon::run_foreground` + the now-dead `state.json` `presets` field (`DaemonState.presets` / `PresetsEntry`) — in a later version (target `v0.2.0`) once it has shipped a release cycle. Source: plan Unit 3.
   - [ ] Deferred follow-ups (plan Unit 8): move config **reads** off archived `serde_yaml` onto a maintained parser; move the init wizard's config **writes** onto `yamlpatch` so wizard runs stop stripping comments.
 - [x] Architecture/UX improvements
   - [x] Top hints to non-bold, audit other bolds

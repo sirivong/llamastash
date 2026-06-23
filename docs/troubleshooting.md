@@ -102,7 +102,7 @@ The toast prints the URL inline when every backend fails, so you can still paste
 
 **Symptom:** daemon refuses to start; log says state-store parse failed.
 
-**Fix:** llamastash quarantines a corrupt `state.json` as `state.json.broken-<ts>` and starts with defaults. You'll lose favorites, presets, last-params, and the running snapshot for this restart — but the daemon will come up. If you have a recent backup of `state.json`, restore it and try again.
+**Fix:** llamastash quarantines a corrupt `state.json` as `state.json.broken-<ts>` and starts with defaults. You'll lose favorites, last-params, and the running snapshot for this restart — but the daemon will come up (named presets live in `config.yaml`, so they're unaffected). If you have a recent backup of `state.json`, restore it and try again.
 
 ## Proxy port already in use (`:11434`)
 

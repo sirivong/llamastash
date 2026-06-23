@@ -169,7 +169,8 @@ Bare letters are for tool actions (`f` favorite, `e` edit, `u/c/p` yank, `t` the
 | `focus_chat_tab`                        | `Shift+C` · `Shift+E` · `Shift+R` | Nav focuses — picks mode-appropriate tab (Chat / Embed / Rerank), gated on running |
 | `focus_settings_tab`                    | `Shift+S`                         | Nav focuses — always available                                                     |
 | `next_field` / `prev_field`             | `↓` / `↑`                         | Rerank input — cycles Query / Candidate                                            |
-| `cycle_value_next` / `cycle_value_prev` | `→` / `←`                         | Right pane (Settings) — cycles the focused row's value                             |
+| `cycle_value_next` / `cycle_value_prev` | `→` / `←`                         | Right pane (Settings) — cycles the focused row's value (incl. the preset row)      |
+| `save_preset`                           | `Ctrl+P`                          | Save the settings in view as a named preset (name prompt → overwrite confirm)      |
 | `enter_edit` / `exit_edit`              | `e` / `Esc`                       | Right pane → tab input                                                             |
 | `send_chat`                             | `Enter`                           | Chat input                                                                         |
 | `insert_newline`                        | `Shift+Enter`                     | All input focuses (kitty-protocol terminals only)                                  |
@@ -345,14 +346,18 @@ LlamaStash logs <target> [-n N] [-f]
 
 ```
 llamastash presets <ref> list [--json]
-llamastash presets <ref> save <NAME> [--ctx N] [--port N]
+llamastash presets <ref> save <NAME> [--ctx N]
                                    [--reasoning on|off] [--mode <m>]
                                    [-- <flags>...]
 llamastash presets <ref> delete <NAME>
 llamastash presets <ref> show <NAME>
 ```
 
-`save` overwrites an existing preset (the response reports `replaced: <old-params>` so callers can audit). Presets live under `$XDG_STATE_HOME/llamastash/state.json`.
+Named launch presets for a model. `save` is create-or-update (the response reports `replaced: <old-params>` so callers can audit). `list` shows the model's **effective** set; each row carries `source: "config"` and `is_default`. Apply one at launch with `llamastash start <ref> --preset <NAME>`.
+
+Presets live in `config.yaml` under a `presets:` key, the single writable source. `save` / `delete` write there comment-safely (only the touched entry changes; every other comment and bit of formatting is preserved). On first run after upgrading, any presets in `state.json` are migrated into `config.yaml` once, then cleared.
+
+A `presets:` key is classified per-resolution against your discovered models: a key that names a model (by file basename, or full path) is **per-model**; otherwise it is read as a GGUF `general.architecture` id and applies to **every model of that arch**. A model's effective set is its per-model entries ∪ its arch entries; the per-model entry wins on a name collision. The CLI writes per-model keys only — arch presets are hand-authored. A `default:` under a key names the preset the TUI cycle opens on (hand-edited only; the CLI never auto-applies it — a plain `start` with no `--preset` launches pure auto-fit defaults). Presets carry no `port` (it is per-launch, auto-assigned). Changes the CLI/TUI make are live immediately; hand-edits to `config.yaml` need a `llamastash daemon restart` to be picked up. See `config.example.yaml` for the full shape.
 
 ### `llamastash favorites`
 
@@ -779,6 +784,7 @@ These are the defaults. Override any binding via the `keybindings:` block in `co
 | `Tab` / `Shift+Tab`                           | Move focus across panes (`h` / `l` do the same — Left/Right arrows are intentionally unbound on Models to avoid an asymmetric pane-jump)                                                                 |
 | `Shift+M` / `Shift+L` / `Shift+C` / `Shift+S` | Jump focus to Models / Logs / Chat / Settings respectively. `L` and `C` only fire when the focused model is running.                                                                                     |
 | `Shift+P`                                     | Open the HuggingFace pull dialog (Models list focus only — search + sort + paginate, download via the pinned status strip). "P" for Pull.                                                                |
+| `Ctrl+P`                                      | Save the launch settings in view (the Settings form's knobs, or a running model's live knobs) as a named preset in `config.yaml` — prompts for a name, then an overwrite confirm if it already exists. "P" for Preset.                                                              |
 | `Ctrl+S`                                      | Stop the focused running launch (any nav focus; opens a confirmation popup)                                                                                                                              |
 | `Ctrl+R`                                      | Restart the daemon (any nav focus; opens a confirmation popup)                                                                                                                                           |
 | `Ctrl+K`                                      | Kill the daemon entirely (List focus; opens a confirmation popup)                                                                                                                                        |

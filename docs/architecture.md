@@ -46,7 +46,7 @@ flowchart LR
         GGUF[GGUF parser<br/>metadata + identity]
         SUP[Process supervisor<br/>spawn / health / stop]
         RES[Resource monitor<br/>RAM/VRAM/CPU]
-        STATE[Persisted state<br/>favorites / presets / running]
+        STATE[Persisted state<br/>favorites / last-params / running]
     end
 
     subgraph external[External]
@@ -75,7 +75,7 @@ flowchart LR
 - **Daemon-on-demand.** The TUI and CLI both try to attach via `runtime.json` (URL + bearer token written by the daemon at startup). If absent or stale, they fork/exec `llamastash daemon start` (which detaches by default) and retry once the new daemon publishes a fresh `runtime.json`.
 - **Control plane.** Loopback HTTP/1.1 on `127.0.0.1:48134` (with a small scan window if the slot is taken; deliberately above IANA's registered range and outside the `1143x` proxy family). Every route except `GET /health` requires a `Bearer` token validated in constant time. The token is 32 bytes from `OsRng`, rotated per daemon start, and persisted to `$XDG_STATE_HOME/llamastash/runtime.json` (mode `0600`) alongside the resolved URL. Wire protocol: JSON-RPC 2.0 envelopes carried in `POST /rpc` bodies.
 - **Proxy.** An HTTP/1.1 listener enabled by default. In normal mode it prefers `127.0.0.1:11435`; in Ollama-compat mode it prefers `127.0.0.1:11434`. It routes `/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`, plus the Anthropic `/v1/messages` + `/v1/messages/count_tokens` (llama-server speaks these natively), by resolving `body.model` through the same fuzzy resolver as `llamastash start <ref>` and forwarding byte-for-byte to the matching `llama-server` child (auto-starting it if not running; falling back to a Ready model on launch failure with `x-llamastash-served-by` + `x-llamastash-fallback-reason` headers). Anthropic-shape clients (Claude Code via `ANTHROPIC_BASE_URL`) authenticate with the `x-api-key` header; `Bearer` and browser `Basic` are also accepted. It is the **only** listener that can be exposed to the LAN — `proxy.host` / `--proxy-host` binds a routable address, gated behind a bearer key (`proxy.api_key`, auto-provisioned; the daemon refuses a non-loopback bind with no key unless `--insecure-no-auth`). The control plane and `llama-server` children always stay loopback. TLS is still deferred, so LAN mode is plaintext. Implementation: `src/proxy/` (auth: `src/proxy/auth.rs`); user docs: [`usage.md §Proxy (OpenAI-compatible listener)`](usage.md#proxy-openai-compatible-listener); design: [`plans/2026-05-21-001-feat-proxy-router-plan.md`](plans/2026-05-21-001-feat-proxy-router-plan.md), [`plans/2026-06-09-001-feat-lan-exposed-proxy-auth-plan.md`](plans/2026-06-09-001-feat-lan-exposed-proxy-auth-plan.md).
-- **State separation.** XDG-aware. `$XDG_STATE_HOME/llamastash/state.json` for favorites / presets / last-params / running snapshot (persisted). `runtime.json` alongside it for the per-instance URL + bearer token (removed on shutdown). `$XDG_CONFIG_HOME/llamastash/config.yaml` for user-authored config. `$XDG_CACHE_HOME/llamastash/logs/<id>-<ts>.log` for per-launch logs.
+- **State separation.** XDG-aware. `$XDG_STATE_HOME/llamastash/state.json` for favorites / last-params / running snapshot (persisted). `runtime.json` alongside it for the per-instance URL + bearer token (removed on shutdown). `$XDG_CONFIG_HOME/llamastash/config.yaml` for user-authored config, including the writable `presets:` store. `$XDG_CACHE_HOME/llamastash/logs/<id>-<ts>.log` for per-launch logs.
 
 ## Proxy comparison — Ollama, LM Studio, llamastash
 
@@ -195,7 +195,8 @@ The daemon dispatches on `req.method`. Wire format: `{"jsonrpc": "2.0", "id": <i
 | `stop_model`, `stop_all` | Stop a managed launch / all managed launches |
 | `stop_external` | Kill an unmanaged llama-server (PID must already be in the external snapshot) |
 | `logs_tail` | Tail snapshot from a launch's ring buffer |
-| `presets_list / save / delete / show` | Per-model named preset CRUD |
+| `presets_list / save / delete / show` | Per-model named preset CRUD, backed by the config `presets:` store |
+| `presets_all` | Raw config `presets:` map (the TUI resolves each model's effective set client-side) |
 | `favorite_list / add / remove` | Favorites CRUD |
 | `last_params_list` | Persisted last-successful-launch params per model |
 
@@ -207,10 +208,14 @@ JSON-RPC error codes follow the spec (`-32601 Method not found`, `-32602 Invalid
 
 - `favorites: ModelId[]`
 - `last_params: { <ModelId>: LaunchParams }`
-- `presets: { <ModelId>: NamedPreset[] }`
 - `running: RunningSnapshot[]` (PID + port + started_at + params)
+- `presets` — migration-only. Named presets now live in `config.yaml`; this field is read once at first boot after the upgrade, migrated into `config.yaml`, then cleared. It is slated for removal (see `TODO.md`).
 
 Corruption → quarantine. A `state.json` that fails to parse is renamed to `state.json.broken-<unix-secs>` and the daemon starts with defaults rather than refusing to boot.
+
+### Named presets (config.yaml)
+
+Named launch presets live in `config.yaml` under a `presets:` key — the single writable source. The daemon loads them into an in-memory store at start and holds them there; a `presets save` / `delete` (CLI or TUI `Ctrl+P`) mutates memory **and** patches the one touched node in `config.yaml` via `yamlpath` + `yamlpatch` (comment-safe — every other comment and bit of formatting survives), routed through the same atomic `write_secure`. App-driven changes are live without a restart; hand-edits to `config.yaml` need a daemon restart. Each top-level key is classified per-resolution against the live catalog: a key naming a discovered model (basename, path fallback) is per-model, otherwise it is read as an arch id. A model's effective set is its per-model entries ∪ its arch entries (per-model wins on a name collision); `default` resolves the same way and is config-only.
 
 ## Theming
 

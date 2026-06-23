@@ -1,7 +1,7 @@
 ---
 title: "feat: Config presets per model"
 type: feat
-status: active
+status: completed
 date: 2026-06-22
 deepened: 2026-06-23
 origin: "PR #18 — docs/brainstorms/2026-06-06-config-presets-per-model.md (external submission, branch config_brainstorm)"
@@ -227,7 +227,7 @@ Unit 1 (yamlpatch presets writer) ──► Unit 2 (schema + store + resolution)
 Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs for all
 ```
 
-- [ ] **Unit 1: Presets config writer via `yamlpath` + `yamlpatch` (comment-preserving)**
+- [x] **Unit 1: Presets config writer via `yamlpath` + `yamlpatch` (comment-preserving)**
 
 **Goal:** A writer that applies a single store mutation (create/update/delete a named preset, create/prune a model/arch key) to `config.yaml` by patching only the touched node, preserving every other comment and bit of formatting, atomically.
 
@@ -257,7 +257,7 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 **Verification:** Unit tests prove byte-exact preservation of unrelated content and faithful round-trip; a manual write against a commented `config.yaml` leaves all unrelated comments intact.
 
-- [ ] **Unit 2: Presets schema + in-memory store + resolution/merge**
+- [x] **Unit 2: Presets schema + in-memory store + resolution/merge**
 
 **Goal:** Parse the `config.yaml` `presets:` block into typed config presets, hold them in an in-memory store loaded at daemon start, and resolve a model's effective preset set + default.
 
@@ -288,7 +288,7 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 **Verification:** Config round-trips; `effective_presets` precedence holds; the store reads back what it wrote via Unit 1.
 
-- [ ] **Unit 3: One-time `state.json` → `config.yaml` migration (marked removable)**
+- [x] **Unit 3: One-time `state.json` → `config.yaml` migration (marked removable)**
 
 **Goal:** On daemon start, import any `state.json` presets into `config.yaml` (via the Unit 1 writer) under model-name keys (config wins on collision), then clear `state.json` presets so it never re-runs. The code is clearly marked temporary with a TODO to remove it later.
 
@@ -316,7 +316,7 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 **Verification:** Integration test green; the migration function and dead field carry the removal marker; the TODO.md entry exists.
 
-- [ ] **Unit 4: IPC — presets CRUD on the in-memory store + `status` hint**
+- [x] **Unit 4: IPC — presets CRUD on the in-memory store + `status` hint**
 
 **Goal:** Point `presets_list/show/save/delete` at the in-memory store (config-backed, write-through); add `source`/`is_default` to rows; add a light `preset_count` + `default` hint to `status` model rows.
 
@@ -344,7 +344,7 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 **Verification:** CRUD round-trips through config; `status` hint present and mirrored; golden + parity tests pass.
 
-- [ ] **Unit 5: CLI — presets verbs target config; `start` no-`--preset` = auto**
+- [x] **Unit 5: CLI — presets verbs target config; `start` no-`--preset` = auto**
 
 **Goal:** `presets save/list/show/delete` operate on the config-backed store; `start <model>` with no `--preset` launches pure auto (unchanged), `--preset <name>` resolves from the effective set.
 
@@ -369,7 +369,7 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 **Verification:** Manual E2E — save/list/show/delete against config; `start` with no `--preset` ignores the default; `--preset` applies it.
 
-- [ ] **Unit 6: TUI cycle field — `default → auto → named presets` (settings top row)**
+- [x] **Unit 6: TUI cycle field — `default → auto → named presets` (settings top row)**
 
 **Goal:** A cycle row at the top of the inline launch/settings page that cycles `default → auto → named presets` (model first, then arch); selecting re-seeds the form; opens on `default` if one exists, else `auto`.
 
@@ -394,7 +394,7 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 **Verification:** `make render` snapshot + a driver run show the row, correct opening selection, and live re-seed on cycle.
 
-- [ ] **Unit 7: TUI `Ctrl+P` — save current knobs as a preset (extended confirm dialog)**
+- [x] **Unit 7: TUI `Ctrl+P` — save current knobs as a preset (extended confirm dialog)**
 
 **Goal:** `Ctrl+P` on the settings form (preserving auto/default markers) and on a running-model row (capturing actual launch params) opens a dialog asking for a name; an existing name prompts an overwrite confirm; saves to `config.yaml` via the store.
 
@@ -422,7 +422,7 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 **Verification:** Harness program passes; live TUI run shows `Ctrl+P` saving into `config.yaml` with markers/auto preserved and overwrite-confirm working.
 
-- [ ] **Unit 8: Docs sync + TODO tracking + deferred `serde_yaml` note**
+- [x] **Unit 8: Docs sync + TODO tracking + deferred `serde_yaml` note**
 
 **Goal:** Bring all affected docs in sync, record the migration-removal and `serde_yaml`-follow-up TODOs, and tie off the plan checkboxes.
 

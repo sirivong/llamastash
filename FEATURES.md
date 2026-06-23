@@ -96,7 +96,7 @@ Layered resolver: `preset > last-params > yaml arch_defaults > built-in table > 
 
 ### Named presets, favorites, last-params recall
 
-Save tuned launch profiles per model (`coding`, `long-ctx`, `fast`) via [`llamastash presets`](docs/usage.md#llamastash-presets-model-ref-action) and reuse them across sessions. Star anything you launch often with [`favorites`](docs/usage.md#llamastash-favorites) and they pin to the top of the model list. Your last successful launch params pre-populate the next time — surfaced via [`llamastash last-params`](docs/usage.md#llamastash-last-params-ref).
+Save tuned launch profiles per model (`coding`, `long-ctx`, `fast`) via [`llamastash presets`](docs/usage.md#llamastash-presets-model-ref-action), the TUI `Ctrl+P` save dialog, or by hand, and reuse them across sessions. Presets live in `config.yaml` (the single writable source) — keyed per-model, or per-arch to share one profile across every model of a `general.architecture`; the app edits them comment-safely, so a hand-annotated `presets:` section survives a save. Pick one in a keystroke with the Settings form's preset cycle row (`default → auto → named presets`), or apply one at launch with `start --preset`. Star anything you launch often with [`favorites`](docs/usage.md#llamastash-favorites) and they pin to the top of the model list. Your last successful launch params pre-populate the next time — surfaced via [`llamastash last-params`](docs/usage.md#llamastash-last-params-ref).
 
 ## A TUI that doesn't get in your way
 
@@ -261,7 +261,7 @@ The GH Releases `llama-server` extractor enforces an entry-count cap, total unco
 
 ### Atomic, mode-checked config + state writes
 
-Every persisted file (config, state, snapshot) goes through temp-file + rename. The write refuses symlinks and group/world-writable parents, and the final file lands at mode `0600`. A corrupt `state.json` is quarantined to `state.json.broken-<ts>` and the daemon boots clean rather than refusing to start — your favorites and presets get one shot at recovery from the quarantine file.
+Every persisted file (config, state, snapshot) goes through temp-file + rename. The write refuses symlinks and group/world-writable parents, and the final file lands at mode `0600`. A corrupt `state.json` is quarantined to `state.json.broken-<ts>` and the daemon boots clean rather than refusing to start — your favorites and last-params get one shot at recovery from the quarantine file (presets live in `config.yaml`, untouched by a `state.json` quarantine).
 
 ### Side-by-side daemons
 
