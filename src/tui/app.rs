@@ -362,6 +362,9 @@ pub struct App {
   /// is open; the input pump routes through `Focus::HfDialog` to the
   /// per-stage key handler.
   pub hf_dialog: Option<crate::tui::hf_dialog::HfDialogState>,
+  /// `Ctrl+P` save-preset dialog. `Some(_)` while the modal is open; the
+  /// input pump routes keys to its name / overwrite stages.
+  pub save_preset_dialog: Option<crate::tui::save_preset_dialog::SavePresetDialog>,
   /// Pinned download status strip. Always present; the
   /// renderer reserves a 1-line slot above the body only when
   /// `download_strip.is_active()` is true.
@@ -527,6 +530,7 @@ impl App {
       pending_g_prefix: false,
       confirm_dialog: None,
       hf_dialog: None,
+      save_preset_dialog: None,
       download_strip: crate::tui::download_strip::DownloadStripState::default(),
       rows_cache: None,
       right_tabs_cache: None,
@@ -1553,6 +1557,57 @@ impl App {
     self.running_view_scroll.set(0);
     self.focus = Focus::List;
     self.right_tab = RightTab::Settings;
+  }
+
+  /// Open the `Ctrl+P` save-preset dialog for the focused model. Captures
+  /// the launch settings in view — a running model's live knobs when one
+  /// is focused, otherwise the Settings form's user knobs + extras (the
+  /// open picker, or a freshly-built default). Auto / inherited markers
+  /// ride through untouched. No-op without a focused model.
+  pub fn open_save_preset_dialog(&mut self) {
+    let Some(path) = self.focused_path() else {
+      return;
+    };
+    let model_name = self.display_label_for(&path).unwrap_or_else(|| {
+      path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+    });
+
+    // Capture knobs + extras from whichever surface is in view.
+    let (knobs, extras) = if let Some(m) = self.focused_managed() {
+      // Running model: the live dispatched knobs (ctx/reasoning folded in).
+      (m.knobs.clone(), Vec::new())
+    } else if let Some(p) = &self.launch_picker {
+      (
+        p.user_knobs.clone(),
+        p.extras
+          .iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect(),
+      )
+    } else if let Some(p) = self.build_default_picker() {
+      (
+        p.user_knobs.clone(),
+        p.extras
+          .iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect(),
+      )
+    } else {
+      return;
+    };
+
+    let existing = self
+      .effective_preset_choices(&path)
+      .0
+      .into_iter()
+      .map(|c| c.name)
+      .collect();
+    self.save_preset_dialog = Some(crate::tui::save_preset_dialog::SavePresetDialog::open(
+      path, model_name, knobs, extras, existing,
+    ));
   }
 
   pub fn open_filter(&mut self) {

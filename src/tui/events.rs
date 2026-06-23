@@ -120,6 +120,22 @@ pub enum WriterCmd {
   FavoriteAdd(PathBuf),
   /// `favorite_remove` for the supplied model path.
   FavoriteRemove(PathBuf),
+  /// `presets_save` — write the captured launch settings to
+  /// `config.yaml` under `name` for `model_path` (`Ctrl+P`). `knobs`
+  /// carries ctx/reasoning folded in plus any Auto markers; `extras` is
+  /// the argv tail. The next `presets_all` refresh reflects it. Boxed
+  /// (like `StartModel`) so the large `TypedKnobs` doesn't bloat the
+  /// other tiny variants.
+  SavePreset(Box<SavePresetCmd>),
+}
+
+/// Payload for [`WriterCmd::SavePreset`].
+#[derive(Debug, Clone)]
+pub struct SavePresetCmd {
+  pub model_path: PathBuf,
+  pub name: String,
+  pub knobs: crate::config::TypedKnobs,
+  pub extras: Vec<String>,
 }
 
 /// One pump of input events. Returns `true` when the App is asking
@@ -173,7 +189,11 @@ fn handle_mouse(
   writer: Option<&mpsc::Sender<WriterCmd>>,
 ) {
   use crossterm::event::{MouseButton, MouseEventKind};
-  if app.hf_dialog.is_some() || app.confirm_dialog.is_some() || app.show_help {
+  if app.hf_dialog.is_some()
+    || app.confirm_dialog.is_some()
+    || app.save_preset_dialog.is_some()
+    || app.show_help
+  {
     return;
   }
   match m.kind {
@@ -294,6 +314,12 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
     } else {
       app.confirm_dialog = None;
     }
+    return;
+  }
+  // Save-preset dialog steals input while open (text entry → overwrite
+  // confirm). Routed here, ahead of focus dispatch, like the HF dialog.
+  if app.save_preset_dialog.is_some() {
+    handle_save_preset_input(app, key, writer);
     return;
   }
   // An open Settings inline edit owns input. All keys route to the
@@ -894,6 +920,13 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     }
     Action::DeleteModel => apply_delete_model(app),
     Action::CancelDownload => apply_cancel_download(app),
+    Action::SavePreset => {
+      if app.focused_path().is_some() {
+        app.open_save_preset_dialog();
+      } else {
+        app.show_toast("no model focused — nothing to save");
+      }
+    }
     Action::EnterEdit => {
       // Tab-aware:
       //  - Chat / Embed / Rerank: shift focus into the input buffer
@@ -1346,6 +1379,80 @@ fn hf_repo_dir_for_snapshot_path(
     return None;
   }
   Some(candidate)
+}
+
+/// Route a key to the open save-preset dialog. Name stage: typing edits
+/// the buffer, `Enter` saves (or steps to the overwrite confirm when the
+/// name exists), `Esc` cancels. Overwrite stage: `Enter`/`y` overwrites,
+/// `Esc`/`n` returns to the name input.
+fn handle_save_preset_input(
+  app: &mut App,
+  key: KeyEvent,
+  writer: Option<&mpsc::Sender<WriterCmd>>,
+) {
+  use crate::tui::input_field::InputOutcome;
+  use crate::tui::save_preset_dialog::SaveStage;
+  let Some(dialog) = app.save_preset_dialog.as_mut() else {
+    return;
+  };
+  match dialog.stage {
+    SaveStage::Name => {
+      // Esc cancels the whole dialog (ahead of the input's exit-edit).
+      if matches!(key.code, KeyCode::Esc) {
+        app.save_preset_dialog = None;
+        return;
+      }
+      match dialog.input.handle_key(key) {
+        InputOutcome::Submit => {
+          if dialog.name().is_empty() {
+            dialog.error = Some("name must not be empty".into());
+            return;
+          }
+          dialog.error = None;
+          if dialog.name_exists() {
+            dialog.stage = SaveStage::Overwrite;
+            return;
+          }
+          // New name → fall through to commit (borrow released below).
+        }
+        InputOutcome::Handled => {
+          dialog.error = None;
+          return;
+        }
+        InputOutcome::PassThrough => return,
+      }
+    }
+    SaveStage::Overwrite => match key.code {
+      KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {} // commit below
+      KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+        dialog.stage = SaveStage::Name;
+        return;
+      }
+      _ => return,
+    },
+  }
+  commit_save_preset(app, writer);
+}
+
+/// Dispatch the captured preset to `presets_save` and close the dialog.
+fn commit_save_preset(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) {
+  let Some(dialog) = app.save_preset_dialog.take() else {
+    return;
+  };
+  let name = dialog.name();
+  dispatch_writer(
+    app,
+    writer,
+    WriterCmd::SavePreset(Box::new(SavePresetCmd {
+      model_path: dialog.model_path,
+      name: name.clone(),
+      knobs: dialog.knobs,
+      extras: dialog.extras,
+    })),
+    format!("saved preset `{name}`"),
+    "save failed — writer offline",
+    "save unavailable — no daemon writer attached".into(),
+  );
 }
 
 /// Apply a confirmed [`ConfirmAction`] — dispatches the writer
@@ -2084,6 +2191,18 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
     }
     WriterCmd::FavoriteAdd(p) => ("favorite_add", json!({ "model_path": p })),
     WriterCmd::FavoriteRemove(p) => ("favorite_remove", json!({ "model_path": p })),
+    WriterCmd::SavePreset(cmd) => (
+      "presets_save",
+      // `knobs` already folds ctx/reasoning in; the daemon stores them
+      // as-is (it only folds the separate ctx/reasoning params, which we
+      // omit here). Auto markers survive the round-trip.
+      json!({
+        "model_path": cmd.model_path,
+        "name": cmd.name,
+        "knobs": cmd.knobs,
+        "extras": cmd.extras,
+      }),
+    ),
   }
 }
 

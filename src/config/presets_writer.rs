@@ -149,7 +149,7 @@ fn splice_upsert(
     Ok(replace_span(source, span, flow))
   } else if entries_is_block {
     let indent = child_indent(&doc, &e_route).unwrap_or(STEP * 3);
-    let at = block_end(&doc, &e_route)?;
+    let at = append_point(source, &doc, &e_route, last_key(entries))?;
     Ok(insert_at(
       source,
       at,
@@ -166,7 +166,7 @@ fn splice_upsert(
     Ok(replace_span(source, f.location.byte_span, &block))
   } else if model.is_some() {
     let indent = key_column(&doc, &m_route).unwrap_or(STEP);
-    let at = block_end(&doc, &m_route)?;
+    let at = append_point(source, &doc, &m_route, last_key(model))?;
     let block = format!(
       "{e}entries:\n{n}{name}: {flow}",
       e = pad(indent + STEP),
@@ -175,7 +175,7 @@ fn splice_upsert(
     Ok(insert_at(source, at, &block))
   } else if presets.is_some() {
     let indent = child_indent(&doc, &p_route).unwrap_or(STEP);
-    let at = block_end(&doc, &p_route)?;
+    let at = append_point(source, &doc, &p_route, last_key(presets))?;
     let block = format!(
       "{m}{model_key}:\n{e}entries:\n{n}{name}: {flow}",
       m = pad(indent),
@@ -217,6 +217,43 @@ fn value_span(doc: &Document, route: &Route<'_>) -> Result<(usize, usize), Write
 /// the point a new sibling line is inserted at.
 fn block_end(doc: &Document, route: &Route<'_>) -> Result<usize, WriteError> {
   Ok(value_span(doc, route)?.1)
+}
+
+/// Insertion point for a new child of the mapping at `container`: the byte
+/// just past the *last child's own line*. tree-sitter folds a trailing
+/// dedented comment into the block's span, so inserting at the raw block
+/// end would land a new sibling after that comment; anchoring on the last
+/// child's line keeps the new entry adjacent to its siblings instead.
+/// Falls back to the raw block end when the last child can't be located.
+fn append_point(
+  source: &str,
+  doc: &Document,
+  container: &Route<'_>,
+  last_child: Option<String>,
+) -> Result<usize, WriteError> {
+  let Some(last) = last_child else {
+    return block_end(doc, container);
+  };
+  let span = match value_span(doc, &container.with_key(last)) {
+    Ok(s) => s,
+    Err(_) => return block_end(doc, container),
+  };
+  // End of the line holding that value (skipping a trailing inline comment).
+  Ok(
+    source[span.1..]
+      .find('\n')
+      .map(|i| span.1 + i + 1)
+      .unwrap_or(source.len()),
+  )
+}
+
+/// Last key of the block mapping `node`, if it is a non-empty mapping.
+fn last_key(node: Option<&YamlValue>) -> Option<String> {
+  node
+    .and_then(YamlValue::as_mapping)
+    .and_then(|m| m.keys().last())
+    .and_then(YamlValue::as_str)
+    .map(str::to_string)
 }
 
 /// Column the first child of the mapping at `route` starts at (its
@@ -704,6 +741,35 @@ presets:
     assert_eq!(ctx_of(&yaml, "a", "p1"), Some(1024));
     assert_eq!(ctx_of(&yaml, "a", "p3"), Some(4096));
     assert_eq!(ctx_of(&yaml, "b", "p2"), Some(2048));
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn append_entry_lands_before_a_trailing_dedented_comment() {
+    // A comment at a shallower indent trails the entries block. The new
+    // entry must land adjacent to its sibling, not after the comment
+    // (which tree-sitter folds into the block's span).
+    let dir = temp_dir("trailing-comment");
+    let path = dir.join("config.yaml");
+    fs::write(
+      &path,
+      "presets:\n  m:\n    entries:\n      a: { ctx: 1 }\n  # arch presets below\n  qwen2:\n    entries:\n      b: { ctx: 2 }\n",
+    )
+    .unwrap();
+    upsert_preset(&path, "m", "c", &body(&[("ctx", 3.into())])).unwrap();
+    let text = read(&path);
+    // `c` sits next to `a`, above the comment.
+    let a_line = text.find("a: { ctx: 1 }").unwrap();
+    let c_line = text.find("c:").unwrap();
+    let comment = text.find("# arch presets below").unwrap();
+    assert!(
+      a_line < c_line && c_line < comment,
+      "new entry stays with its siblings:\n{text}"
+    );
+    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(ctx_of(&yaml, "m", "c"), Some(3));
+    assert_eq!(ctx_of(&yaml, "qwen2", "b"), Some(2), "arch block intact");
+    assert!(text.contains("# arch presets below"));
     fs::remove_dir_all(&dir).ok();
   }
 

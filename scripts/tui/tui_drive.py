@@ -17,7 +17,8 @@ The script is a JSON array of [keys, wait_seconds, label] steps:
 
 Keys are sent as literal characters; `|` separates tokens inside one step and
 these named tokens map to escape sequences: <down> <up> <left> <right>
-<enter> <esc> <tab>. After each step's keys, the driver pumps pty output for
+<enter> <esc> <tab>, plus <ctrl-x> for any control chord (e.g. <ctrl-p>).
+After each step's keys, the driver pumps pty output for
 `wait_seconds`, then prints the screen under a `===== SCREEN: <label> =====`
 header. `q` is sent at the end so the TUI exits cleanly.
 
@@ -50,6 +51,15 @@ KEYMAP = {
     "<esc>": "\x1b",
     "<tab>": "\t",
 }
+
+
+def expand(token: str) -> str:
+    """Map a token to the bytes to send. `<ctrl-x>` becomes the control
+    byte for letter x (Ctrl+P -> 0x10); known tokens use KEYMAP; anything
+    else is sent literally (so plain text types itself)."""
+    if token.startswith("<ctrl-") and token.endswith(">") and len(token) == 8:
+        return chr(ord(token[6].upper()) - 0x40)
+    return KEYMAP.get(token, token)
 
 
 def default_bin() -> str:
@@ -98,7 +108,7 @@ def main() -> None:
         for token in keys.split("|"):
             if not token:
                 continue
-            os.write(fd, KEYMAP.get(token, token).encode())
+            os.write(fd, expand(token).encode())
             pump(0.3)
         pump(wait)
         print(f"\n===== SCREEN: {label} =====")
