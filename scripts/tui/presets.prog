@@ -1,20 +1,21 @@
 comment: config-presets-per-model — TUI preset cycle row + Ctrl+P save dialog.
-comment: Requires an isolated daemon whose config.yaml has a `presets:` block
-comment: for the focused model (see scripts/tui/README.md). The model card must
-comment: resolve at least one preset for the row to appear.
+comment: Requires an isolated daemon with at least one discovered model (see
+comment: scripts/tui/README.md). The preset cycle row is always shown — it
+comment: offers `last used` <-> `auto` even when the model has no named presets.
 wait: 4
 snap: boot
 expect: Models
 
-comment: --- open the launch picker on the focused model (opens on the default preset)
+comment: --- open the launch picker; the cursor opens on the Preset row at the
+comment: --- `last used` stop (pre-filled last params, nothing applied yet)
 key: enter
 settle
 snap: picker
 expect: Launch settings
 expect: preset
-iexpect: default
+iexpect: last used
 
-comment: --- cycle the preset row right: default -> auto (clears preset-seeded knobs)
+comment: --- cycle the preset row right: last used -> auto (delegates fit knobs)
 key: right
 settle
 snap: cycle-auto

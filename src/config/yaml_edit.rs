@@ -35,10 +35,11 @@ const STEP: usize = 2;
 /// root, e.g. `["presets", "qwen2", "entries", "long-ctx"]` or
 /// `["proxy", "api_key"]`) so its value becomes the rendered inline YAML
 /// token `value_flow`, preserving every unrelated comment and bit of
-/// formatting. Missing parent blocks along `path` are created. Refuses (with
-/// a clear error, leaving the source untouched) when a container on the path
-/// is flow / scalar rather than a block mapping — a block insert there would
-/// corrupt the file.
+/// formatting. Missing parent blocks along `path` are created, and a *vacant*
+/// node on the path (an explicit `key:` null or an empty `{}`) is built into.
+/// Refuses (with a clear error, leaving the source untouched) when a container
+/// on the path holds real data a block insert would corrupt — a non-empty flow
+/// mapping, a scalar, or a sequence.
 pub(crate) fn upsert(source: &str, path: &[&str], value_flow: &str) -> Result<String, WriteError> {
   debug_assert!(!path.is_empty(), "upsert needs a non-empty key path");
   if source.trim().is_empty() {
@@ -87,10 +88,10 @@ pub(crate) fn upsert(source: &str, path: &[&str], value_flow: &str) -> Result<St
         return Err(flow_err(path[i - 1]));
       }
       // else: non-empty block — fall through to the append below.
-    } else if i == path.len() - 1 {
-      // The leaf's own parent is degenerate (`key:` null, `key: {}`, or a
-      // scalar) → replace the whole node, re-emitting its key with a fresh
-      // block holding the leaf.
+    } else if is_vacant(node_i) {
+      // The deepest existing node is *vacant* — `key:` null or an empty `{}` —
+      // so nothing is lost by building into it. Re-emit the key with a fresh
+      // block holding the whole missing suffix (one level deep or several).
       let f = doc
         .query_pretty(&key_route(&path[..i]))
         .map_err(|e| WriteError::Patch(e.to_string()))?;
@@ -98,10 +99,9 @@ pub(crate) fn upsert(source: &str, path: &[&str], value_flow: &str) -> Result<St
       let block = render_keyed_chain(path[i - 1], &path[i..], value_flow, keycol);
       return Ok(replace_span(source, f.location.byte_span, &block));
     } else {
-      // A container *above* the leaf's parent is degenerate / non-block — we
-      // can't safely build several levels into it. Refuse (matches the old
-      // presets writer's "model value must be a block mapping" guard).
-      return Err(flow_err(path[i - 1]));
+      // The node holds a scalar or a sequence — real data a nested write would
+      // clobber. Refuse and leave the file untouched.
+      return Err(scalar_err(path[i - 1]));
     }
   }
 
@@ -173,11 +173,19 @@ pub(crate) fn remove(source: &str, path: &[&str]) -> Result<Option<String>, Writ
 /// renders as compact JSON, which is valid single-line YAML flow.
 pub(crate) fn render_value(value: &YamlValue) -> Result<String, WriteError> {
   match value {
-    YamlValue::Sequence(_) | YamlValue::Mapping(_) => {
-      serde_json::to_string(value).map_err(|e| WriteError::Serialise(e.to_string()))
-    }
+    YamlValue::Sequence(_) | YamlValue::Mapping(_) => render_flow_json(value),
     _ => render_scalar(value),
   }
+}
+
+/// Render any serializable value as a compact single-line flow token. JSON is
+/// valid single-line YAML flow with faithful typing/quoting (a numeric-looking
+/// string like `"10000"` stays quoted), so this is the single place the
+/// "compact JSON ≡ flow YAML" encoding lives — shared by [`render_value`] (for
+/// nested seq / map leaves) and the presets writer, which builds its body as a
+/// `serde_json::Value` (its sorted-key map gives stable on-disk output).
+pub(crate) fn render_flow_json(value: &impl serde::Serialize) -> Result<String, WriteError> {
+  serde_json::to_string(value).map_err(|e| WriteError::Serialise(e.to_string()))
 }
 
 /// Render a scalar [`YamlValue`] as a single-line inline YAML token (quoting
@@ -302,6 +310,19 @@ fn flow_err(key: &str) -> WriteError {
   WriteError::Patch(format!(
     "config key `{key}` uses flow / non-block style; edit it by hand or convert it to block style before writing there"
   ))
+}
+
+fn scalar_err(key: &str) -> WriteError {
+  WriteError::Patch(format!(
+    "config key `{key}` holds a scalar / sequence value, not a block mapping; can't create nested keys under it — clear it or make it a mapping, or edit by hand"
+  ))
+}
+
+/// A node we can safely build a nested block into: an explicit null (a bare
+/// `key:`) or an empty mapping (`{}`). A scalar or sequence is *not* vacant —
+/// it holds data a nested write would clobber, so the caller refuses instead.
+fn is_vacant(node: &YamlValue) -> bool {
+  matches!(node, YamlValue::Null) || node.as_mapping().is_some_and(|m| m.is_empty())
 }
 
 /// Byte span of the *value* at `route` (key and comments excluded).
@@ -515,6 +536,68 @@ mod tests {
         .and_then(YamlValue::as_str),
       Some("new")
     );
+  }
+
+  #[test]
+  fn upsert_into_null_valued_parent_reemits_block() {
+    // `proxy:` has a null value (a bare key) — adding `proxy.api_key` must
+    // re-emit it as a block, not error, and keep the sibling + its comment.
+    let src = "proxy:\ntheme: latte  # mine\n";
+    let out = upsert(src, &["proxy", "api_key"], "sekret").unwrap();
+    assert!(
+      out.contains("theme: latte  # mine"),
+      "sibling + comment kept"
+    );
+    let y = parse_ok(&out);
+    assert_eq!(
+      y.get("proxy")
+        .and_then(|p| p.get("api_key"))
+        .and_then(YamlValue::as_str),
+      Some("sekret")
+    );
+  }
+
+  #[test]
+  fn upsert_into_null_intermediate_builds_deep_chain() {
+    // `presets:` is a bare (null) key; writing three levels under it used to
+    // refuse with a misleading "flow / non-block" error. It now re-emits the
+    // whole missing suffix as a nested block.
+    let src = "presets:\ntheme: latte\n";
+    let out = upsert(src, &["presets", "m", "entries", "p"], "{\"ctx\":8192}").unwrap();
+    assert!(out.contains("theme: latte"), "sibling survives");
+    let y = parse_ok(&out);
+    assert_eq!(
+      y.get("presets")
+        .and_then(|p| p.get("m"))
+        .and_then(|m| m.get("entries"))
+        .and_then(|e| e.get("p"))
+        .and_then(|p| p.get("ctx"))
+        .and_then(YamlValue::as_u64),
+      Some(8192)
+    );
+  }
+
+  #[test]
+  fn upsert_into_empty_flow_mapping_reemits_block() {
+    // `proxy: {}` (empty flow) is degenerate — adding a key re-emits it as a
+    // block rather than mangling the flow braces.
+    let out = upsert("proxy: {}\n", &["proxy", "api_key"], "sekret").unwrap();
+    let y = parse_ok(&out);
+    assert_eq!(
+      y.get("proxy")
+        .and_then(|p| p.get("api_key"))
+        .and_then(YamlValue::as_str),
+      Some("sekret")
+    );
+  }
+
+  #[test]
+  fn upsert_into_nonempty_flow_mapping_refuses() {
+    // A *non-empty* hand-authored flow mapping can't take a block append
+    // without corruption, so it's refused with a clear flow-style message.
+    let err = upsert("proxy: {port: 11500}\n", &["proxy", "api_key"], "x").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("flow"), "error names flow style: {msg}");
   }
 
   #[test]

@@ -371,6 +371,14 @@ Unit 8 (docs + TODO tracking + deferred serde_yaml note)  ◄── lands docs f
 
 - [x] **Unit 6: TUI cycle field — `default → auto → named presets` (settings top row)**
 
+> **Shipped behavior note (post-implementation):** the cycle evolved past the
+> original `default → auto → named` design below. As shipped, the row is
+> **always shown** (even with no named presets) and the ring is
+> `last used → auto → [default] → named presets`. It **opens on `last used`**
+> (the pre-filled last-used params), not on `default` — `default` is just one
+> stop, and the CLI never auto-applies it. `auto` delegates the fit-governed
+> knobs to `--fit`. The paragraphs below record the original plan.
+
 **Goal:** A cycle row at the top of the inline launch/settings page that cycles `default → auto → named presets` (model first, then arch); selecting re-seeds the form; opens on `default` if one exists, else `auto`.
 
 **Requirements:** R1, R5

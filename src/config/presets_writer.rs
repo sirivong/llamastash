@@ -32,9 +32,9 @@ pub fn upsert_preset(
   let target = preflight(config_path)?;
   let source = yaml_edit::read_source(config_path)?;
   let pruned = prune_nulls(serialise(body)?);
-  // Compact JSON is valid single-line YAML flow with faithful typing and
-  // quoting — the body collapses to one line, so the splice is trivial.
-  let flow = serde_json::to_string(&pruned).map_err(|e| WriteError::Serialise(e.to_string()))?;
+  // The body collapses to one line via the shared compact-JSON-as-flow
+  // encoder, so the splice is a trivial one-line insert.
+  let flow = yaml_edit::render_flow_json(&pruned)?;
   let new_source = yaml_edit::upsert(&source, &[PRESETS_KEY, model_key, ENTRIES_KEY, name], &flow)?;
   yaml_edit::write_config(&target, &new_source)
 }

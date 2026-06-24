@@ -81,6 +81,11 @@ pub fn diff(before: &Value, after: &Value) -> Vec<DiffEntry> {
   out
 }
 
+// Sibling of [`walk_writes`]: both recurse the same `(before, after)` pair,
+// but this one produces human-facing `DiffEntry` rows (add/change classified,
+// values rendered to strings) for the wizard's preview/redaction, while
+// `walk_writes` produces the changed leaves to splice. Kept separate because
+// their outputs differ; keep their traversal shape in sync if either changes.
 fn walk_diff(prefix: &str, before: &Value, after: &Value, out: &mut Vec<DiffEntry>) {
   match (before, after) {
     (Value::Mapping(b), Value::Mapping(a)) => {
@@ -238,6 +243,10 @@ pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, Wr
 /// that a later write couldn't append to); a sequence — or the `{auto: true}`
 /// knob sentinel, which round-trips identically as a one-key block — is a
 /// leaf value. Drives the comment-safe splice in [`merge_and_write`].
+///
+/// Sibling of [`walk_diff`], which walks the same `(before, after)` pair for
+/// the human-facing preview; this one yields the leaves to write. If you change
+/// one walker's traversal, mirror it in the other.
 fn collect_leaf_writes(before: &Value, after: &Value) -> Vec<(Vec<String>, Value)> {
   let mut out = Vec::new();
   walk_writes(&mut Vec::new(), Some(before), after, &mut out);
@@ -272,19 +281,15 @@ fn walk_writes(
 /// the same `(current, merged)` pair `merge_and_write` does without
 /// committing to disk.
 pub fn read_or_default(path: &Path) -> Result<Value, WriteError> {
-  match std::fs::read_to_string(path) {
-    Ok(s) if s.trim().is_empty() => Ok(Value::Mapping(yaml_serde::Mapping::new())),
-    Ok(s) => yaml_serde::from_str(&s).map_err(|e| WriteError::ParseCurrent {
+  // Share the file-read (missing → empty, I/O errors bubble) with the writers.
+  let source = yaml_edit::read_source(path)?;
+  if source.trim().is_empty() {
+    Ok(Value::Mapping(yaml_serde::Mapping::new()))
+  } else {
+    yaml_serde::from_str(&source).map_err(|e| WriteError::ParseCurrent {
       path: path.to_path_buf(),
       error: e.to_string(),
-    }),
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      Ok(Value::Mapping(yaml_serde::Mapping::new()))
-    }
-    Err(e) => Err(WriteError::Io {
-      path: path.to_path_buf(),
-      error: e.to_string(),
-    }),
+    })
   }
 }
 

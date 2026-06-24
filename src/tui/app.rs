@@ -1452,6 +1452,12 @@ impl App {
       let (choices, default) = self.effective_preset_choices(p);
       state.set_presets(choices, default);
     }
+    // Open with the cursor on the always-shown Preset row — it leads the form
+    // and is the first thing a user picks when staging a launch. Centralized
+    // here so every construction path agrees (the launch picker *and* the
+    // Settings-tab render fallback); `set_presets` deliberately leaves `field`
+    // alone so tests can drive it in isolation.
+    state.field = crate::tui::launch_picker::PickerField::Preset;
     Some(state)
   }
 
@@ -1597,15 +1603,12 @@ impl App {
   /// gate) and by `Enter`-on-list for idle rows via
   /// [`drill_into_focused_model`](Self::drill_into_focused_model).
   pub fn open_launch_picker(&mut self) {
-    let mut picker = match self.build_default_picker() {
+    let picker = match self.build_default_picker() {
       Some(p) => p,
       None => return,
     };
-    // (Extras are seeded inside `build_default_picker`, before the preset
-    // cycle captures its `last used` baseline.)
-    // Open with the cursor on the Preset row — it leads the form and is the
-    // first thing a user picks when staging a launch.
-    picker.field = crate::tui::launch_picker::PickerField::Preset;
+    // `build_default_picker` seeds extras + the preset cycle and opens the
+    // cursor on the Preset row.
     self.launch_picker = Some(picker);
     self.running_view_scroll.set(0);
     self.right_tab = RightTab::Settings;
