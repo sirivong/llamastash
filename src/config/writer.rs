@@ -1,10 +1,11 @@
 //! Secure-write helper for `config.yaml`.
 //!
-//! Owns the `tempfile`-based atomic rename, mode 0600 on Unix, parent-
-//! dir-mode pre-flight check, and symlink refusal that mirror the
-//! `state.json` hardening pattern from
-//! [`crate::daemon::state_store::save`]. The init wizard's diff preview +
-//! redaction layers on top of this primitive.
+//! Owns the `tempfile`-based atomic rename, mode 0600 on Unix, and the
+//! parent-dir-mode pre-flight check that mirror the `state.json` hardening
+//! from [`crate::daemon::state_store::save`]. Unlike `state.json`, a
+//! **symlinked** `config.yaml` is followed to its target (the link is
+//! user-authored, e.g. a dotfiles repo) rather than refused — see
+//! [`preflight`]. The init wizard's diff preview + redaction layer on top.
 //!
 //! Merge semantics:
 //!   - YAML-aware recursive merge: leaf-level user edits inside a
@@ -39,8 +40,6 @@ pub struct WriteOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
-  #[error("config target {} is a symlink; refusing to follow (init never writes through symlinks)", path.display())]
-  TargetIsSymlink { path: PathBuf },
   #[error("parent dir {} is group/world-writable (mode {mode:#o}); refuse to write a 0600 config there", path.display())]
   ParentDirInsecure { path: PathBuf, mode: u32 },
   #[error("config write I/O at {}: {error}", path.display())]
@@ -121,24 +120,23 @@ fn serialise_inline(v: &Value) -> String {
     .to_string()
 }
 
-/// Pre-flight checks that the write target is safe to touch.
-/// Refuses if:
-/// - `path` exists and is a symlink (no through-symlink writes).
-/// - `path.parent()` exists and is group/world-writable on Unix
-///   (mode bits & 0o022 != 0); writing 0600 into such a dir is
-///   pointless because the dir mode dominates effective access.
-pub fn preflight(path: &Path) -> Result<(), WriteError> {
-  if let Ok(meta) = std::fs::symlink_metadata(path) {
-    if meta.file_type().is_symlink() {
-      return Err(WriteError::TargetIsSymlink {
-        path: path.to_path_buf(),
-      });
-    }
-  }
+/// Pre-flight a config write and return the path to actually write to.
+///
+/// `config.yaml` may legitimately be a **symlink** (e.g. into a dotfiles
+/// repo). Unlike `state.json` — machine-managed runtime state that nobody
+/// symlinks — we *follow* the link and write to its canonical target, so the
+/// link survives the save (a tmp-file + rename over the link itself would
+/// replace the link with a regular file). A non-symlink path is returned
+/// unchanged. The group/world-writable parent-dir check runs on the
+/// *resolved* target's parent (where the rename lands), and is the only
+/// refusal: writing a 0600 config into a permissive dir is pointless because
+/// the dir mode dominates effective access.
+pub fn preflight(path: &Path) -> Result<PathBuf, WriteError> {
+  let target = resolve_write_target(path);
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = target.parent() {
       if let Ok(meta) = std::fs::metadata(parent) {
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o022 != 0 {
@@ -150,8 +148,48 @@ pub fn preflight(path: &Path) -> Result<(), WriteError> {
       }
     }
   }
-  let _ = path; // keep `path` referenced on non-unix targets
-  Ok(())
+  Ok(target)
+}
+
+/// Resolve `path` to the real file a write should land on. A non-symlink is
+/// returned unchanged. A symlink is followed (chain) to its final target —
+/// even one that doesn't exist yet — and the target's parent is canonicalized
+/// (collapsing `..` / directory symlinks) while the filename is kept, so the
+/// caller writes the real file and the link is preserved. Following stays in
+/// the config write path only; `state.json` keeps its non-following behavior.
+fn resolve_write_target(path: &Path) -> PathBuf {
+  let is_symlink = std::fs::symlink_metadata(path)
+    .map(|m| m.file_type().is_symlink())
+    .unwrap_or(false);
+  if !is_symlink {
+    return path.to_path_buf();
+  }
+  let mut cur = path.to_path_buf();
+  for _ in 0..40 {
+    let is_link = std::fs::symlink_metadata(&cur)
+      .map(|m| m.file_type().is_symlink())
+      .unwrap_or(false);
+    if !is_link {
+      break;
+    }
+    let Ok(target) = std::fs::read_link(&cur) else {
+      break;
+    };
+    cur = if target.is_absolute() {
+      target
+    } else {
+      cur.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    };
+  }
+  // Canonicalize the parent (must exist) so a not-yet-created target still
+  // resolves to a real directory; fall back to the lexical path otherwise.
+  match (cur.parent(), cur.file_name()) {
+    (Some(parent), Some(name)) => match std::fs::canonicalize(parent) {
+      Ok(real_parent) => real_parent.join(name),
+      Err(_) => cur,
+    },
+    _ => cur,
+  }
 }
 
 /// Merge `additions` into the YAML at `path`, write the result
@@ -163,7 +201,8 @@ pub fn preflight(path: &Path) -> Result<(), WriteError> {
 /// hand-written comments and formatting survive (the old whole-file
 /// re-serialise stripped them on every run).
 pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, WriteError> {
-  preflight(path)?;
+  // Resolve a symlinked config to its real target (the link is preserved).
+  let target = preflight(path)?;
   // Read the source text once — comments live here and must survive. The
   // parsed `current` drives merge/diff; the original text is what we splice.
   let source = yaml_edit::read_source(path)?;
@@ -186,7 +225,7 @@ pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, Wr
     let segs: Vec<&str> = segments.iter().map(String::as_str).collect();
     new_source = yaml_edit::upsert(&new_source, &segs, &token)?;
   }
-  yaml_edit::write_config(path, &new_source)?;
+  yaml_edit::write_config(&target, &new_source)?;
   Ok(WriteOutcome {
     diff: diff_rows,
     written_bytes: new_source.len() as u64,
@@ -342,15 +381,36 @@ arch_defaults:
 
   #[cfg(unix)]
   #[test]
-  fn preflight_refuses_symlink_target() {
+  fn merge_and_write_follows_symlink_and_preserves_the_link() {
+    // A `config.yaml` symlinked into (say) a dotfiles repo must be written
+    // *through* to its real target, keeping both the link and the target's
+    // comments — not refused, and not clobbered into a regular file.
     use std::os::unix::fs::symlink;
-    let dir = temp_dir("symlink");
-    let target = dir.join("config.yaml");
-    let victim = dir.join("victim.dat");
-    fs::write(&victim, b"important").unwrap();
-    symlink(&victim, &target).unwrap();
-    let err = preflight(&target).unwrap_err();
-    assert!(matches!(err, WriteError::TargetIsSymlink { .. }));
+    let dir = temp_dir("symlink-follow");
+    let real = dir.join("real-config.yaml");
+    fs::write(&real, "theme: latte  # mine\n").unwrap();
+    let link = dir.join("config.yaml");
+    symlink(&real, &link).unwrap();
+
+    merge_and_write(&link, yaml("llama_server_path: /opt/ls\n")).expect("write");
+
+    // The link is still a symlink (not replaced by a regular file).
+    assert!(
+      fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink(),
+      "symlink preserved"
+    );
+    // The real target got the update and kept its comment.
+    let real_body = fs::read_to_string(&real).unwrap();
+    assert!(real_body.contains("# mine"), "target comment survives");
+    assert!(
+      real_body.contains("llama_server_path: /opt/ls"),
+      "write landed on target"
+    );
+    // Reading through the link sees the same content.
+    assert_eq!(fs::read_to_string(&link).unwrap(), real_body);
     fs::remove_dir_all(&dir).ok();
   }
 

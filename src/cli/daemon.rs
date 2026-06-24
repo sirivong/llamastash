@@ -1552,20 +1552,19 @@ mod tests {
     // Detached daemon re-reads the key from config; if the write fails
     // the child can't see the key, hits the backstop, and drops the
     // proxy. provision must refuse to start rather than print a dead
-    // key. Force a write failure with a symlink config target (the
-    // writer refuses to follow symlinks).
-    use std::os::unix::fs::symlink;
+    // key. Force a write failure with a group/world-writable config dir
+    // (the writer refuses to drop a 0600 file into a permissive dir).
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     let cfg = dir.path().join("config.yaml");
-    let victim = dir.path().join("victim.dat");
-    std::fs::write(&victim, b"x").unwrap();
-    symlink(&victim, &cfg).unwrap();
     let (mut opts, cli) = non_loopback_opts(&cfg);
     let err = provision_proxy_key(&mut opts, &cli, false).expect_err("must refuse to start");
     assert!(
       err.to_string().contains("could not save"),
       "error must explain the unpersisted key: {err}"
     );
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).ok();
   }
 
   #[cfg(unix)]
@@ -1574,12 +1573,10 @@ mod tests {
     // Same write failure, but a --foreground daemon is the same process
     // that holds the key, so it works for this run. provision keeps the
     // key on opts and returns Ok (the banner flags it as unsaved).
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     let cfg = dir.path().join("config.yaml");
-    let victim = dir.path().join("victim.dat");
-    std::fs::write(&victim, b"x").unwrap();
-    symlink(&victim, &cfg).unwrap();
     let (mut opts, cli) = non_loopback_opts(&cfg);
     provision_proxy_key(&mut opts, &cli, true).expect("foreground tolerates write failure");
     assert!(
@@ -1590,6 +1587,7 @@ mod tests {
         .is_some_and(|k| k.starts_with("sk-llamastash-")),
       "key must still be set on opts for the in-process run"
     );
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).ok();
   }
 
   #[test]

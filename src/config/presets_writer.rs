@@ -28,14 +28,15 @@ pub fn upsert_preset(
   name: &str,
   body: &impl Serialize,
 ) -> Result<(), WriteError> {
-  preflight(config_path)?;
+  // Resolve a symlinked config to its real target (the link is preserved).
+  let target = preflight(config_path)?;
   let source = yaml_edit::read_source(config_path)?;
   let pruned = prune_nulls(serialise(body)?);
   // Compact JSON is valid single-line YAML flow with faithful typing and
   // quoting — the body collapses to one line, so the splice is trivial.
   let flow = serde_json::to_string(&pruned).map_err(|e| WriteError::Serialise(e.to_string()))?;
   let new_source = yaml_edit::upsert(&source, &[PRESETS_KEY, model_key, ENTRIES_KEY, name], &flow)?;
-  yaml_edit::write_config(config_path, &new_source)
+  yaml_edit::write_config(&target, &new_source)
 }
 
 /// Remove the named preset `name` under `model_key` from `config_path`,
@@ -43,11 +44,11 @@ pub fn upsert_preset(
 /// whole model key, or the whole `presets:` key) left behind is pruned.
 /// Returns `false` when the preset wasn't present, so nothing was written.
 pub fn remove_preset(config_path: &Path, model_key: &str, name: &str) -> Result<bool, WriteError> {
-  preflight(config_path)?;
+  let target = preflight(config_path)?;
   let source = yaml_edit::read_source(config_path)?;
   match yaml_edit::remove(&source, &[PRESETS_KEY, model_key, ENTRIES_KEY, name])? {
     Some(new_source) => {
-      yaml_edit::write_config(config_path, &new_source)?;
+      yaml_edit::write_config(&target, &new_source)?;
       Ok(true)
     }
     None => Ok(false),
@@ -420,16 +421,37 @@ presets:
 
   #[cfg(unix)]
   #[test]
-  fn refuses_symlink_target() {
+  fn follows_symlink_to_target_and_preserves_the_link() {
+    // A preset save on a symlinked `config.yaml` writes through to the real
+    // file (keeping comments) and leaves the link intact.
     use std::os::unix::fs::symlink;
     let dir = temp_dir("symlink");
-    let victim = dir.join("victim.dat");
-    fs::write(&victim, b"important").unwrap();
+    let real = dir.join("real-config.yaml");
+    fs::write(&real, "# my hand-written config\ntheme: latte\n").unwrap();
     let path = dir.join("config.yaml");
-    symlink(&victim, &path).unwrap();
-    let err = upsert_preset(&path, "m", "p", &body(&[("ctx", 8192.into())])).unwrap_err();
-    assert!(matches!(err, WriteError::TargetIsSymlink { .. }));
-    assert_eq!(fs::read(&victim).unwrap(), b"important", "victim untouched");
+    symlink(&real, &path).unwrap();
+
+    upsert_preset(&path, "m", "p", &body(&[("ctx", 8192.into())])).unwrap();
+
+    assert!(
+      fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink(),
+      "symlink preserved"
+    );
+    let real_body = fs::read_to_string(&real).unwrap();
+    assert!(
+      real_body.contains("# my hand-written config"),
+      "target comment survives"
+    );
+    assert!(real_body.contains("theme: latte"), "target key survives");
+    let yaml: YamlValue = yaml_serde::from_str(&real_body).unwrap();
+    assert_eq!(
+      ctx_of(&yaml, "m", "p"),
+      Some(8192),
+      "write landed on target"
+    );
     fs::remove_dir_all(&dir).ok();
   }
 
