@@ -87,11 +87,13 @@ skip load and quit:
 the capture command.
 
 `scripts/tui/presets.prog` gates the config-presets TUI surface: the Settings
-preset cycle row (`default → auto`) and the `Ctrl+P` save dialog (name entry,
-save, overwrite confirm). It needs an isolated daemon whose `config.yaml` has a
-`presets:` block for the focused model — point `LLAMASTASH_STATE_DIR` /
-`LLAMASTASH_CONFIG` at a temp dir, seed that block, then run the harness against
-it.
+preset cycle row (`default → auto`) and the `Ctrl+P` gate (it toasts on a
+non-running model, since only a running launch has live knobs to capture). It
+needs an isolated daemon whose `config.yaml` has a `presets:` block for the
+focused model — point `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG` at a temp
+dir, seed that block, then run the harness against it. The save-dialog name /
+confirm flow itself is covered by the `save_preset_dialog.rs` unit tests (it
+needs a live backend the driver doesn't spawn).
 
 ### Reworking a recorded cast
 

@@ -1457,30 +1457,11 @@ impl App {
   /// the local catalog, so the TUI and daemon agree on classification.
   fn effective_preset_choices(&self, path: &Path) -> (Vec<PresetChoice>, Option<usize>) {
     use crate::launch::presets::{effective_presets, preset_body_from_launch_params};
-    use crate::launch::resolve::CatalogRow;
     if self.config_presets.is_empty() {
       return (Vec::new(), None);
     }
-    let rows: Vec<CatalogRow> = self
-      .models
-      .iter()
-      .map(|m| {
-        CatalogRow::for_resolution(
-          m.path.display().to_string(),
-          m.display_label.clone(),
-          m.metadata.as_ref().and_then(|md| md.arch.clone()),
-        )
-      })
-      .collect();
+    let (rows, name, arch) = self.preset_resolution_inputs(path);
     let path_str = path.display().to_string();
-    let row = rows.iter().find(|r| r.path == path_str);
-    let name = row.map(|r| r.name()).unwrap_or_else(|| {
-      path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path_str.clone())
-    });
-    let arch = row.and_then(|r| r.arch.clone());
     let eff = effective_presets(
       &name,
       &path_str,
@@ -1502,6 +1483,73 @@ impl App {
       .as_ref()
       .and_then(|d| choices.iter().position(|c| &c.name == d));
     (choices, default)
+  }
+
+  /// Resolution inputs for `path`: the catalog projected into
+  /// [`crate::launch::resolve::CatalogRow`]s, the model's display name
+  /// (basename fallback off the catalog), and its arch. Shared by the
+  /// preset-cycle and save-dialog paths so they classify identically.
+  fn preset_resolution_inputs(
+    &self,
+    path: &Path,
+  ) -> (
+    Vec<crate::launch::resolve::CatalogRow>,
+    String,
+    Option<String>,
+  ) {
+    use crate::launch::resolve::CatalogRow;
+    let rows: Vec<CatalogRow> = self
+      .models
+      .iter()
+      .map(|m| {
+        CatalogRow::for_resolution(
+          m.path.display().to_string(),
+          m.display_label.clone(),
+          m.metadata.as_ref().and_then(|md| md.arch.clone()),
+        )
+      })
+      .collect();
+    let path_str = path.display().to_string();
+    let row = rows.iter().find(|r| r.path == path_str);
+    let name = row
+      .map(|r| r.name())
+      .unwrap_or_else(|| crate::util::paths::path_basename(path));
+    let arch = row.and_then(|r| r.arch.clone());
+    (rows, name, arch)
+  }
+
+  /// Existing preset names the focused model resolves, split into the
+  /// per-model presets a save would **overwrite** and the arch presets it
+  /// would only **shadow** (a per-model save creates an override; the arch
+  /// entry survives and still applies to other models of that arch). The
+  /// save dialog uses the split to ask the right question.
+  fn existing_preset_names(&self, path: &Path) -> (Vec<String>, Vec<String>) {
+    use crate::launch::presets::effective_presets;
+    if self.config_presets.is_empty() {
+      return (Vec::new(), Vec::new());
+    }
+    let (rows, name, arch) = self.preset_resolution_inputs(path);
+    let path_str = path.display().to_string();
+    // Arch layer skipped (arch = None) → per-model entries only.
+    let per_model: Vec<String> =
+      effective_presets(&name, &path_str, None, &self.config_presets, &rows)
+        .presets
+        .iter()
+        .map(|np| np.name.clone())
+        .collect();
+    let arch_only: Vec<String> = effective_presets(
+      &name,
+      &path_str,
+      arch.as_deref(),
+      &self.config_presets,
+      &rows,
+    )
+    .presets
+    .iter()
+    .map(|np| np.name.clone())
+    .filter(|n| !per_model.contains(n))
+    .collect();
+    (per_model, arch_only)
   }
 
   /// Drill into the focused model row — the action `Enter` fires on
@@ -1573,55 +1621,32 @@ impl App {
     self.right_tab = RightTab::Settings;
   }
 
-  /// Open the `Ctrl+P` save-preset dialog for the focused model. Captures
-  /// the launch settings in view — a running model's live knobs when one
-  /// is focused, otherwise the Settings form's user knobs + extras (the
-  /// open picker, or a freshly-built default). Auto / inherited markers
-  /// ride through untouched. No-op without a focused model.
+  /// Open the `Ctrl+P` save-preset dialog for the focused model. Only a
+  /// **running** model can be saved — its live dispatched knobs + advanced
+  /// `--` tail (from the `status` row) are the settings worth pinning, with
+  /// auto / inherited markers intact. No-op when the focused model isn't
+  /// running; the caller toasts instead.
   pub fn open_save_preset_dialog(&mut self) {
     let Some(path) = self.focused_path() else {
       return;
     };
-    let model_name = self.display_label_for(&path).unwrap_or_else(|| {
-      path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-    });
-
-    // Capture knobs + extras from whichever surface is in view.
-    let (knobs, extras) = if let Some(m) = self.focused_managed() {
-      // Running model: the live dispatched knobs (ctx/reasoning folded in)
-      // and the advanced `--` tail, both from the live `status` row.
-      (m.knobs.clone(), m.extras.clone())
-    } else if let Some(p) = &self.launch_picker {
-      (
-        p.user_knobs.clone(),
-        p.extras
-          .iter()
-          .map(|s| s.to_string_lossy().into_owned())
-          .collect(),
-      )
-    } else if let Some(p) = self.build_default_picker() {
-      (
-        p.user_knobs.clone(),
-        p.extras
-          .iter()
-          .map(|s| s.to_string_lossy().into_owned())
-          .collect(),
-      )
-    } else {
+    let Some(m) = self.focused_managed() else {
       return;
     };
+    let knobs = m.knobs.clone();
+    let extras = m.extras.clone();
+    let model_name = self
+      .display_label_for(&path)
+      .unwrap_or_else(|| crate::util::paths::path_basename(&path));
 
-    let existing = self
-      .effective_preset_choices(&path)
-      .0
-      .into_iter()
-      .map(|c| c.name)
-      .collect();
+    let (existing, arch_shadow) = self.existing_preset_names(&path);
     self.save_preset_dialog = Some(crate::tui::save_preset_dialog::SavePresetDialog::open(
-      path, model_name, knobs, extras, existing,
+      path,
+      model_name,
+      knobs,
+      extras,
+      existing,
+      arch_shadow,
     ));
   }
 

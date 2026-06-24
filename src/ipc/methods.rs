@@ -639,14 +639,17 @@ pub(crate) async fn catalog_rows(ctx: &MethodContext) -> Vec<CatalogRow> {
     .collect()
 }
 
-/// Resolve the per-model write key + effective preset set for
-/// `model_path`. The key is the model's display name (basename for a
-/// local GGUF) — what CLI/TUI saves write under; when the model is not in
-/// the catalog the basename + GGUF-header arch are used as a fallback.
-async fn model_key_and_effective(
+/// Resolve the per-model write key, the model's arch, and the projected
+/// catalog rows for `model_path` — everything [`effective_presets`] needs
+/// except a store snapshot. The key is the model's display name (basename
+/// for a local GGUF) — what CLI/TUI saves write under; a model not in the
+/// catalog falls back to its basename + GGUF-header arch. Split out so the
+/// save path resolves this once and recomputes the effective set from a
+/// single post-save store snapshot, rather than re-deriving the key.
+async fn model_key_arch_rows(
   ctx: &MethodContext,
   model_path: &std::path::Path,
-) -> (String, EffectivePresets) {
+) -> (String, Option<String>, Vec<CatalogRow>) {
   let rows = catalog_rows(ctx).await;
   let path_str = model_path.display().to_string();
   let (key, arch) = match rows.iter().find(|r| r.path == path_str) {
@@ -659,26 +662,30 @@ async fn model_key_and_effective(
         .filter(|o| o.name().eq_ignore_ascii_case(&name))
         .count()
         > 1;
-      let key = if shared { path_str.clone() } else { name };
+      let key = if shared { path_str } else { name };
       (key, r.arch.clone())
     }
     None => (
-      path_basename(model_path),
+      crate::util::paths::path_basename(model_path),
       resolve_model_id_and_arch(model_path)
         .ok()
         .and_then(|(_, a, _)| a),
     ),
   };
-  let store = ctx.presets.snapshot().await;
-  let eff = effective_presets(&key, &path_str, arch.as_deref(), &store, &rows);
-  (key, eff)
+  (key, arch, rows)
 }
 
-fn path_basename(path: &std::path::Path) -> String {
-  path
-    .file_name()
-    .map(|s| s.to_string_lossy().into_owned())
-    .unwrap_or_else(|| path.display().to_string())
+/// Resolve the per-model write key + effective preset set for
+/// `model_path` (a fresh store snapshot paired with [`model_key_arch_rows`]).
+async fn model_key_and_effective(
+  ctx: &MethodContext,
+  model_path: &std::path::Path,
+) -> (String, EffectivePresets) {
+  let (key, arch, rows) = model_key_arch_rows(ctx, model_path).await;
+  let store = ctx.presets.snapshot().await;
+  let path_str = model_path.display().to_string();
+  let eff = effective_presets(&key, &path_str, arch.as_deref(), &store, &rows);
+  (key, eff)
 }
 
 /// A config-write failure (symlink/parent-mode/patch/IO) is a server-side
@@ -719,11 +726,6 @@ struct PresetsSaveParams {
   name: String,
   #[serde(default)]
   ctx: Option<u32>,
-  // `port` is accepted for wire compatibility but dropped — config
-  // presets carry no port (per-launch, auto-assigned).
-  #[serde(default)]
-  #[allow(dead_code)]
-  port: Option<u16>,
   #[serde(default)]
   reasoning: Option<bool>,
   #[serde(default)]
@@ -760,7 +762,7 @@ async fn presets_save_handler(
   lp.extras = parsed.extras.into_iter().map(OsString::from).collect();
   let body = preset_body_from_launch_params(&lp);
 
-  let (key, _) = model_key_and_effective(ctx, &parsed.model_path).await;
+  let (key, arch, rows) = model_key_arch_rows(ctx, &parsed.model_path).await;
   let saved_np = materialize_preset(&parsed.name, &body, parsed.model_path.clone());
   let prev = ctx
     .presets
@@ -768,8 +770,12 @@ async fn presets_save_handler(
     .await
     .map_err(write_err)?;
 
-  // Recompute after the save so `is_default` reflects the live config.
-  let (_, eff) = model_key_and_effective(ctx, &parsed.model_path).await;
+  // Recompute `is_default` from a single post-save store snapshot, reusing
+  // the key/arch/rows resolved above — the catalog can't change across the
+  // save, so re-deriving the key (a second catalog snapshot) is wasted work.
+  let store = ctx.presets.snapshot().await;
+  let path_str = parsed.model_path.display().to_string();
+  let eff = effective_presets(&key, &path_str, arch.as_deref(), &store, &rows);
   let default = is_default(&eff, &parsed.name);
   let replaced = prev
     .map(|b| materialize_preset(&parsed.name, &b, parsed.model_path.clone()))
@@ -853,7 +859,7 @@ pub(crate) fn preset_hint(
   let row = rows.iter().find(|r| r.path == model_path);
   let name = row
     .map(|r| r.name())
-    .unwrap_or_else(|| path_basename(std::path::Path::new(model_path)));
+    .unwrap_or_else(|| crate::util::paths::path_basename(std::path::Path::new(model_path)));
   let arch = row.and_then(|r| r.arch.clone());
   let eff = effective_presets(&name, model_path, arch.as_deref(), store, rows);
   (eff.presets.len() as u32, eff.default)

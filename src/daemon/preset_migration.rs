@@ -18,11 +18,12 @@ use crate::daemon::state_store::DaemonState;
 use crate::launch::presets::preset_body_from_launch_params;
 
 /// Import `state.presets` into `config_presets` (and, when `config_path`
-/// is set, into `config.yaml`), keyed by each model's basename. A key that
-/// already exists in the config is kept untouched (config wins). The
-/// `state.json` `presets` field is cleared only when every entry persisted
-/// durably, so a transient write error is retried on the next boot rather
-/// than silently dropping data. Returns the number of presets migrated.
+/// is set, into `config.yaml`), keyed by each model's basename. An entry
+/// name already present under its key is kept untouched (config wins, and
+/// a prior run's persisted entries aren't rewritten). The `state.json`
+/// `presets` field is cleared only when every entry persisted durably, so
+/// a transient write error retries the *remaining* entries on the next
+/// boot rather than silently dropping data. Returns the number migrated.
 pub fn migrate_state_presets_to_config(
   state: &mut DaemonState,
   config_presets: &mut BTreeMap<String, ConfigPresetBlock>,
@@ -36,18 +37,26 @@ pub fn migrate_state_presets_to_config(
   // Durable persistence needs a config file; without one (tests) we keep
   // state.presets so nothing is lost on the next, real boot.
   let mut all_persisted = config_path.is_some();
-  // Config wins only over keys that were *already* in the config — not over
-  // a key this pass created. Two `state.json` entries that share a basename
-  // (the same filename in two dirs) merge their preset *names* into one key
-  // rather than dropping the second model's presets entirely.
-  let preexisting: std::collections::BTreeSet<String> = config_presets.keys().cloned().collect();
 
   for entry in &state.presets {
     let key = entry.id.display_name();
-    if preexisting.contains(&key) {
-      continue;
-    }
     for np in entry.presets.iter() {
+      // Skip names already present under this key. Config-authored entries
+      // win, and an entry a prior run already persisted isn't rewritten.
+      // The check is per *entry*, not per model key, on purpose: if a
+      // partial run persisted some of a model's entries (the key now
+      // exists in config), the remaining entries must still migrate on the
+      // retry rather than the whole model being skipped — otherwise the
+      // un-persisted entries would be dropped when `state.presets` clears.
+      // It also merges two `state.json` entries that share a basename (the
+      // same filename in two dirs) into one key instead of dropping the
+      // second model's presets.
+      if config_presets
+        .get(&key)
+        .is_some_and(|b| b.entries.contains_key(&np.name))
+      {
+        continue;
+      }
       let body = preset_body_from_launch_params(&np.params);
       if let Some(path) = config_path {
         if let Err(e) = presets_writer::upsert_preset(path, &key, &np.name, &body) {
@@ -198,6 +207,49 @@ mod tests {
       "existing config value wins"
     );
     assert!(state.presets.is_empty(), "state still cleared");
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+  }
+
+  #[test]
+  fn retry_after_partial_write_completes_remaining_entries() {
+    // Simulate a prior run that persisted p1 but failed on p2: config.yaml
+    // has p1, state.json still carries both (it wasn't cleared). The retry
+    // must migrate the missing p2 — not skip the whole model and then drop
+    // p2 when state clears.
+    let path = temp_config("partial-retry");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+      &path,
+      "presets:\n  a.gguf:\n    entries:\n      p1: { ctx: 8192 }\n",
+    )
+    .unwrap();
+    let mut config_presets = crate::config::load_config_from_path(&path)
+      .config
+      .presets
+      .clone();
+    let mut state = DaemonState::default();
+    state.presets.push(entry(
+      gguf_id("/m/a.gguf"),
+      &[preset("p1", 8192), preset("p2", 4096)],
+    ));
+
+    let n = migrate_state_presets_to_config(&mut state, &mut config_presets, Some(&path));
+    assert_eq!(n, 1, "only the missing p2 migrates");
+    let cfg = crate::config::load_config_from_path(&path).config;
+    assert_eq!(
+      cfg.presets["a.gguf"].entries["p1"].knobs.ctx,
+      Some(KnobValue::Set(8192)),
+      "already-persisted p1 untouched"
+    );
+    assert_eq!(
+      cfg.presets["a.gguf"].entries["p2"].knobs.ctx,
+      Some(KnobValue::Set(4096)),
+      "p2 recovered, not dropped"
+    );
+    assert!(
+      state.presets.is_empty(),
+      "state cleared after full migration"
+    );
     std::fs::remove_dir_all(path.parent().unwrap()).ok();
   }
 

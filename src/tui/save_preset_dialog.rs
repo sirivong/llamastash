@@ -1,10 +1,11 @@
 //! `Ctrl+P` "save current launch settings as a preset" dialog.
 //!
-//! A small two-stage modal that captures the launch settings in view (the
-//! Settings-tab form's user knobs, or a running model's live knobs) and
-//! saves them to `config.yaml` as a named preset via `presets_save`.
-//! Stage `Name` prompts for the preset name; if that name already exists
-//! for the model, stage `Overwrite` asks to confirm the replacement.
+//! A small two-stage modal that captures a running model's live launch
+//! knobs and saves them to `config.yaml` as a named preset via
+//! `presets_save`. Stage `Name` prompts for the preset name; if that name
+//! already resolves for the model, stage `Confirm` asks before either
+//! overwriting the model's own preset or shadowing an arch preset with a
+//! new per-model override.
 //!
 //! Auto / inherited markers ride through untouched: the captured
 //! [`crate::config::TypedKnobs`] keeps each knob's `Set` / `Auto` /
@@ -20,15 +21,17 @@ use ratatui::Frame;
 
 use crate::config::TypedKnobs;
 use crate::theme::Palette;
+use crate::tui::app::App;
 use crate::tui::input_field::InputField;
+use crate::tui::keybindings::{Action as KeyAction, Focus};
 
 /// Which step of the save flow is in view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStage {
   /// Typing the preset name.
   Name,
-  /// The typed name already exists — confirm the overwrite.
-  Overwrite,
+  /// The typed name already resolves — confirm an overwrite or a shadow.
+  Confirm,
 }
 
 /// State for the `Ctrl+P` save-preset modal.
@@ -42,8 +45,12 @@ pub struct SavePresetDialog {
   pub knobs: TypedKnobs,
   /// Captured extras argv tail.
   pub extras: Vec<String>,
-  /// Names of the model's existing effective presets (overwrite check).
+  /// The model's own (per-model) preset names — a save under one of these
+  /// is a true overwrite.
   pub existing: Vec<String>,
+  /// Names defined only by an arch preset — a per-model save shadows them
+  /// (creates an override) rather than overwriting; the arch entry stays.
+  pub arch_shadow: Vec<String>,
   /// The name-entry field.
   pub input: InputField,
   pub stage: SaveStage,
@@ -59,6 +66,7 @@ impl SavePresetDialog {
     knobs: TypedKnobs,
     extras: Vec<String>,
     existing: Vec<String>,
+    arch_shadow: Vec<String>,
   ) -> Self {
     let mut input = InputField::new();
     input.enter_edit();
@@ -68,6 +76,7 @@ impl SavePresetDialog {
       knobs,
       extras,
       existing,
+      arch_shadow,
       input,
       stage: SaveStage::Name,
       error: None,
@@ -79,14 +88,43 @@ impl SavePresetDialog {
     self.input.buffer().trim().to_string()
   }
 
-  /// Whether the typed name already names one of the model's presets.
+  /// Whether the typed name overwrites one of the model's **own** presets.
   pub fn name_exists(&self) -> bool {
     self.existing.contains(&self.name())
   }
+
+  /// Whether the typed name matches only an arch preset — saving shadows
+  /// it with a per-model override rather than overwriting it.
+  pub fn name_is_shadow(&self) -> bool {
+    let name = self.name();
+    !self.existing.contains(&name) && self.arch_shadow.contains(&name)
+  }
+
+  /// Whether a confirm step is needed before saving (overwrite or shadow).
+  pub fn name_needs_confirm(&self) -> bool {
+    self.name_exists() || self.name_is_shadow()
+  }
+}
+
+/// Submit / Cancel chip labels resolved live from the keymap (so a
+/// config rebind flows through), scoped like the confirm popup. `y` / `n`
+/// stay hardcoded char-matches in the dispatcher, mirroring
+/// [`crate::tui::confirm_overlay`].
+fn keymap_label(app: &App, action: KeyAction, fallback: &str) -> String {
+  app.resolve_label(Focus::ConfirmPopup, action, fallback)
 }
 
 /// Render the modal. Caller invokes this only when the dialog is open.
-pub fn render(frame: &mut Frame<'_>, area: Rect, dialog: &SavePresetDialog, palette: &Palette) {
+pub fn render(
+  frame: &mut Frame<'_>,
+  area: Rect,
+  app: &App,
+  dialog: &SavePresetDialog,
+  palette: &Palette,
+) {
+  use crate::tui::keybindings::{ENTER_LABEL, ESC_LABEL};
+  let submit = keymap_label(app, KeyAction::Submit, ENTER_LABEL);
+  let cancel = keymap_label(app, KeyAction::Cancel, ESC_LABEL);
   let rect = crate::tui::layout::centered_abs(area, 60, 9, 4, 2);
   frame.render_widget(Clear, rect);
   crate::tui::render::paint_theme_bg(frame, rect, palette);
@@ -138,25 +176,39 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, dialog: &SavePresetDialog, pale
       }
 
       let hint = Paragraph::new(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(palette.success)),
+        Span::styled(submit, Style::default().fg(palette.success)),
         Span::styled(" save  ·  ", palette.muted_style()),
-        Span::styled("Esc", Style::default().fg(palette.warning)),
+        Span::styled(cancel, Style::default().fg(palette.warning)),
         Span::styled(" cancel", palette.muted_style()),
       ]))
       .alignment(Alignment::Center);
       frame.render_widget(hint, chunks[3]);
     }
-    SaveStage::Overwrite => {
-      let body = Paragraph::new(Line::from(Span::styled(
+    SaveStage::Confirm => {
+      // Two flavors: overwriting the model's own preset, or shadowing an
+      // arch preset with a new per-model override (the arch entry survives
+      // and still applies to other models of that arch).
+      let question = if dialog.name_is_shadow() {
+        format!(
+          "`{}` is an arch preset for {}. Saving creates a model-specific override (the arch preset is unchanged). Continue?",
+          dialog.name(),
+          dialog.model_name
+        )
+      } else {
         format!(
           "A preset named `{}` already exists for {}. Overwrite it?",
           dialog.name(),
           dialog.model_name
-        ),
-        palette.text_style(),
-      )))
-      .wrap(Wrap { trim: true })
-      .alignment(Alignment::Center);
+        )
+      };
+      let verb = if dialog.name_is_shadow() {
+        " override  ·  "
+      } else {
+        " overwrite  ·  "
+      };
+      let body = Paragraph::new(Line::from(Span::styled(question, palette.text_style())))
+        .wrap(Wrap { trim: true })
+        .alignment(Alignment::Center);
       // Span the three top rows for the wrapped question.
       let body_area = Rect {
         height: chunks[0].height + chunks[1].height + chunks[2].height,
@@ -165,9 +217,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, dialog: &SavePresetDialog, pale
       frame.render_widget(body, body_area);
 
       let hint = Paragraph::new(Line::from(vec![
-        Span::styled("Enter / y", Style::default().fg(palette.success)),
-        Span::styled(" overwrite  ·  ", palette.muted_style()),
-        Span::styled("Esc / n", Style::default().fg(palette.warning)),
+        Span::styled(
+          format!("{submit} / y"),
+          Style::default().fg(palette.success),
+        ),
+        Span::styled(verb, palette.muted_style()),
+        Span::styled(
+          format!("{cancel} / n"),
+          Style::default().fg(palette.warning),
+        ),
         Span::styled(" keep", palette.muted_style()),
       ]))
       .alignment(Alignment::Center);
@@ -182,12 +240,17 @@ mod tests {
   use std::path::PathBuf;
 
   fn dialog(existing: &[&str]) -> SavePresetDialog {
+    dialog_with(existing, &[])
+  }
+
+  fn dialog_with(existing: &[&str], arch_shadow: &[&str]) -> SavePresetDialog {
     SavePresetDialog::open(
       PathBuf::from("/m/a.gguf"),
       "a.gguf".into(),
       TypedKnobs::default(),
       Vec::new(),
       existing.iter().map(|s| s.to_string()).collect(),
+      arch_shadow.iter().map(|s| s.to_string()).collect(),
     )
   }
 
@@ -205,7 +268,24 @@ mod tests {
     d.input.set_text("  coding  ");
     assert_eq!(d.name(), "coding");
     assert!(d.name_exists());
+    assert!(d.name_needs_confirm());
     d.input.set_text("fresh");
     assert!(!d.name_exists());
+    assert!(!d.name_needs_confirm());
+  }
+
+  #[test]
+  fn arch_only_name_is_a_shadow_not_an_overwrite() {
+    // A name that exists only as an arch preset: not a true overwrite, but
+    // a save still needs a confirm (it shadows the arch entry).
+    let mut d = dialog_with(&["coding"], &["balanced"]);
+    d.input.set_text("balanced");
+    assert!(!d.name_exists(), "not the model's own preset");
+    assert!(d.name_is_shadow(), "matches an arch preset");
+    assert!(d.name_needs_confirm());
+    // A per-model name that also shadows an arch entry counts as overwrite.
+    d.input.set_text("coding");
+    assert!(d.name_exists());
+    assert!(!d.name_is_shadow());
   }
 }

@@ -921,8 +921,12 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     Action::DeleteModel => apply_delete_model(app),
     Action::CancelDownload => apply_cancel_download(app),
     Action::SavePreset => {
-      if app.focused_path().is_some() {
+      // Only a running model has live launch settings worth pinning; a
+      // non-running row has nothing concrete to capture yet.
+      if app.focused_managed().is_some() {
         app.open_save_preset_dialog();
+      } else if app.focused_path().is_some() {
+        app.show_toast("preset save needs a running model — launch it first");
       } else {
         app.show_toast("no model focused — nothing to save");
       }
@@ -1382,9 +1386,9 @@ fn hf_repo_dir_for_snapshot_path(
 }
 
 /// Route a key to the open save-preset dialog. Name stage: typing edits
-/// the buffer, `Enter` saves (or steps to the overwrite confirm when the
-/// name exists), `Esc` cancels. Overwrite stage: `Enter`/`y` overwrites,
-/// `Esc`/`n` returns to the name input.
+/// the buffer, `Enter` saves (or steps to the confirm stage when the name
+/// already resolves — an overwrite or an arch shadow), `Esc` cancels.
+/// Confirm stage: `Enter`/`y` commits, `Esc`/`n` returns to the name input.
 fn handle_save_preset_input(
   app: &mut App,
   key: KeyEvent,
@@ -1409,8 +1413,8 @@ fn handle_save_preset_input(
             return;
           }
           dialog.error = None;
-          if dialog.name_exists() {
-            dialog.stage = SaveStage::Overwrite;
+          if dialog.name_needs_confirm() {
+            dialog.stage = SaveStage::Confirm;
             return;
           }
           // New name → fall through to commit (borrow released below).
@@ -1422,7 +1426,7 @@ fn handle_save_preset_input(
         InputOutcome::PassThrough => return,
       }
     }
-    SaveStage::Overwrite => match key.code {
+    SaveStage::Confirm => match key.code {
       KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {} // commit below
       KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
         dialog.stage = SaveStage::Name;
@@ -2918,6 +2922,38 @@ mod tests {
     assert!(
       toast.contains("stop the launch"),
       "expected stop-first toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn ctrl_p_on_non_running_model_toasts_instead_of_opening_dialog() {
+    // Only a running model has live launch settings to capture; Ctrl+P on
+    // an idle row must toast, not open the save dialog.
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(
+      app.save_preset_dialog.is_none(),
+      "non-running model must not open the save dialog"
+    );
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("running model"),
+      "expected running-model toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn ctrl_p_on_running_model_opens_save_dialog() {
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(
+      app.save_preset_dialog.is_some(),
+      "running model opens the save dialog on Ctrl+P"
     );
   }
 

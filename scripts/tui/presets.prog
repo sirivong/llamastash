@@ -1,7 +1,11 @@
-comment: config-presets-per-model — TUI preset cycle row + Ctrl+P save dialog.
+comment: config-presets-per-model — TUI preset cycle row + Ctrl+P gating.
 comment: Requires an isolated daemon whose config.yaml has a `presets:` block
 comment: for the focused model (see scripts/tui/README.md). The model card must
 comment: resolve at least one preset for the row to appear.
+comment: Ctrl+P only opens the save dialog for a RUNNING model; on a
+comment: non-running model it toasts. The save-dialog name/confirm flow is
+comment: covered by the save_preset_dialog.rs unit tests (it needs a live
+comment: backend, which this driver doesn't spawn).
 wait: 4
 snap: boot
 expect: Models
@@ -20,31 +24,9 @@ settle
 snap: cycle-auto
 expect: auto
 
-comment: --- Ctrl+P opens the save-preset dialog (name entry stage)
+comment: --- Ctrl+P on a non-running model toasts instead of opening the dialog
 key: ctrl-p
 settle
-snap: save-dialog
-iexpect: save preset
-iexpect: name this preset
-
-comment: --- type a name and save
-type: harness-preset
-settle
-key: enter
-settle
-snap: saved
-iexpect: saved preset
-
-comment: --- Ctrl+P again with an existing name -> overwrite confirm stage
-key: ctrl-p
-settle
-type: harness-preset
-key: enter
-settle
-snap: overwrite
-iexpect: already exists
-iexpect: overwrite
-
-comment: --- cancel out cleanly
-key: esc
-settle
+snap: save-toast
+iexpect: running model
+refute: name this preset

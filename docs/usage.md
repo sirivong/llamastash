@@ -170,7 +170,7 @@ Bare letters are for tool actions (`f` favorite, `e` edit, `u/c/p` yank, `t` the
 | `focus_settings_tab`                    | `Shift+S`                         | Nav focuses — always available                                                     |
 | `next_field` / `prev_field`             | `↓` / `↑`                         | Rerank input — cycles Query / Candidate                                            |
 | `cycle_value_next` / `cycle_value_prev` | `→` / `←`                         | Right pane (Settings) — cycles the focused row's value (incl. the preset row)      |
-| `save_preset`                           | `Ctrl+P`                          | Save the settings in view as a named preset (name prompt → overwrite confirm)      |
+| `save_preset`                           | `Ctrl+P`                          | Save a **running** model's live launch knobs as a named preset (name prompt → confirm); toasts on an idle row |
 | `enter_edit` / `exit_edit`              | `e` / `Esc`                       | Right pane → tab input                                                             |
 | `send_chat`                             | `Enter`                           | Chat input                                                                         |
 | `insert_newline`                        | `Shift+Enter`                     | All input focuses (kitty-protocol terminals only)                                  |
