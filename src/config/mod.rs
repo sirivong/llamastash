@@ -7,11 +7,13 @@
 //! 4. Built-in defaults
 
 pub mod loader;
+pub mod presets_writer;
 pub mod writer;
+pub mod yaml_edit;
 
 pub use loader::{
   config_path, config_path_from, load_config, load_config_from_path, validate_scan_settings,
-  CachePathsConfig, Config, DefaultLaunchMode, KnobSlotMut, KnobSlotRef, KnobValue, KnobValueOpt,
-  LemonadeConfig, LoadedConfig, PortRange, ProxyConfig, ScanSettingsError, TypedKnobs,
-  DEFAULT_FIT_CTX_FLOOR, MAX_CTX_TOKENS,
+  CachePathsConfig, Config, ConfigPresetBlock, DefaultLaunchMode, KnobSlotMut, KnobSlotRef,
+  KnobValue, KnobValueOpt, LemonadeConfig, LoadedConfig, PortRange, PresetBody, ProxyConfig,
+  ScanSettingsError, TypedKnobs, DEFAULT_FIT_CTX_FLOOR, MAX_CTX_TOKENS,
 };

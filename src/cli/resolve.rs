@@ -64,6 +64,11 @@ pub struct RunningRow {
   /// under memory pressure. Surfaced as a note on `status` and in
   /// the `show` running section.
   pub ctx_clamped: bool,
+  /// Config-preset hint: how many presets this model resolves (per-model
+  /// ∪ arch). `0` when none. The full set lives in `presets_list`.
+  pub preset_count: u32,
+  /// Default preset name (config-only) for this model, or `None`.
+  pub preset_default: Option<String>,
 }
 
 impl RunningRow {
@@ -418,6 +423,8 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     .get("ctx_clamped")
     .and_then(Value::as_bool)
     .unwrap_or(false);
+  let preset_count = v.get("preset_count").and_then(Value::as_u64).unwrap_or(0) as u32;
+  let preset_default = v.get("default").and_then(Value::as_str).map(str::to_string);
   Some(RunningRow {
     launch_id,
     model_path,
@@ -433,6 +440,8 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     latest_cpu_pct,
     resolved_ctx,
     ctx_clamped,
+    preset_count,
+    preset_default,
   })
 }
 
@@ -686,6 +695,8 @@ mod tests {
         latest_cpu_pct: None,
         resolved_ctx: None,
         ctx_clamped: false,
+        preset_count: 0,
+        preset_default: None,
       },
       RunningRow {
         launch_id: "L2".into(),
@@ -702,6 +713,8 @@ mod tests {
         latest_cpu_pct: None,
         resolved_ctx: None,
         ctx_clamped: false,
+        preset_count: 0,
+        preset_default: None,
       },
     ];
     assert_eq!(resolve_running(&rows, "41100").unwrap().launch_id, "L1");
@@ -725,6 +738,8 @@ mod tests {
       latest_cpu_pct: None,
       resolved_ctx: None,
       ctx_clamped: false,
+      preset_count: 0,
+      preset_default: None,
     }];
     let err = resolve_running(&rows, "9999").unwrap_err();
     assert_eq!(err.code, MODEL_NOT_FOUND);
@@ -747,6 +762,8 @@ mod tests {
       latest_cpu_pct: None,
       resolved_ctx: None,
       ctx_clamped: false,
+      preset_count: 0,
+      preset_default: None,
     };
     let rows = vec![
       row("L1", "/cache/gemma-4-E2B-it-Q4_K_M.gguf", 41100),

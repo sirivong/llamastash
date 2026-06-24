@@ -18,7 +18,7 @@ use super::{merge, Format, PatchContext, PatchError, ToolPatcher};
 /// Read the file at `path` and parse it according to `format`.
 /// Missing or empty files return an empty JSON object (so a fresh
 /// install gets clean "Added" diff rows). YAML files are parsed
-/// via `serde_yaml` then converted into JSON via `serde_json::to_value`
+/// via `yaml_serde` then converted into JSON via `serde_json::to_value`
 /// so the merge stays JSON-native.
 pub fn read_current(
   tool_id: &'static str,
@@ -59,7 +59,7 @@ pub fn read_current(
       })
     }
     Format::Yaml => {
-      let yaml: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|e| PatchError::Parse {
+      let yaml: yaml_serde::Value = yaml_serde::from_str(&raw).map_err(|e| PatchError::Parse {
         tool_id,
         path: path.to_path_buf(),
         format,
@@ -90,7 +90,7 @@ fn serialise(tool_id: &'static str, merged: &Value, format: Format) -> Result<St
       Ok(s)
     }
     Format::Yaml => {
-      serde_yaml::to_string(merged).map_err(|e| PatchError::Serialise(format!("{tool_id}: {e}")))
+      yaml_serde::to_string(merged).map_err(|e| PatchError::Serialise(format!("{tool_id}: {e}")))
     }
     Format::Raw => Err(PatchError::Serialise(format!(
       "{tool_id}: Format::Raw bypasses merge — caller must use apply_raw_body"

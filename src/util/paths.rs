@@ -53,6 +53,19 @@ pub fn model_display_name(path: &Path) -> String {
     .to_string()
 }
 
+/// File basename of `path`, extension included (`qwen-coder.gguf`),
+/// falling back to the full path display when there is no final
+/// component. This is the per-model preset key the CLI/TUI write under,
+/// and the catalog-fallback name wherever a model isn't in the live
+/// catalog (see [`crate::launch::presets`]). Distinct from
+/// [`model_display_name`], which drops the extension for a human label.
+pub fn path_basename(path: &Path) -> String {
+  path
+    .file_name()
+    .map(|s| s.to_string_lossy().into_owned())
+    .unwrap_or_else(|| path.display().to_string())
+}
+
 /// Best-effort home directory resolution. Returns `None` only when the
 /// platform can't supply one (i.e. broken `$HOME` and no equivalent in
 /// the password database) — every realistic developer machine has one.

@@ -202,9 +202,20 @@ fn arrows_in_settings_tab_cycle_fields_and_values() {
   assert_eq!(app.focus, Focus::RightPane);
   assert_eq!(app.right_tab, RightTab::Settings);
   let picker = app.launch_picker.as_ref().expect("picker");
-  assert_eq!(picker.field, PickerField::Knob(KnobField::Ctx));
   assert_eq!(
-    picker.user_knobs.ctx, None,
+    picker.field,
+    PickerField::Preset,
+    "default focus leads on the preset row"
+  );
+  // ↓ moves the cursor onto the Ctx row.
+  pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
+  assert_eq!(
+    app.launch_picker.as_ref().unwrap().field,
+    PickerField::Knob(KnobField::Ctx)
+  );
+  assert_eq!(
+    app.launch_picker.as_ref().unwrap().user_knobs.ctx,
+    None,
     "ctx defaults to native (no user override)"
   );
   // → advances the focused field's value; the first ring stop is Auto.

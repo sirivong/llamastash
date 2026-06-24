@@ -167,6 +167,25 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   // short ones the focused row stays visible with ≥1 row of context.
   let mut focused_line: Option<u16> = None;
 
+  // Preset cycle row — always leads the form. ←/→ cycles
+  // `last used → auto → [default] → named presets`, rewriting every knob
+  // row below live. No source chip: it's a selector, not an inherited value.
+  {
+    let focused = row_for(PickerField::Preset);
+    if focused {
+      focused_line = Some(lines.len() as u16);
+    }
+    lines.push(crate::tui::fmt::kv_row_focused(
+      "preset",
+      picker_view.preset_value_label(),
+      None,
+      focused,
+      true,
+      palette,
+      show_source,
+    ));
+  }
+
   // Every typed knob — including ctx and reasoning — flows through
   // the same `value (chip)` shape, grouped by function with a header
   // per cluster (display order is distinct from argv order). Empty

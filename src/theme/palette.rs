@@ -439,7 +439,7 @@ mod tests {
     ];
     for (input, expected) in cases {
       let parsed: ThemeName =
-        serde_yaml::from_str(input).unwrap_or_else(|e| panic!("`{input}` failed to parse: {e}"));
+        yaml_serde::from_str(input).unwrap_or_else(|e| panic!("`{input}` failed to parse: {e}"));
       assert_eq!(parsed, *expected, "input: {input}");
     }
   }

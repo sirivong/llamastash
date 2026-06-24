@@ -168,6 +168,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
   if app.hf_dialog.is_some() {
     super::hf_dialog::render(frame, area, app, &palette);
   }
+  if let Some(dialog) = app.save_preset_dialog.as_ref() {
+    super::save_preset_dialog::render(frame, area, app, dialog, &palette);
+  }
   if app.show_help {
     help_overlay::render(frame, area, app, &palette);
   }

@@ -56,6 +56,33 @@ pub struct CatalogRow {
 }
 
 impl CatalogRow {
+  /// Build a row carrying only the fields preset-key classification and
+  /// the fuzzy matcher read: `path`, `display_label` (→ [`Self::name`]),
+  /// and `arch`. The daemon projects its `DiscoveredModel` catalog into
+  /// these for `effective_presets` without rebuilding the full
+  /// `list_models` shape; every other field is left empty/`None`.
+  pub fn for_resolution(path: String, display_label: Option<String>, arch: Option<String>) -> Self {
+    Self {
+      path,
+      model_id: None,
+      parent: String::new(),
+      source: String::new(),
+      arch,
+      quant: None,
+      native_ctx: None,
+      mode_hint: None,
+      parameter_label: None,
+      weights_bytes: None,
+      display_label,
+      parse_error: None,
+      split_siblings: Vec::new(),
+      has_chat_template: false,
+      has_reasoning_hint: false,
+      tokenizer_kind: None,
+      total_parameters: None,
+    }
+  }
+
   /// Friendly label for human matching and table rendering.
   /// `display_label` (Ollama's `<name>:<tag>`) wins when set; falls
   /// back to the path basename.

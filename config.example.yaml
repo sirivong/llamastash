@@ -548,3 +548,66 @@ keybindings: {}
 #   llama:
 #     threads: 8
 #     parallel: 4
+
+# ─── presets ──────────────────────────────────────────────────────
+#
+# Named launch presets — the single writable home for presets. The CLI
+# (`llamastash presets save/list/show/delete`) and the TUI (`Ctrl+P`)
+# write here; you can also hand-author entries (and comments). Edits
+# the app makes preserve every surrounding comment, so this section is
+# yours to annotate.
+#
+# Each top-level key is classified against your discovered models when a
+# preset is resolved:
+#   • names a model — by file basename, or full path — → a "per-model"
+#     preset. A basename key applies to EVERY discovered model with that
+#     filename (the same GGUF cached in two roots shares one preset set);
+#     a full-path key pins to that one file.
+#   • otherwise read as a GGUF `general.architecture` → applies to every
+#     model of that arch (an "arch" preset, hand-authored only).
+# A model's effective set is its per-model entries ∪ its arch entries;
+# on a name collision the per-model entry wins.
+#
+# `entries` is a map keyed by preset name. Each entry holds the same
+# typed knobs as `arch_defaults` (flat: `ctx`, `flash_attn`, `threads`,
+# …) plus an optional `mode` (chat | embedding | rerank) and an `extras`
+# argv tail. Apply one with `llamastash start <model> --preset <name>`.
+#
+# A knob set to `auto` delegates that knob to llama-server's `--fit`
+# (e.g. `n_gpu_layers: auto`). `auto` is a reserved token, so to set a
+# knob to the *literal* string value `auto`, use the escape
+# `{ value: auto }`. The app writes entries in block style (shown below);
+# flow style (`{ ctx: 8192 }`) is also accepted when you hand-author.
+#
+# `default:` is one stop in the TUI's preset cycle (which itself opens on
+# `last used`, not on `default`). It is hand-edited only (there is no
+# set-default command) and is ignored if it names an entry that doesn't
+# exist. The CLI never auto-applies it — a plain `start` with no `--preset`
+# launches with pure auto-fit defaults.
+#
+# Changes the app writes are live immediately; hand-edits here need a
+# `llamastash daemon restart` to be picked up.
+#
+# presets:
+#   # per-model preset, keyed by the GGUF file's basename
+#   Qwen3-Coder-30B-Q4_K_M.gguf:
+#     default: long-ctx               # a stop in the TUI cycle (not auto-applied)
+#     entries:
+#       short-ctx:
+#         ctx: 8192
+#       long-ctx:
+#         ctx: 65536
+#         flash_attn: true
+#         n_gpu_layers: auto          # delegate this knob to --fit
+#       embed:
+#         mode: embedding
+#         ctx: 4096
+#         extras:
+#           - --rope-freq-base
+#           - "10000"
+#   # arch preset, keyed by `general.architecture` — applies to every
+#   # qwen3 model that has no per-model entry of the same name
+#   qwen3:
+#     entries:
+#       balanced:
+#         ctx: 16384

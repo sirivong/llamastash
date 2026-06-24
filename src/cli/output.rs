@@ -588,6 +588,9 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
       // Fit-resolved context window, null until the post-Ready
       // `/props` fetch lands.
       obj.insert("resolved_ctx".into(), serde_json::json!(r.resolved_ctx));
+      // Config-preset hint, mirrored byte-for-byte from IPC `status`.
+      obj.insert("preset_count".into(), serde_json::json!(r.preset_count));
+      obj.insert("default".into(), serde_json::json!(r.preset_default));
       Value::Object(obj)
     })
     .collect();
@@ -1001,6 +1004,8 @@ mod tests {
         latest_cpu_pct: Some(312.0),
         resolved_ctx: None,
         ctx_clamped: false,
+        preset_count: 0,
+        preset_default: None,
       }],
       external: vec![ExternalRow {
         pid: 999,
@@ -1106,6 +1111,8 @@ mod tests {
       latest_cpu_pct: None,
       resolved_ctx: None,
       ctx_clamped: false,
+      preset_count: 0,
+      preset_default: None,
     }
   }
 

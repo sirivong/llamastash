@@ -1070,7 +1070,7 @@ async fn run_config_step(
     crate::util::paths::user_config_file().ok_or_else(|| CliExit::new(UNKNOWN, "no config dir"))?;
   let now = SystemTime::now();
   // Compose the wizard's additions as a serde-derived struct rather
-  // than hand-rolling `serde_yaml::Value::String("...".into())` for
+  // than hand-rolling `yaml_serde::Value::String("...".into())` for
   // every key. The serialised top-level mapping becomes our
   // composition list (used below to digest each managed value's
   // canonical YAML bytes for R72).
@@ -1085,12 +1085,12 @@ async fn run_config_step(
   // `_hardware` arg stays on the signature so re-introducing
   // hardware-aware additions doesn't need a caller-side change.
   let additions_value =
-    serde_yaml::to_value(&bootstrap).expect("InitConfigAdditions serialises cleanly");
+    yaml_serde::to_value(&bootstrap).expect("InitConfigAdditions serialises cleanly");
   // `composed` records `(dotted-path, value)` for every top-level
   // managed entry. R72's user-edit detection compares the digest of
   // canonical YAML *value* bytes — never the key-name string.
-  let composed: Vec<(String, serde_yaml::Value)> = match &additions_value {
-    serde_yaml::Value::Mapping(m) => m
+  let composed: Vec<(String, yaml_serde::Value)> = match &additions_value {
+    yaml_serde::Value::Mapping(m) => m
       .iter()
       .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v.clone())))
       .collect(),
@@ -1170,8 +1170,8 @@ async fn run_config_step(
 /// We use the default block style and trim trailing newline so the
 /// same logical value always yields the same byte sequence regardless
 /// of how the wizard composed it.
-fn canonical_value_bytes(v: &serde_yaml::Value) -> Vec<u8> {
-  let s = serde_yaml::to_string(v).unwrap_or_default();
+fn canonical_value_bytes(v: &yaml_serde::Value) -> Vec<u8> {
+  let s = yaml_serde::to_string(v).unwrap_or_default();
   s.trim_end().as_bytes().to_vec()
 }
 
@@ -1589,15 +1589,15 @@ mod tests {
     // digest and user-edit detection is non-functional.
     let path_a = "llama_server_path";
     let path_b = "port_range";
-    let v_a = serde_yaml::Value::String("/opt/llama-server".into());
-    let v_b = serde_yaml::Value::String("/opt/llama-server".into());
+    let v_a = yaml_serde::Value::String("/opt/llama-server".into());
+    let v_b = yaml_serde::Value::String("/opt/llama-server".into());
     let now = SystemTime::UNIX_EPOCH;
     let ka = ManagedKey::new(path_a, &canonical_value_bytes(&v_a), now);
     let kb = ManagedKey::new(path_b, &canonical_value_bytes(&v_b), now);
     // Same value → same digest, regardless of path.
     assert_eq!(ka.value_digest, kb.value_digest);
     // Different value → different digest, same path.
-    let v_c = serde_yaml::Value::String("/usr/local/bin/llama-server".into());
+    let v_c = yaml_serde::Value::String("/usr/local/bin/llama-server".into());
     let kc = ManagedKey::new(path_a, &canonical_value_bytes(&v_c), now);
     assert_ne!(ka.value_digest, kc.value_digest);
   }
@@ -1608,13 +1608,13 @@ mod tests {
     // recompositions of the same value. A user-edited config that
     // restores the wizard's exact composed value yields the same
     // digest.
-    let mut m = serde_yaml::Mapping::new();
+    let mut m = yaml_serde::Mapping::new();
     m.insert(
-      serde_yaml::Value::String("n_gpu_layers".into()),
-      serde_yaml::Value::Number(99.into()),
+      yaml_serde::Value::String("n_gpu_layers".into()),
+      yaml_serde::Value::Number(99.into()),
     );
-    let v1 = serde_yaml::Value::Mapping(m.clone());
-    let v2 = serde_yaml::Value::Mapping(m);
+    let v1 = yaml_serde::Value::Mapping(m.clone());
+    let v2 = yaml_serde::Value::Mapping(m);
     assert_eq!(canonical_value_bytes(&v1), canonical_value_bytes(&v2));
   }
 }

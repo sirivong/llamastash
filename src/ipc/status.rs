@@ -25,6 +25,9 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
   // from the supervisor, so cross-reference by (id, port) to surface
   // the resolved context.
   let running = ctx.state.snapshot().await.running;
+  // Config-preset hint inputs, snapshotted once for the whole model loop.
+  let preset_rows = super::methods::catalog_rows(ctx).await;
+  let preset_store = ctx.presets.snapshot().await;
   let mut models: Vec<Value> = Vec::with_capacity(snap.len());
   for (launch_id, model) in snap {
     let state = model.state().await;
@@ -63,6 +66,11 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
       .map(|r| r.actuals);
     let resolved_ctx = actuals.and_then(|a| a.resolved_ctx);
     let ctx_clamped = actuals.map(|a| a.ctx_clamped).unwrap_or(false);
+    let (preset_count, preset_default) = super::methods::preset_hint(
+      &params.model_path.display().to_string(),
+      &preset_rows,
+      &preset_store,
+    );
     let row = json!({
       "launch_id": launch_id,
       "id": model.id(),
@@ -80,6 +88,10 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
       // True when `--fit` had to clamp ctx to the floor under memory
       // pressure (a soft notice); strict mode refuses such launches.
       "ctx_clamped": ctx_clamped,
+      // Config-preset hint: how many presets this model resolves and its
+      // default name (config-only). The full set lives in `presets_list`.
+      "preset_count": preset_count,
+      "default": preset_default,
     });
     models.push(row);
   }
@@ -126,6 +138,11 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
           .map(|s| s.to_string_lossy().into_owned())
           .collect::<Vec<_>>(),
       });
+      let (preset_count, preset_default) = super::methods::preset_hint(
+        &running_snap.params.model_path.display().to_string(),
+        &preset_rows,
+        &preset_store,
+      );
       models.push(json!({
         "launch_id": crate::backend::lemonade::delegated_launch_id(&backend_id.name),
         "id": synthetic_id,
@@ -139,6 +156,8 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
         // its RSS onto every resident model would double-count it.
         "latest_rss_bytes": Value::Null,
         "latest_cpu_pct": Value::Null,
+        "preset_count": preset_count,
+        "default": preset_default,
       }));
     }
   }

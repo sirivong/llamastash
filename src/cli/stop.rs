@@ -273,6 +273,8 @@ mod tests {
       latest_cpu_pct: None,
       resolved_ctx: None,
       ctx_clamped: false,
+      preset_count: 0,
+      preset_default: None,
     }]
   }
 

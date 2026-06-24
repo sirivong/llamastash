@@ -1,10 +1,11 @@
 //! Secure-write helper for `config.yaml`.
 //!
-//! Owns the `tempfile`-based atomic rename, mode 0600 on Unix, parent-
-//! dir-mode pre-flight check, and symlink refusal that mirror the
-//! `state.json` hardening pattern from
-//! [`crate::daemon::state_store::save`]. The init wizard's diff preview +
-//! redaction layers on top of this primitive.
+//! Owns the `tempfile`-based atomic rename, mode 0600 on Unix, and the
+//! parent-dir-mode pre-flight check that mirror the `state.json` hardening
+//! from [`crate::daemon::state_store::save`]. Unlike `state.json`, a
+//! **symlinked** `config.yaml` is followed to its target (the link is
+//! user-authored, e.g. a dotfiles repo) rather than refused — see
+//! [`preflight`]. The init wizard's diff preview + redaction layer on top.
 //!
 //! Merge semantics:
 //!   - YAML-aware recursive merge: leaf-level user edits inside a
@@ -23,8 +24,9 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_yaml::Value;
+use yaml_serde::Value;
 
+use super::yaml_edit;
 pub use crate::util::config_patch::{DiffEntry, DiffKind};
 
 /// Outcome of a successful merge-and-write. `diff` is the set of keys
@@ -38,8 +40,6 @@ pub struct WriteOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
-  #[error("config target {} is a symlink; refusing to follow (init never writes through symlinks)", path.display())]
-  TargetIsSymlink { path: PathBuf },
   #[error("parent dir {} is group/world-writable (mode {mode:#o}); refuse to write a 0600 config there", path.display())]
   ParentDirInsecure { path: PathBuf, mode: u32 },
   #[error("config write I/O at {}: {error}", path.display())]
@@ -48,6 +48,8 @@ pub enum WriteError {
   Serialise(String),
   #[error("config parse current contents at {}: {error}", path.display())]
   ParseCurrent { path: PathBuf, error: String },
+  #[error("config presets patch: {0}")]
+  Patch(String),
 }
 
 /// Recursive merge of `additions` into `current`. Mapping keys present
@@ -79,6 +81,11 @@ pub fn diff(before: &Value, after: &Value) -> Vec<DiffEntry> {
   out
 }
 
+// Sibling of [`walk_writes`]: both recurse the same `(before, after)` pair,
+// but this one produces human-facing `DiffEntry` rows (add/change classified,
+// values rendered to strings) for the wizard's preview/redaction, while
+// `walk_writes` produces the changed leaves to splice. Kept separate because
+// their outputs differ; keep their traversal shape in sync if either changes.
 fn walk_diff(prefix: &str, before: &Value, after: &Value, out: &mut Vec<DiffEntry>) {
   match (before, after) {
     (Value::Mapping(b), Value::Mapping(a)) => {
@@ -110,32 +117,31 @@ fn walk_diff(prefix: &str, before: &Value, after: &Value, out: &mut Vec<DiffEntr
 }
 
 fn serialise_inline(v: &Value) -> String {
-  // `serde_yaml`'s flow style produces a one-liner suitable for inline
+  // `yaml_serde`'s flow style produces a one-liner suitable for inline
   // diff rendering. Falls back to the default block style on error.
-  serde_yaml::to_string(v)
+  yaml_serde::to_string(v)
     .unwrap_or_default()
     .trim()
     .to_string()
 }
 
-/// Pre-flight checks that the write target is safe to touch.
-/// Refuses if:
-/// - `path` exists and is a symlink (no through-symlink writes).
-/// - `path.parent()` exists and is group/world-writable on Unix
-///   (mode bits & 0o022 != 0); writing 0600 into such a dir is
-///   pointless because the dir mode dominates effective access.
-pub fn preflight(path: &Path) -> Result<(), WriteError> {
-  if let Ok(meta) = std::fs::symlink_metadata(path) {
-    if meta.file_type().is_symlink() {
-      return Err(WriteError::TargetIsSymlink {
-        path: path.to_path_buf(),
-      });
-    }
-  }
+/// Pre-flight a config write and return the path to actually write to.
+///
+/// `config.yaml` may legitimately be a **symlink** (e.g. into a dotfiles
+/// repo). Unlike `state.json` — machine-managed runtime state that nobody
+/// symlinks — we *follow* the link and write to its canonical target, so the
+/// link survives the save (a tmp-file + rename over the link itself would
+/// replace the link with a regular file). A non-symlink path is returned
+/// unchanged. The group/world-writable parent-dir check runs on the
+/// *resolved* target's parent (where the rename lands), and is the only
+/// refusal: writing a 0600 config into a permissive dir is pointless because
+/// the dir mode dominates effective access.
+pub fn preflight(path: &Path) -> Result<PathBuf, WriteError> {
+  let target = resolve_write_target(path);
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = target.parent() {
       if let Ok(meta) = std::fs::metadata(parent) {
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o022 != 0 {
@@ -147,44 +153,127 @@ pub fn preflight(path: &Path) -> Result<(), WriteError> {
       }
     }
   }
-  let _ = path; // keep `path` referenced on non-unix targets
-  Ok(())
+  Ok(target)
+}
+
+/// Resolve `path` to the real file a write should land on. A non-symlink is
+/// returned unchanged. A symlink is followed (chain) to its final target —
+/// even one that doesn't exist yet — and the target's parent is canonicalized
+/// (collapsing `..` / directory symlinks) while the filename is kept, so the
+/// caller writes the real file and the link is preserved. Following stays in
+/// the config write path only; `state.json` keeps its non-following behavior.
+fn resolve_write_target(path: &Path) -> PathBuf {
+  let is_symlink = std::fs::symlink_metadata(path)
+    .map(|m| m.file_type().is_symlink())
+    .unwrap_or(false);
+  if !is_symlink {
+    return path.to_path_buf();
+  }
+  let mut cur = path.to_path_buf();
+  for _ in 0..40 {
+    let is_link = std::fs::symlink_metadata(&cur)
+      .map(|m| m.file_type().is_symlink())
+      .unwrap_or(false);
+    if !is_link {
+      break;
+    }
+    let Ok(target) = std::fs::read_link(&cur) else {
+      break;
+    };
+    cur = if target.is_absolute() {
+      target
+    } else {
+      cur.parent().unwrap_or_else(|| Path::new(".")).join(target)
+    };
+  }
+  // Canonicalize the parent (must exist) so a not-yet-created target still
+  // resolves to a real directory; fall back to the lexical path otherwise.
+  match (cur.parent(), cur.file_name()) {
+    (Some(parent), Some(name)) => match std::fs::canonicalize(parent) {
+      Ok(real_parent) => real_parent.join(name),
+      Err(_) => cur,
+    },
+    _ => cur,
+  }
 }
 
 /// Merge `additions` into the YAML at `path`, write the result
 /// atomically. Returns the structural diff between the old and new
 /// contents. Creates the parent dir if missing. Mode 0600 on Unix.
+///
+/// The write is **comment-safe**: each changed leaf is spliced into the
+/// original file text via the shared [`yaml_edit`] primitive, so the user's
+/// hand-written comments and formatting survive (the old whole-file
+/// re-serialise stripped them on every run).
 pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, WriteError> {
-  preflight(path)?;
-  let current = read_or_default(path)?;
+  // Resolve a symlinked config to its real target (the link is preserved).
+  let target = preflight(path)?;
+  // Read the source text once — comments live here and must survive. The
+  // parsed `current` drives merge/diff; the original text is what we splice.
+  let source = yaml_edit::read_source(path)?;
+  let current = if source.trim().is_empty() {
+    Value::Mapping(yaml_serde::Mapping::new())
+  } else {
+    yaml_serde::from_str(&source).map_err(|e| WriteError::ParseCurrent {
+      path: path.to_path_buf(),
+      error: e.to_string(),
+    })?
+  };
   let merged = merge(current.clone(), additions);
   let diff_rows = diff(&current, &merged);
-  let body = serde_yaml::to_string(&merged).map_err(|e| WriteError::Serialise(e.to_string()))?;
-  if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent).map_err(|e| WriteError::Io {
-      path: parent.to_path_buf(),
-      error: e.to_string(),
-    })?;
+
+  // Splice each changed leaf into the original text rather than
+  // re-serialising `merged`. Untouched keys stay byte-for-byte.
+  let mut new_source = source;
+  for (segments, value) in collect_leaf_writes(&current, &merged) {
+    let token = yaml_edit::render_value(&value)?;
+    let segs: Vec<&str> = segments.iter().map(String::as_str).collect();
+    new_source = yaml_edit::upsert(&new_source, &segs, &token)?;
   }
-  // Atomic write — `tempfile + fsync + 0o600 + rename` lives in the
-  // shared `util::atomic_write` helper so this site, the daemon
-  // state store, and the init snapshot writer stay in lockstep.
-  let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-  let written = crate::util::atomic_write::write_secure(
-    &dir,
-    "config.yaml.tmp.",
-    path,
-    body.as_bytes(),
-    Some(0o600),
-  )
-  .map_err(|e| WriteError::Io {
-    path: path.to_path_buf(),
-    error: e.to_string(),
-  })?;
+  yaml_edit::write_config(&target, &new_source)?;
   Ok(WriteOutcome {
     diff: diff_rows,
-    written_bytes: written,
+    written_bytes: new_source.len() as u64,
   })
+}
+
+/// Collect the scalar / sequence leaves of `after` that differ from
+/// `before`, each with its full key path. Recurses into mappings so a fresh
+/// block is written leaf-by-leaf in block style (not one inline-flow blob
+/// that a later write couldn't append to); a sequence — or the `{auto: true}`
+/// knob sentinel, which round-trips identically as a one-key block — is a
+/// leaf value. Drives the comment-safe splice in [`merge_and_write`].
+///
+/// Sibling of [`walk_diff`], which walks the same `(before, after)` pair for
+/// the human-facing preview; this one yields the leaves to write. If you change
+/// one walker's traversal, mirror it in the other.
+fn collect_leaf_writes(before: &Value, after: &Value) -> Vec<(Vec<String>, Value)> {
+  let mut out = Vec::new();
+  walk_writes(&mut Vec::new(), Some(before), after, &mut out);
+  out
+}
+
+fn walk_writes(
+  prefix: &mut Vec<String>,
+  before: Option<&Value>,
+  after: &Value,
+  out: &mut Vec<(Vec<String>, Value)>,
+) {
+  let Value::Mapping(a) = after else { return };
+  let before_map = before.and_then(Value::as_mapping);
+  for (k, v_after) in a {
+    let v_before = before_map.and_then(|m| m.get(k));
+    if v_before == Some(v_after) {
+      continue; // unchanged leaf / subtree
+    }
+    prefix.push(k.as_str().unwrap_or("?").to_string());
+    if matches!(v_after, Value::Mapping(_)) {
+      walk_writes(prefix, v_before, v_after, out);
+    } else {
+      out.push((prefix.clone(), v_after.clone()));
+    }
+    prefix.pop();
+  }
 }
 
 /// Read the YAML at `path`, returning an empty mapping when the file
@@ -192,19 +281,15 @@ pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, Wr
 /// the same `(current, merged)` pair `merge_and_write` does without
 /// committing to disk.
 pub fn read_or_default(path: &Path) -> Result<Value, WriteError> {
-  match std::fs::read_to_string(path) {
-    Ok(s) if s.trim().is_empty() => Ok(Value::Mapping(serde_yaml::Mapping::new())),
-    Ok(s) => serde_yaml::from_str(&s).map_err(|e| WriteError::ParseCurrent {
+  // Share the file-read (missing → empty, I/O errors bubble) with the writers.
+  let source = yaml_edit::read_source(path)?;
+  if source.trim().is_empty() {
+    Ok(Value::Mapping(yaml_serde::Mapping::new()))
+  } else {
+    yaml_serde::from_str(&source).map_err(|e| WriteError::ParseCurrent {
       path: path.to_path_buf(),
       error: e.to_string(),
-    }),
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      Ok(Value::Mapping(serde_yaml::Mapping::new()))
-    }
-    Err(e) => Err(WriteError::Io {
-      path: path.to_path_buf(),
-      error: e.to_string(),
-    }),
+    })
   }
 }
 
@@ -218,7 +303,7 @@ mod tests {
   }
 
   fn yaml(s: &str) -> Value {
-    serde_yaml::from_str(s).expect("yaml fixture")
+    yaml_serde::from_str(s).expect("yaml fixture")
   }
 
   #[test]
@@ -241,7 +326,7 @@ arch_defaults:
 ",
     );
     let out = merge(cur, add);
-    let s = serde_yaml::to_string(&out).unwrap();
+    let s = yaml_serde::to_string(&out).unwrap();
     assert!(s.contains("theme: latte"), "untouched key survives");
     assert!(s.contains("start: 50000"), "leaf value replaced");
     assert!(
@@ -273,7 +358,7 @@ arch_defaults:
 ",
     );
     let out = merge(cur, add);
-    let s = serde_yaml::to_string(&out).unwrap();
+    let s = yaml_serde::to_string(&out).unwrap();
     assert!(
       s.contains("parallel: 8"),
       "user key under managed block survives"
@@ -301,15 +386,36 @@ arch_defaults:
 
   #[cfg(unix)]
   #[test]
-  fn preflight_refuses_symlink_target() {
+  fn merge_and_write_follows_symlink_and_preserves_the_link() {
+    // A `config.yaml` symlinked into (say) a dotfiles repo must be written
+    // *through* to its real target, keeping both the link and the target's
+    // comments — not refused, and not clobbered into a regular file.
     use std::os::unix::fs::symlink;
-    let dir = temp_dir("symlink");
-    let target = dir.join("config.yaml");
-    let victim = dir.join("victim.dat");
-    fs::write(&victim, b"important").unwrap();
-    symlink(&victim, &target).unwrap();
-    let err = preflight(&target).unwrap_err();
-    assert!(matches!(err, WriteError::TargetIsSymlink { .. }));
+    let dir = temp_dir("symlink-follow");
+    let real = dir.join("real-config.yaml");
+    fs::write(&real, "theme: latte  # mine\n").unwrap();
+    let link = dir.join("config.yaml");
+    symlink(&real, &link).unwrap();
+
+    merge_and_write(&link, yaml("llama_server_path: /opt/ls\n")).expect("write");
+
+    // The link is still a symlink (not replaced by a regular file).
+    assert!(
+      fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink(),
+      "symlink preserved"
+    );
+    // The real target got the update and kept its comment.
+    let real_body = fs::read_to_string(&real).unwrap();
+    assert!(real_body.contains("# mine"), "target comment survives");
+    assert!(
+      real_body.contains("llama_server_path: /opt/ls"),
+      "write landed on target"
+    );
+    // Reading through the link sees the same content.
+    assert_eq!(fs::read_to_string(&link).unwrap(), real_body);
     fs::remove_dir_all(&dir).ok();
   }
 
@@ -387,6 +493,69 @@ arch_defaults:
     assert!(body.contains("theme: latte"));
     assert!(body.contains("parallel: 8"));
     assert!(body.contains("n_gpu_layers: 99"));
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn merge_and_write_preserves_comments() {
+    // The whole point of the yaml_edit rewrite: a wizard / cli write must
+    // not strip the user's hand-written comments.
+    let dir = temp_dir("comments");
+    let target = dir.join("config.yaml");
+    fs::write(
+      &target,
+      "# my hand-written config\ntheme: latte  # I like this one\n",
+    )
+    .unwrap();
+    merge_and_write(&target, yaml("llama_server_path: /opt/llama-server\n")).expect("write");
+    let body = fs::read_to_string(&target).unwrap();
+    assert!(
+      body.contains("# my hand-written config"),
+      "header comment survives"
+    );
+    assert!(
+      body.contains("theme: latte  # I like this one"),
+      "inline comment survives"
+    );
+    let y: Value = yaml_serde::from_str(&body).unwrap();
+    assert_eq!(
+      y.get("llama_server_path").and_then(Value::as_str),
+      Some("/opt/llama-server")
+    );
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn merge_and_write_adds_nested_key_into_commented_block() {
+    // `proxy.api_key` (the cli write) lands under an existing, commented
+    // `proxy:` block without disturbing its other keys / comments.
+    let dir = temp_dir("nested-comments");
+    let target = dir.join("config.yaml");
+    fs::write(
+      &target,
+      "proxy:\n  port: 11500  # pinned away from ollama\n",
+    )
+    .unwrap();
+    let additions = yaml("proxy:\n  api_key: sekret\n");
+    merge_and_write(&target, additions).expect("write");
+    let body = fs::read_to_string(&target).unwrap();
+    assert!(
+      body.contains("port: 11500  # pinned away from ollama"),
+      "sibling + comment kept"
+    );
+    let y: Value = yaml_serde::from_str(&body).unwrap();
+    assert_eq!(
+      y.get("proxy")
+        .and_then(|p| p.get("api_key"))
+        .and_then(Value::as_str),
+      Some("sekret")
+    );
+    assert_eq!(
+      y.get("proxy")
+        .and_then(|p| p.get("port"))
+        .and_then(Value::as_u64),
+      Some(11500)
+    );
     fs::remove_dir_all(&dir).ok();
   }
 }

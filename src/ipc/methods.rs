@@ -20,7 +20,11 @@ use crate::gguf::identity::{compute as compute_model_id, ModelId};
 use crate::launch::favorites::FavoriteEntry;
 use crate::launch::mode::LaunchMode;
 use crate::launch::params::LaunchParams;
-use crate::launch::presets::NamedPreset;
+use crate::launch::presets::{
+  effective_presets, materialize_preset, preset_body_from_launch_params, EffectivePresets,
+  NamedPreset,
+};
+use crate::launch::resolve::CatalogRow;
 
 /// Top-level dispatch. Always returns a `Response` — protocol violations
 /// surface as JSON-RPC error responses rather than disconnects.
@@ -105,6 +109,7 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
     "presets_save" => respond(id, presets_save_handler(ctx, req.params).await),
     "presets_delete" => respond(id, presets_delete_handler(ctx, req.params).await),
     "presets_show" => respond(id, presets_show_handler(ctx, req.params).await),
+    "presets_all" => Response::ok(id, presets_all_handler(ctx).await),
     "favorite_add" => respond(id, favorite_add_handler(ctx, req.params).await),
     "favorite_remove" => respond(id, favorite_remove_handler(ctx, req.params).await),
     "favorite_list" => respond(id, favorite_list_handler(ctx).await),
@@ -546,6 +551,7 @@ const PUBLIC_METHODS: &[&str] = &[
   "presets_save",
   "presets_delete",
   "presets_show",
+  "presets_all",
   "favorite_add",
   "favorite_remove",
   "favorite_list",
@@ -615,6 +621,75 @@ pub(crate) fn resolve_model_id_and_arch(
   Ok((id, summary.arch, native_ctx))
 }
 
+/// Project the daemon's catalog into the lean rows preset-key
+/// classification reads (path + display label + arch).
+pub(crate) async fn catalog_rows(ctx: &MethodContext) -> Vec<CatalogRow> {
+  ctx
+    .catalog
+    .snapshot()
+    .await
+    .iter()
+    .map(|m| {
+      CatalogRow::for_resolution(
+        m.path.display().to_string(),
+        m.display_label.clone(),
+        m.metadata.as_ref().and_then(|md| md.arch.clone()),
+      )
+    })
+    .collect()
+}
+
+/// Resolve the per-model write key, the model's arch, and the projected
+/// catalog rows for `model_path` — everything [`effective_presets`] needs
+/// except a store snapshot. The key is the model's display name (basename
+/// for a local GGUF) — what CLI/TUI saves write under; a model not in the
+/// catalog falls back to its basename + GGUF-header arch. Split out so the
+/// save path resolves this once and recomputes the effective set from a
+/// single post-save store snapshot, rather than re-deriving the key.
+async fn model_key_arch_rows(
+  ctx: &MethodContext,
+  model_path: &std::path::Path,
+) -> (String, Option<String>, Vec<CatalogRow>) {
+  let rows = catalog_rows(ctx).await;
+  let path_str = model_path.display().to_string();
+  // Always key by basename. When two discovered models share a basename
+  // (the same GGUF cached in two roots), they intentionally share one preset
+  // set — the read side (`effective_presets`) applies a basename key to every
+  // model with that name.
+  let (key, arch) = match rows.iter().find(|r| r.path == path_str) {
+    Some(r) => (r.name(), r.arch.clone()),
+    None => (
+      crate::util::paths::path_basename(model_path),
+      resolve_model_id_and_arch(model_path)
+        .ok()
+        .and_then(|(_, a, _)| a),
+    ),
+  };
+  (key, arch, rows)
+}
+
+/// Resolve the per-model write key + effective preset set for
+/// `model_path` (a fresh store snapshot paired with [`model_key_arch_rows`]).
+async fn model_key_and_effective(
+  ctx: &MethodContext,
+  model_path: &std::path::Path,
+) -> (String, EffectivePresets) {
+  let (key, arch, rows) = model_key_arch_rows(ctx, model_path).await;
+  let store = ctx.presets.snapshot().await;
+  let path_str = model_path.display().to_string();
+  let eff = effective_presets(&key, &path_str, arch.as_deref(), &store, &rows);
+  (key, eff)
+}
+
+/// A config-write failure (symlink/parent-mode/patch/IO) is a server-side
+/// fault, not bad input — surfaces as a JSON-RPC internal error.
+fn write_err(e: crate::config::writer::WriteError) -> ErrorObject {
+  ErrorObject::new(
+    ErrorCode::InternalError,
+    format!("preset config write failed: {e}"),
+  )
+}
+
 #[derive(Deserialize)]
 struct PresetsListParams {
   model_path: PathBuf,
@@ -625,17 +700,16 @@ async fn presets_list_handler(
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: PresetsListParams = parse_params(params)?;
-  let id = resolve_model_id(&parsed.model_path)?;
-  let identity = ModelIdentity::Gguf(id.clone());
-  let snapshot = ctx.state.snapshot().await;
-  let presets = snapshot
-    .presets_map()
-    .get(&identity)
-    .cloned()
-    .unwrap_or_default();
+  let (key, eff) = model_key_and_effective(ctx, &parsed.model_path).await;
+  let rows: Vec<Value> = eff
+    .presets
+    .iter()
+    .map(|np| preset_row(np, is_default(&eff, &np.name)))
+    .collect();
   Ok(json!({
-    "model_id": id,
-    "presets": presets.iter().map(preset_row).collect::<Vec<_>>(),
+    "model": key,
+    "default": eff.default,
+    "presets": rows,
   }))
 }
 
@@ -645,8 +719,6 @@ struct PresetsSaveParams {
   name: String,
   #[serde(default)]
   ctx: Option<u32>,
-  #[serde(default)]
-  port: Option<u16>,
   #[serde(default)]
   reasoning: Option<bool>,
   #[serde(default)]
@@ -668,39 +740,43 @@ async fn presets_save_handler(
       "preset name must not be empty",
     ));
   }
-  let id = resolve_model_id(&parsed.model_path)?;
-  let identity = ModelIdentity::Gguf(id.clone());
-  let mut params_value = LaunchParams::new(
+  // Assemble the launch settings the preset stores, then fold them into a
+  // config-layer body (ctx/reasoning move into the flat knobs; port drops).
+  let mut lp = LaunchParams::new(
     parsed.model_path.clone(),
     parsed
       .mode
       .map(LaunchMode::from)
       .unwrap_or(LaunchMode::Chat),
   );
-  params_value.ctx = parsed.ctx;
-  params_value.port = parsed.port;
-  params_value.reasoning = parsed.reasoning.unwrap_or(false);
-  params_value.knobs = parsed.knobs;
-  params_value.extras = parsed.extras.into_iter().map(OsString::from).collect();
-  let preset = NamedPreset {
-    name: parsed.name.clone(),
-    params: params_value.clone(),
-  };
+  lp.ctx = parsed.ctx;
+  lp.reasoning = parsed.reasoning.unwrap_or(false);
+  lp.knobs = parsed.knobs;
+  lp.extras = parsed.extras.into_iter().map(OsString::from).collect();
+  let body = preset_body_from_launch_params(&lp);
 
+  let (key, arch, rows) = model_key_arch_rows(ctx, &parsed.model_path).await;
+  let saved_np = materialize_preset(&parsed.name, &body, parsed.model_path.clone());
   let prev = ctx
-    .state
-    .mutate(|s| {
-      let mut presets = s.presets_map().get(&identity).cloned().unwrap_or_default();
-      let prev = presets.upsert(preset.clone());
-      s.upsert_presets(identity.clone(), presets);
-      prev
-    })
-    .await;
+    .presets
+    .save(&key, &parsed.name, body)
+    .await
+    .map_err(write_err)?;
 
+  // Recompute `is_default` from a single post-save store snapshot, reusing
+  // the key/arch/rows resolved above — the catalog can't change across the
+  // save, so re-deriving the key (a second catalog snapshot) is wasted work.
+  let store = ctx.presets.snapshot().await;
+  let path_str = parsed.model_path.display().to_string();
+  let eff = effective_presets(&key, &path_str, arch.as_deref(), &store, &rows);
+  let default = is_default(&eff, &parsed.name);
+  let replaced = prev
+    .map(|b| materialize_preset(&parsed.name, &b, parsed.model_path.clone()))
+    .map(|np| preset_row(&np, default));
   Ok(json!({
-    "model_id": id,
-    "saved": preset_row(&preset),
-    "replaced": prev.as_ref().map(preset_row),
+    "model": key,
+    "saved": preset_row(&saved_np, default),
+    "replaced": replaced,
   }))
 }
 
@@ -715,20 +791,19 @@ async fn presets_delete_handler(
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: PresetsDeleteParams = parse_params(params)?;
-  let id = resolve_model_id(&parsed.model_path)?;
-  let identity = ModelIdentity::Gguf(id.clone());
+  let (key, eff) = model_key_and_effective(ctx, &parsed.model_path).await;
+  let default = is_default(&eff, &parsed.name);
   let removed = ctx
-    .state
-    .mutate(|s| {
-      let mut presets = s.presets_map().get(&identity).cloned().unwrap_or_default();
-      let removed = presets.remove(&parsed.name);
-      s.upsert_presets(identity.clone(), presets);
-      removed
-    })
-    .await;
+    .presets
+    .delete(&key, &parsed.name)
+    .await
+    .map_err(write_err)?;
+  let removed_row = removed
+    .map(|b| materialize_preset(&parsed.name, &b, parsed.model_path.clone()))
+    .map(|np| preset_row(&np, default));
   Ok(json!({
-    "model_id": id,
-    "removed": removed.as_ref().map(preset_row),
+    "model": key,
+    "removed": removed_row,
   }))
 }
 
@@ -743,23 +818,55 @@ async fn presets_show_handler(
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: PresetsShowParams = parse_params(params)?;
-  let id = resolve_model_id(&parsed.model_path)?;
-  let identity = ModelIdentity::Gguf(id.clone());
-  let snapshot = ctx.state.snapshot().await;
-  let preset = snapshot
-    .presets_map()
-    .get(&identity)
-    .and_then(|p| p.get(&parsed.name).cloned());
+  let (key, eff) = model_key_and_effective(ctx, &parsed.model_path).await;
+  let default = is_default(&eff, &parsed.name);
+  let preset = eff.presets.get(&parsed.name);
   Ok(json!({
-    "model_id": id,
-    "preset": preset.as_ref().map(preset_row),
+    "model": key,
+    "name": parsed.name,
+    "preset": preset.map(|np| preset_row(np, default)),
   }))
 }
 
-fn preset_row(p: &NamedPreset) -> Value {
+/// Raw config `presets:` map (every model/arch key → its block). The TUI
+/// fetches this once per refresh and resolves each model's effective set
+/// client-side (it already holds the catalog), so it can populate the
+/// launch picker's preset cycle without a per-model round-trip.
+async fn presets_all_handler(ctx: &MethodContext) -> Value {
+  json!({ "presets": ctx.presets.snapshot().await })
+}
+
+fn is_default(eff: &EffectivePresets, name: &str) -> bool {
+  eff.default.as_deref() == Some(name)
+}
+
+/// `(preset_count, default)` status hint for the model at `model_path`,
+/// computed from pre-fetched catalog rows + a store snapshot so the
+/// `status` row builder can hint every running model without re-snapshotting
+/// per row. The arch is read from the model's own catalog row.
+pub(crate) fn preset_hint(
+  model_path: &str,
+  rows: &[CatalogRow],
+  store: &std::collections::BTreeMap<String, crate::config::ConfigPresetBlock>,
+) -> (u32, Option<String>) {
+  let row = rows.iter().find(|r| r.path == model_path);
+  let name = row
+    .map(|r| r.name())
+    .unwrap_or_else(|| crate::util::paths::path_basename(std::path::Path::new(model_path)));
+  let arch = row.and_then(|r| r.arch.clone());
+  let eff = effective_presets(&name, model_path, arch.as_deref(), store, rows);
+  (eff.presets.len() as u32, eff.default)
+}
+
+fn preset_row(p: &NamedPreset, is_default: bool) -> Value {
   json!({
     "name": p.name,
     "params": launch_params_row(&p.params),
+    // Presets live in config.yaml now; the provenance is constant but
+    // surfaced so agents can distinguish a config preset from any future
+    // source without re-deriving it.
+    "source": "config",
+    "is_default": is_default,
   })
 }
 
@@ -1124,5 +1231,35 @@ mod tests {
       "got: {}",
       err.message
     );
+  }
+
+  #[test]
+  fn preset_hint_reports_count_and_default() {
+    use crate::config::{ConfigPresetBlock, PresetBody};
+    use std::collections::BTreeMap;
+    let rows = vec![CatalogRow::for_resolution(
+      "/m/a.gguf".into(),
+      None,
+      Some("qwen2".into()),
+    )];
+    let mut entries = BTreeMap::new();
+    for n in ["p1", "p2", "p3"] {
+      entries.insert(n.to_string(), PresetBody::default());
+    }
+    let mut store = BTreeMap::new();
+    store.insert(
+      "a.gguf".to_string(),
+      ConfigPresetBlock {
+        default: Some("p2".into()),
+        entries,
+      },
+    );
+    let (count, default) = preset_hint("/m/a.gguf", &rows, &store);
+    assert_eq!(count, 3);
+    assert_eq!(default.as_deref(), Some("p2"));
+    // A model with no presets reports zero / none.
+    let (zero, none) = preset_hint("/m/other.gguf", &rows, &store);
+    assert_eq!(zero, 0);
+    assert!(none.is_none());
   }
 }

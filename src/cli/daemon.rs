@@ -306,18 +306,18 @@ fn provision_proxy_key(opts: &mut DaemonOptions, cli: &Cli, foreground: bool) ->
 /// Build the `{ proxy: { api_key: <key> } }` YAML fragment the config
 /// merge persists. Nested so the recursive merge sets only `api_key`
 /// and preserves the user's other `proxy` keys.
-fn proxy_api_key_additions(key: &str) -> serde_yaml::Value {
-  let mut proxy = serde_yaml::Mapping::new();
+fn proxy_api_key_additions(key: &str) -> yaml_serde::Value {
+  let mut proxy = yaml_serde::Mapping::new();
   proxy.insert(
-    serde_yaml::Value::String("api_key".into()),
-    serde_yaml::Value::String(key.to_string()),
+    yaml_serde::Value::String("api_key".into()),
+    yaml_serde::Value::String(key.to_string()),
   );
-  let mut root = serde_yaml::Mapping::new();
+  let mut root = yaml_serde::Mapping::new();
   root.insert(
-    serde_yaml::Value::String("proxy".into()),
-    serde_yaml::Value::Mapping(proxy),
+    yaml_serde::Value::String("proxy".into()),
+    yaml_serde::Value::Mapping(proxy),
   );
-  serde_yaml::Value::Mapping(root)
+  yaml_serde::Value::Mapping(root)
 }
 
 /// One-time banner shown when a LAN proxy key is auto-generated. When
@@ -550,6 +550,10 @@ pub(crate) fn build_options(
   opts.port_range = config.port_range;
   opts.probe_timeout_secs = Some(config.probe_timeout_secs);
   opts.arch_defaults = config.arch_defaults.clone();
+  // Config presets seed the daemon's in-memory store; `config_path` is the
+  // file preset writes and the one-time state.json migration land in.
+  opts.presets = config.presets.clone();
+  opts.config_path = crate::config::config_path(cli.config.clone());
 
   // Auto-fit launch options: config layer first, then the
   // `LLAMASTASH_*` env overrides. A bad env value is logged and ignored
@@ -1548,20 +1552,19 @@ mod tests {
     // Detached daemon re-reads the key from config; if the write fails
     // the child can't see the key, hits the backstop, and drops the
     // proxy. provision must refuse to start rather than print a dead
-    // key. Force a write failure with a symlink config target (the
-    // writer refuses to follow symlinks).
-    use std::os::unix::fs::symlink;
+    // key. Force a write failure with a group/world-writable config dir
+    // (the writer refuses to drop a 0600 file into a permissive dir).
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     let cfg = dir.path().join("config.yaml");
-    let victim = dir.path().join("victim.dat");
-    std::fs::write(&victim, b"x").unwrap();
-    symlink(&victim, &cfg).unwrap();
     let (mut opts, cli) = non_loopback_opts(&cfg);
     let err = provision_proxy_key(&mut opts, &cli, false).expect_err("must refuse to start");
     assert!(
       err.to_string().contains("could not save"),
       "error must explain the unpersisted key: {err}"
     );
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).ok();
   }
 
   #[cfg(unix)]
@@ -1570,12 +1573,10 @@ mod tests {
     // Same write failure, but a --foreground daemon is the same process
     // that holds the key, so it works for this run. provision keeps the
     // key on opts and returns Ok (the banner flags it as unsaved).
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     let cfg = dir.path().join("config.yaml");
-    let victim = dir.path().join("victim.dat");
-    std::fs::write(&victim, b"x").unwrap();
-    symlink(&victim, &cfg).unwrap();
     let (mut opts, cli) = non_loopback_opts(&cfg);
     provision_proxy_key(&mut opts, &cli, true).expect("foreground tolerates write failure");
     assert!(
@@ -1586,6 +1587,7 @@ mod tests {
         .is_some_and(|k| k.starts_with("sk-llamastash-")),
       "key must still be set on opts for the in-process run"
     );
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).ok();
   }
 
   #[test]

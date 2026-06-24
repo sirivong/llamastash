@@ -4,6 +4,11 @@
 //! renderer walks every [`Category`] in order, collecting rows
 //! whose binding lands in that section.
 //!
+//! The overlay packs the keybinding sections across three balanced
+//! columns (one when narrow) and renders the static glyph/marker legend
+//! full width below them. The whole page is a single scroll surface,
+//! and the title carries an `↑↓:scroll` hint.
+//!
 //! Bindings come from `App::bindings_for` so config overrides flow
 //! through automatically.
 
@@ -33,19 +38,49 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   frame.render_widget(Clear, rect);
   crate::tui::render::paint_theme_bg(frame, rect, palette);
 
-  // Close chip carries both keys that dismiss the overlay:
-  //   - `Esc` is hardcoded modal-dismiss in `events::handle_key`
-  //     (not an Action), so it always works regardless of the
-  //     `toggle_help` binding; we hardcode it here too.
-  //   - The `toggle_help` action's live key (default `?`) is
-  //     surfaced second so config overrides flow through.
+  // Inner geometry is independent of the title text, so derive it from a
+  // bare panel first; the column packing and scroll math need it before
+  // the titled block is built.
+  let inner = palette
+    .panel()
+    .padding(Padding::horizontal(1))
+    .build()
+    .inner(rect);
+
+  let sections = build_sections(app);
+  let legend = legend_section();
+  // Keybindings pack into balanced columns (single column when narrow —
+  // three thin columns just truncate every description); the legend
+  // renders full width one blank line below the tallest column. The
+  // whole thing is one scroll surface — `j`/`k` slide columns and legend
+  // together.
+  let n_cols: usize = if inner.width >= 80 { 3 } else { 1 };
+  let columns = balance_into_columns(&sections, n_cols);
+  let tallest = columns
+    .iter()
+    .map(|col| column_height(col))
+    .max()
+    .unwrap_or(0);
+  let legend_lines = render_legend(&legend, palette);
+  // `column_height` already counts a trailing blank after the last
+  // section, so the legend starts at `tallest` with one blank gap.
+  let legend_top = tallest;
+  let content_height = (legend_top + legend_lines.len()) as u16;
+  // Clamp so an over-advanced `help_scroll` can't run past the content.
+  let max_scroll = content_height.saturating_sub(inner.height);
+  let scroll_y = app.help_scroll.min(max_scroll);
+
+  // Title carries the close and scroll chips. The close chip lists both
+  // dismiss keys: `Esc` (hardcoded modal-dismiss in `events::handle_key`,
+  // not an Action, so always works) and the `toggle_help` live key
+  // (default `?`). Scroll keys come from the keymap too, so config
+  // overrides flow through.
   let toggle_key = app
     .bindings_for(Focus::List)
     .iter()
     .find(|b| b.action == Action::ToggleHelp)
     .map(|b| b.label.to_string())
     .unwrap_or_else(|| "?".to_string());
-
   let block = palette
     .panel()
     .title(Line::from(vec![
@@ -56,29 +91,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
           .add_modifier(Modifier::BOLD),
       ),
       Span::styled(format!("· Esc/{toggle_key}:close "), palette.muted_style()),
+      Span::styled(
+        format!("· {}:scroll ", scroll_hint_label(app)),
+        palette.muted_style(),
+      ),
     ]))
     .padding(Padding::horizontal(1))
     .build();
-  let inner = block.inner(rect);
-
-  let sections = build_sections(app);
-  // Single-column layout when the overlay is narrow (≤ 80 cells of
-  // usable width) — column-balancing on a 25-cell strip just truncates
-  // everything. Wider terminals get the canonical 3-column packing.
-  let n_cols: usize = if inner.width >= 80 { 3 } else { 1 };
-  let columns = balance_into_columns(&sections, n_cols);
-  let tallest = columns
-    .iter()
-    .map(|col| column_height(col))
-    .max()
-    .unwrap_or(0) as u16;
-  // `j`/`k` scroll silently; the title doesn't advertise it. Clamp so
-  // an over-advanced `help_scroll` doesn't scroll past the last row.
-  let max_scroll = tallest.saturating_sub(inner.height);
-  let scroll_y = app.help_scroll.min(max_scroll);
-
   frame.render_widget(block, rect);
 
+  // Keybinding columns fill the inner area, scrolled as one.
   let constraints: Vec<Constraint> = (0..n_cols)
     .map(|_| Constraint::Ratio(1, n_cols as u32))
     .collect();
@@ -86,16 +108,57 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     .direction(Direction::Horizontal)
     .constraints(constraints)
     .split(inner);
-
   for (idx, col_sections) in columns.iter().enumerate() {
-    let lines = render_column(col_sections, palette);
     frame.render_widget(
-      Paragraph::new(lines)
+      Paragraph::new(render_column(col_sections, palette))
         .wrap(Wrap { trim: false })
         .scroll((scroll_y, 0)),
       cols[idx],
     );
   }
+
+  // Legend flows below the columns, sharing the same scroll offset.
+  // `legend_rel` is its top row relative to the viewport top: positive
+  // means it sits below the fold, negative means it's partly scrolled
+  // off the top (then the paragraph's own scroll trims the hidden rows).
+  let legend_rel = legend_top as i32 - scroll_y as i32;
+  if legend_rel < inner.height as i32 {
+    let (y, inner_scroll, height) = if legend_rel >= 0 {
+      (
+        inner.y + legend_rel as u16,
+        0u16,
+        inner.height - legend_rel as u16,
+      )
+    } else {
+      (inner.y, (-legend_rel) as u16, inner.height)
+    };
+    frame.render_widget(
+      Paragraph::new(legend_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((inner_scroll, 0)),
+      Rect::new(inner.x, y, inner.width, height),
+    );
+  }
+}
+
+/// Scroll affordance label for the help title, derived from the live
+/// `MoveUp`/`MoveDown` bindings (the overlay also accepts arrows / `j`
+/// / `k` directly). Mirrors the top-bar `↑↓:scroll` chip's no-separator
+/// join so the two read identically.
+fn scroll_hint_label(app: &App) -> String {
+  let binds = app.bindings_for(Focus::List);
+  let label = |action: Action, fallback: &'static str| {
+    binds
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.label)
+      .unwrap_or(fallback)
+  };
+  format!(
+    "{}{}",
+    label(Action::MoveUp, "↑"),
+    label(Action::MoveDown, "↓")
+  )
 }
 
 /// Total line count a column would render at: title + one line per
@@ -164,7 +227,6 @@ fn build_sections(app: &App) -> Vec<Section> {
       rows,
     });
   }
-  sections.push(legend_section());
   sections
 }
 
@@ -258,6 +320,23 @@ fn render_column(sections: &[&Section], palette: &Palette) -> Vec<Line<'static>>
       out.push(render_binding_line(keys, description, palette));
     }
     out.push(Line::default());
+  }
+  out
+}
+
+/// Render the legend for its dedicated bottom row: title plus one line
+/// per entry, with no trailing blank so the row hugs the legend's exact
+/// height.
+fn render_legend(legend: &Section, palette: &Palette) -> Vec<Line<'static>> {
+  let mut out: Vec<Line<'static>> = Vec::with_capacity(legend.rows.len() + 1);
+  out.push(Line::from(Span::styled(
+    legend.title.to_string(),
+    Style::default()
+      .fg(palette.accent)
+      .add_modifier(Modifier::BOLD),
+  )));
+  for (keys, description) in &legend.rows {
+    out.push(render_binding_line(keys, description, palette));
   }
   out
 }
@@ -457,6 +536,61 @@ mod tests {
     assert!(
       frame.contains("prev page"),
       "prev-page row missing:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_renders_legend_below_keybinding_columns() {
+    // The legend renders full width below the keybinding columns. On a
+    // terminal tall enough to fit everything, the "Legend" line sits
+    // strictly below each category title.
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 60, &app);
+    let lines: Vec<&str> = frame.lines().collect();
+    let legend_y = lines
+      .iter()
+      .position(|l| l.contains("Legend"))
+      .expect("Legend row present");
+    for title in ["General", "Models", "Settings"] {
+      let y = lines
+        .iter()
+        .position(|l| l.contains(title))
+        .unwrap_or_else(|| panic!("{title} section present:\n{frame}"));
+      assert!(
+        y < legend_y,
+        "{title} (y={y}) must render above the legend (y={legend_y}):\n{frame}"
+      );
+    }
+  }
+
+  #[test]
+  fn overlay_title_carries_scroll_hint() {
+    // The title advertises the scroll affordance next to the close chip,
+    // with the key label derived from the keymap (default `↑↓`).
+    let app = App::new(AppOptions::default());
+    let frame = render_to_string(140, 40, &app);
+    assert!(
+      frame.contains("↑↓:scroll"),
+      "help title must carry the scroll hint:\n{frame}"
+    );
+  }
+
+  #[test]
+  fn overlay_scroll_reveals_legend_on_short_terminal() {
+    // On a terminal too short to show the legend at rest, scrolling the
+    // page down brings the legend into view (it shares the columns'
+    // scroll offset rather than pinning to the bottom).
+    let mut app = App::new(AppOptions::default());
+    let top = render_to_string(140, 16, &app);
+    assert!(
+      !top.contains("unified memory"),
+      "legend should be below the fold at scroll=0:\n{top}"
+    );
+    app.help_scroll = 200;
+    let bottom = render_to_string(140, 16, &app);
+    assert!(
+      bottom.contains("unified memory"),
+      "scrolling down must reveal the legend:\n{bottom}"
     );
   }
 

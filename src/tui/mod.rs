@@ -31,6 +31,7 @@ pub mod logo_pane;
 pub mod oai_client;
 pub mod render;
 pub mod right_pane;
+pub mod save_preset_dialog;
 pub mod status_icons;
 pub mod tabs;
 

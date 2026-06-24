@@ -109,7 +109,6 @@ pub async fn handle(args: PresetsArgs, cli: &Cli, config: &Config) -> CliResult 
     PresetsAction::Save {
       name,
       ctx,
-      port,
       reasoning,
       mode,
       extra,
@@ -123,9 +122,6 @@ pub async fn handle(args: PresetsArgs, cli: &Cli, config: &Config) -> CliResult 
       payload.insert("name".into(), json!(name));
       if let Some(c) = ctx {
         payload.insert("ctx".into(), json!(c));
-      }
-      if let Some(p) = port {
-        payload.insert("port".into(), json!(p));
       }
       if let Some(r) = reasoning {
         payload.insert("reasoning".into(), json!(matches!(r, ReasoningFlag::On)));

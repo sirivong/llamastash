@@ -17,6 +17,8 @@ pub mod launch_service;
 pub mod lockfile;
 pub mod orphans;
 pub mod ports;
+pub mod preset_migration;
+pub mod preset_store;
 pub mod probe;
 pub mod registry;
 pub mod resources;
@@ -144,6 +146,15 @@ pub struct DaemonOptions {
   /// (factory `true`). Threaded into `LaunchEnv.jinja_default`; the
   /// reasoning toggle still forces it on per-launch regardless.
   pub jinja: bool,
+  /// Config `presets:` blocks (from `Config.presets`). Seed the daemon's
+  /// in-memory [`crate::daemon::preset_store::ConfigPresetStore`]; writes
+  /// land back in `config_path`. Default: empty map.
+  pub presets: std::collections::BTreeMap<String, crate::config::ConfigPresetBlock>,
+  /// Resolved `config.yaml` path. The preset store writes through here
+  /// (comment-safe) and the one-time `state.json` preset migration writes
+  /// the migrated entries here. `None` disables write-through (tests /
+  /// no config file) — mutations stay in-memory.
+  pub config_path: Option<PathBuf>,
 }
 
 impl DaemonOptions {
@@ -179,6 +190,8 @@ impl DaemonOptions {
       // uses via `from_defaults`.
       control_plane_port: 0,
       force: false,
+      presets: std::collections::BTreeMap::new(),
+      config_path: None,
     }
   }
 
@@ -211,6 +224,8 @@ impl DaemonOptions {
       lemonade: LemonadeConfig::default(),
       control_plane_port: control_plane::DEFAULT_CONTROL_PORT,
       force: false,
+      presets: std::collections::BTreeMap::new(),
+      config_path: None,
     })
   }
 }
@@ -299,6 +314,17 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // Clear `running` — only the IPC `start_model` path repopulates
   // this slot via live supervisors going forward.
   state_after_sweep.running.clear();
+  // One-time migration: import any legacy `state.json` presets into
+  // `config.yaml` (config wins on collision), then clear them from state.
+  // `config_presets` is seeded from `Config.presets` and becomes the
+  // in-memory preset store below, so migrated entries are live without a
+  // restart. (ONE-TIME MIGRATION — remove with `preset_migration`; see TODO.md.)
+  let mut config_presets = opts.presets.clone();
+  preset_migration::migrate_state_presets_to_config(
+    &mut state_after_sweep,
+    &mut config_presets,
+    opts.config_path.as_deref(),
+  );
   if let Err(e) = state_store::save(&opts.state_dir, &state_after_sweep) {
     log::warn!("state-store: failed to persist after orphan sweep: {e}");
   }
@@ -359,6 +385,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // 8. Wire the dispatcher context.
   let supervisors = SupervisorRegistry::new();
   let persisted = PersistedState::new(state_after_sweep, Some(opts.state_dir.clone()));
+  let preset_store = preset_store::ConfigPresetStore::new(config_presets, opts.config_path.clone());
   // Construct the proxy status cell *before* the context so the IPC
   // `status` handler and the proxy listener task share the same
   // handle. The cell surfaces via `status.proxy`; it is seeded with
@@ -370,6 +397,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     .with_gpu(initial_gpu)
     .with_sampler(sampler)
     .with_state(persisted)
+    .with_presets(preset_store)
     .with_external(external_combined)
     .with_proxy_status(std::sync::Arc::clone(&proxy_status_cell))
     .with_lemonade(opts.lemonade.clone());

@@ -11,10 +11,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::launch::flag_aliases::{knob_specs, KnobField};
+use crate::launch::mode::LaunchMode;
 use crate::theme::{CustomThemeConfig, ThemeName};
 use crate::util::paths::user_config_file;
 
-/// Hard cap on config-file size. `serde_yaml` 0.9 expands anchors and aliases
+/// Hard cap on config-file size. The YAML parser expands anchors and aliases
 /// without depth limits — a hostile file could mushroom in memory. 1 MiB is
 /// far more than any plausible hand-written config and small enough that even
 /// pathological YAML can't OOM the process.
@@ -146,6 +147,17 @@ pub struct Config {
   /// env var overrides this and forces ASCII on regardless.
   #[serde(default)]
   pub ascii_glyphs: bool,
+  /// Named launch presets, the single writable home for presets. Map
+  /// keys are classified per-resolution against the live model catalog
+  /// (see [`crate::launch::presets::classify_preset_key`]): a key that
+  /// names a discovered model (by basename, path fallback) is **per
+  /// model**; otherwise it is read as a GGUF `general.architecture` id
+  /// and applies to **every model of that arch**. Model wins on a name
+  /// collision. The CLI `presets save/delete` and the TUI `Ctrl+P` write
+  /// per-model keys here (comment-safe, via
+  /// [`crate::config::presets_writer`]); arch keys are hand-authored.
+  #[serde(default)]
+  pub presets: BTreeMap<String, ConfigPresetBlock>,
 }
 
 fn default_fit_ctx_floor() -> u32 {
@@ -378,21 +390,37 @@ impl Default for LemonadeConfig {
 /// or which falls through to llama-server's own default.
 ///
 /// **Serde shape:** `Set(v)` serialises as the bare scalar `v` exactly
-/// as the pre-tri-state `Option<T>` field did, so existing `state.json`
-/// / `config.yaml` values load unchanged. `Auto` serialises as the
-/// object sentinel `{"auto": true}`. The object form is deliberate:
-/// `"auto"` is a *legal value* for several string knobs (`split_mode`,
-/// `device`, `cache_type_*`, `tensor_split`), so a bare string `"auto"`
-/// must round-trip as `Set("auto")`, never the Auto state. An object
-/// sentinel cannot collide with any bare scalar of any field type, and
-/// no string/number/bool knob value is ever a map — so a map with an
-/// `auto` key unambiguously means the Auto state.
+/// as the pre-tri-state `Option<T>` field did, so existing bare values
+/// load unchanged. `Auto` serialises as the bare token `auto` (e.g.
+/// `ctx: auto`) — readable and idiomatic in both `config.yaml` and the
+/// JSON wire.
+///
+/// **The `auto` collision, and its escape hatch:** `"auto"` *could* be a
+/// legal value for a string knob, so the bare token is reserved for the
+/// Auto state. To set the literal string `"auto"` on a knob, wrap it in
+/// the explicit `{ value: auto }` escape, which always round-trips as
+/// `Set("auto")`. No string/number/bool knob value is ever a map, so the
+/// `{ value: … }` escape (and the still-read legacy `{ auto: true }`
+/// sentinel) can never collide with a real scalar value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum KnobValue<T> {
   /// Explicitly pinned to a concrete value; emits the flag verbatim.
   Set(T),
   /// Delegated to `--fit`; emits no flag (fit governs placement).
   Auto,
+}
+
+/// The bare YAML/JSON token that denotes the [`KnobValue::Auto`] state.
+const AUTO_TOKEN: &str = "auto";
+
+/// True when `v` would itself serialise to the bare `auto` token (i.e. the
+/// string `"auto"`) — the one value that needs the `{ value: … }` escape so
+/// it round-trips as `Set`, not the Auto sentinel. Only a string can collide.
+fn serialises_as_auto_token<T: Serialize>(v: &T) -> bool {
+  matches!(
+    serde_json::to_value(v),
+    Ok(serde_json::Value::String(s)) if s == AUTO_TOKEN
+  )
 }
 
 impl<T> KnobValue<T> {
@@ -421,40 +449,64 @@ impl<T> KnobValue<T> {
 impl<T: Serialize> Serialize for KnobValue<T> {
   fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     match self {
-      KnobValue::Set(v) => v.serialize(serializer),
-      KnobValue::Auto => {
+      KnobValue::Auto => serializer.serialize_str(AUTO_TOKEN),
+      // A value that would itself render as the bare `auto` token must be
+      // wrapped in the `{ value: … }` escape so it reads back as `Set`.
+      KnobValue::Set(v) if serialises_as_auto_token(v) => {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("auto", &true)?;
+        map.serialize_entry("value", v)?;
         map.end()
       }
+      KnobValue::Set(v) => v.serialize(serializer),
     }
   }
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for KnobValue<T> {
   fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-    // Untagged probe: a map carrying an `auto` key is the sentinel;
-    // anything else is a bare scalar value. Self-describing formats
-    // (serde_json, serde_yaml) buffer and retry, so this is
-    // format-agnostic. Sentinel is tried first; no scalar knob value
-    // is a map, so it never shadows a legitimate `Set`.
+    // Untagged probe (self-describing formats buffer and retry, so this is
+    // format-agnostic). Order matters; no scalar knob value is ever a map,
+    // so the two map forms can never shadow a legitimate `Set`:
+    //   1. `{ value: X }`   -> Set(X)  — explicit escape (forces Set even
+    //                                    when X is the literal "auto").
+    //   2. `{ auto: true }` -> Auto    — legacy sentinel, still read.
+    //   3. the bare token `auto`       -> Auto.
+    //   4. any other bare scalar       -> Set.
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Repr<T> {
+      Escape { value: T },
       Sentinel { auto: bool },
+      Auto(AutoToken),
       Set(T),
     }
     match Repr::<T>::deserialize(deserializer)? {
-      // `{"auto": true}` is the sentinel we emit. A map with
-      // `auto: false` is not a shape we write, but no scalar knob value
-      // is ever a map, so treat any `auto`-keyed map as the Auto state
-      // rather than erroring.
+      Repr::Escape { value } => Ok(KnobValue::Set(value)),
       Repr::Sentinel { auto } => {
+        // Any `auto`-keyed map is the Auto state; the bool value is irrelevant
+        // (binding it keeps the field live so serde still matches the shape).
         let _ = auto;
         Ok(KnobValue::Auto)
       }
+      Repr::Auto(_) => Ok(KnobValue::Auto),
       Repr::Set(v) => Ok(KnobValue::Set(v)),
+    }
+  }
+}
+
+/// Deserializes only from the exact bare token `auto`; any other scalar
+/// errors so the untagged probe falls through to `Set`. (A unit type rather
+/// than a `()` so the untagged enum gives it a distinct variant.)
+struct AutoToken;
+
+impl<'de> Deserialize<'de> for AutoToken {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    let s = String::deserialize(deserializer)?;
+    if s == AUTO_TOKEN {
+      Ok(AutoToken)
+    } else {
+      Err(serde::de::Error::custom("not the `auto` token"))
     }
   }
 }
@@ -779,6 +831,41 @@ fn overlay_slot(dst: KnobSlotMut<'_>, over: KnobSlotMut<'_>) {
   }
 }
 
+/// One model-or-arch key's preset block in the config `presets:` map.
+///
+/// `entries` is keyed by preset **name** (a map, not a sequence) so the
+/// comment-safe writer can `Add`/`Replace`/`Remove` one entry without
+/// touching siblings. `default` names the entry the TUI cycle opens on;
+/// it is hand-edited only (no CLI/TUI set-default op) and is ignored when
+/// it names an absent entry.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct ConfigPresetBlock {
+  pub default: Option<String>,
+  pub entries: BTreeMap<String, PresetBody>,
+}
+
+/// A single named preset's launch settings, as authored in `config.yaml`.
+///
+/// The typed knobs are flattened so `ctx: 65536` / `flash_attn: true` read
+/// flat under the entry. `ctx` and `reasoning` are part of [`TypedKnobs`]
+/// already, so they ride in `knobs` here (a `ctx: 65536` is
+/// `knobs.ctx = Set(65536)`); materialisation pulls them into the
+/// [`crate::launch::params::LaunchParams`] sibling fields so the IPC/CLI
+/// wire shape is unchanged. `mode` (launch mode) and `extras` (the
+/// free-form llama-server argv tail) are the only non-knob settings an
+/// entry carries. Every field is optional — an entry only stores what it
+/// pins.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PresetBody {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mode: Option<LaunchMode>,
+  #[serde(flatten)]
+  pub knobs: TypedKnobs,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub extras: Option<Vec<String>>,
+}
+
 /// How a knob *no layer supplied a value for* is seeded at launch
 /// composition (R1 seeding rule). Selects only the seed for layer-less
 /// knobs — knobs any layer set (user / last-used / arch / preset) keep
@@ -817,6 +904,7 @@ impl Default for Config {
       strict_fit: false,
       jinja: true,
       ascii_glyphs: false,
+      presets: BTreeMap::new(),
     }
   }
 }
@@ -888,7 +976,7 @@ pub fn config_path(cli_override: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 fn parse_config(contents: &str, path: &Path) -> LoadedConfig {
-  match serde_yaml::from_str::<Config>(contents) {
+  match yaml_serde::from_str::<Config>(contents) {
     Ok(config) => LoadedConfig {
       config,
       warning: None,
@@ -913,7 +1001,7 @@ fn parse_config(contents: &str, path: &Path) -> LoadedConfig {
 /// 1. `fs::metadata` rejects anything that isn't a regular file — a config
 ///    path pointed at a FIFO or `/dev/urandom` would otherwise hang the main
 ///    thread.
-/// 2. A 1 MiB size cap (`MAX_CONFIG_BYTES`) prevents `serde_yaml`'s
+/// 2. A 1 MiB size cap (`MAX_CONFIG_BYTES`) prevents `yaml_serde`'s
 ///    unbounded anchor/alias expansion from being weaponised by a hostile
 ///    config file.
 pub fn load_config_from_path(path: &Path) -> LoadedConfig {
@@ -1024,6 +1112,92 @@ mod tests {
   use super::*;
 
   #[test]
+  fn preset_body_deserialises_flattened_knobs() {
+    // The serde-flatten + KnobValue (untagged) combination is a known
+    // footgun; pin that ctx/reasoning/knobs flatten flat, integers stay
+    // integers, the Auto sentinel round-trips, and `mode` stays a sibling.
+    let body: PresetBody = yaml_serde::from_str(
+      "ctx: 65536\nreasoning: true\nmode: embedding\nflash_attn: true\nn_gpu_layers: { auto: true }\nthreads: 8\nextras: [--rope-freq-base, \"10000\"]\n",
+    )
+    .unwrap();
+    assert_eq!(body.mode, Some(LaunchMode::Embedding));
+    assert_eq!(body.knobs.ctx, Some(KnobValue::Set(65536)));
+    assert_eq!(body.knobs.reasoning, Some(KnobValue::Set(true)));
+    assert_eq!(body.knobs.flash_attn, Some(KnobValue::Set(true)));
+    assert_eq!(body.knobs.threads, Some(KnobValue::Set(8)));
+    assert_eq!(body.knobs.n_gpu_layers, Some(KnobValue::Auto));
+    assert_eq!(
+      body.extras.as_deref(),
+      Some(&["--rope-freq-base".to_string(), "10000".to_string()][..])
+    );
+  }
+
+  #[test]
+  fn preset_body_serialises_back_to_a_flat_mapping() {
+    let body = PresetBody {
+      mode: None,
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Set(32768)),
+        flash_attn: Some(KnobValue::Set(true)),
+        n_gpu_layers: Some(KnobValue::Auto),
+        ..TypedKnobs::default()
+      },
+      extras: None,
+    };
+    let value = serde_json::to_value(&body).unwrap();
+    let obj = value.as_object().unwrap();
+    assert_eq!(
+      obj.get("ctx").and_then(serde_json::Value::as_u64),
+      Some(32768)
+    );
+    assert_eq!(
+      obj.get("flash_attn").and_then(serde_json::Value::as_bool),
+      Some(true)
+    );
+    assert_eq!(
+      obj.get("n_gpu_layers").and_then(serde_json::Value::as_str),
+      Some("auto"),
+      "Auto serialises as the bare `auto` token through flatten"
+    );
+    assert!(obj.get("mode").is_none(), "None siblings are skipped");
+    assert!(obj.get("extras").is_none());
+  }
+
+  #[test]
+  fn config_presets_block_round_trips_through_yaml() {
+    let yaml = "\
+presets:
+  qwen-coder:
+    default: long-ctx
+    entries:
+      short-ctx: { ctx: 8192 }
+      long-ctx: { ctx: 65536, flash_attn: true }
+  qwen2:
+    entries:
+      balanced: { ctx: 16384 }
+";
+    let cfg: Config = yaml_serde::from_str(yaml).unwrap();
+    let block = cfg.presets.get("qwen-coder").unwrap();
+    assert_eq!(block.default.as_deref(), Some("long-ctx"));
+    assert_eq!(block.entries.len(), 2);
+    let long = block.entries.get("long-ctx").unwrap();
+    assert_eq!(long.knobs.ctx, Some(KnobValue::Set(65536)));
+    assert_eq!(long.knobs.flash_attn, Some(KnobValue::Set(true)));
+    let arch = cfg.presets.get("qwen2").unwrap();
+    assert!(arch.default.is_none());
+    assert_eq!(
+      arch.entries.get("balanced").unwrap().knobs.ctx,
+      Some(KnobValue::Set(16384))
+    );
+  }
+
+  #[test]
+  fn config_without_presets_key_defaults_to_empty() {
+    let cfg: Config = yaml_serde::from_str("theme: latte\n").unwrap();
+    assert!(cfg.presets.is_empty());
+  }
+
+  #[test]
   fn field_name_matches_the_serde_keys_exactly() {
     // The Settings label and any field-name display read `field_name()`;
     // persistence reads the serde key. They must be the same string set,
@@ -1091,37 +1265,57 @@ mod tests {
   }
 
   #[test]
-  fn knob_value_auto_serialises_as_object_sentinel() {
+  fn knob_value_auto_serialises_as_bare_token() {
     assert_eq!(
       serde_json::to_string(&KnobValue::<u32>::Auto).unwrap(),
-      "{\"auto\":true}"
+      "\"auto\""
     );
   }
 
   #[test]
   fn knob_value_round_trips_every_kind() {
-    // absent / sentinel / value for u32, bool, String.
-    for json in ["8192", "{\"auto\":true}"] {
+    // Set value, Auto token, and the legacy sentinel (read-only).
+    for json in ["8192", "\"auto\""] {
       let v: KnobValue<u32> = serde_json::from_str(json).unwrap();
       let back = serde_json::to_string(&v).unwrap();
       assert_eq!(back, json, "u32 round-trip for {json}");
     }
     let set: KnobValue<u32> = serde_json::from_str("99").unwrap();
     assert_eq!(set, KnobValue::Set(99));
-    let auto: KnobValue<bool> = serde_json::from_str("{\"auto\":true}").unwrap();
+    let auto: KnobValue<bool> = serde_json::from_str("\"auto\"").unwrap();
     assert_eq!(auto, KnobValue::Auto);
+    // Legacy `{ auto: true }` still loads.
+    let legacy: KnobValue<bool> = serde_json::from_str("{\"auto\":true}").unwrap();
+    assert_eq!(legacy, KnobValue::Auto);
   }
 
   #[test]
-  fn string_knob_value_literal_auto_round_trips_as_set_not_sentinel() {
-    // `split_mode = "auto"` is a legal upstream value and must stay
-    // `Set("auto")`, distinct from the Auto state. This is the whole
-    // reason the sentinel is an object, not the bare string "auto".
-    let v: KnobValue<String> = serde_json::from_str("\"auto\"").unwrap();
-    assert_eq!(v, KnobValue::Set("auto".to_string()));
-    assert_eq!(serde_json::to_string(&v).unwrap(), "\"auto\"");
+  fn bare_auto_token_is_the_auto_state() {
+    // The bare token `auto` denotes the Auto state, on any knob type.
+    let v: KnobValue<u32> = serde_json::from_str("\"auto\"").unwrap();
+    assert_eq!(v, KnobValue::Auto);
+    assert_eq!(
+      serde_json::to_string(&KnobValue::<u32>::Auto).unwrap(),
+      "\"auto\""
+    );
+    // Legacy `{ auto: true }` is still read as Auto (lenient).
+    let legacy: KnobValue<u32> = serde_json::from_str(r#"{"auto":true}"#).unwrap();
+    assert_eq!(legacy, KnobValue::Auto);
+  }
 
-    // And it survives a full TypedKnobs round-trip on a string knob.
+  #[test]
+  fn literal_auto_value_uses_the_value_escape() {
+    // To set a knob to the *literal* string "auto" (not the Auto state),
+    // use the `{ value: auto }` escape — which is also how it serialises.
+    let escaped: KnobValue<String> = serde_json::from_str(r#"{"value":"auto"}"#).unwrap();
+    assert_eq!(escaped, KnobValue::Set("auto".to_string()));
+    assert_eq!(
+      serde_json::to_string(&KnobValue::Set("auto".to_string())).unwrap(),
+      r#"{"value":"auto"}"#
+    );
+
+    // Full TypedKnobs round-trip: a string knob set to "auto" stays Set,
+    // distinct from a sibling delegated to Auto.
     let knobs = TypedKnobs {
       split_mode: Some(KnobValue::Set("auto".to_string())),
       device: Some(KnobValue::Auto),
@@ -1131,6 +1325,11 @@ mod tests {
     let back: TypedKnobs = serde_json::from_str(&s).unwrap();
     assert_eq!(back.split_mode, Some(KnobValue::Set("auto".to_string())));
     assert_eq!(back.device, Some(KnobValue::Auto));
+    // A non-"auto" string value still serialises bare (no escape).
+    assert_eq!(
+      serde_json::to_string(&KnobValue::Set("q8_0".to_string())).unwrap(),
+      r#""q8_0""#
+    );
   }
 
   #[test]
@@ -1144,8 +1343,8 @@ mod tests {
     };
     let json = serde_json::to_string(&knobs).unwrap();
     assert_eq!(serde_json::from_str::<TypedKnobs>(&json).unwrap(), knobs);
-    let yaml = serde_yaml::to_string(&knobs).unwrap();
-    assert_eq!(serde_yaml::from_str::<TypedKnobs>(&yaml).unwrap(), knobs);
+    let yaml = yaml_serde::to_string(&knobs).unwrap();
+    assert_eq!(yaml_serde::from_str::<TypedKnobs>(&yaml).unwrap(), knobs);
   }
 
   #[test]

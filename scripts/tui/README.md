@@ -86,6 +86,14 @@ skip load and quit:
 (launch → chat → HuggingFace pull → theme cycle). See its header comments for
 the capture command.
 
+`scripts/tui/presets.prog` gates the config-presets TUI surface: the always-shown
+Settings preset cycle row (which opens on `last used` and cycles `last used →
+auto → [default] → named presets`) and the `Ctrl+P` save dialog (name entry,
+save, overwrite confirm). It only needs an isolated daemon with at least one
+discovered model — point `LLAMASTASH_STATE_DIR` / `LLAMASTASH_CONFIG` at a temp
+dir and run the harness against it. (Seed a `presets:` block for the focused
+model if you also want to exercise the named-preset stops.)
+
 ### Reworking a recorded cast
 
 Two helpers consume a recorded cast (both handle v2 and v3):

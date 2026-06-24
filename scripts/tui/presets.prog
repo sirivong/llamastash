@@ -1,0 +1,51 @@
+comment: config-presets-per-model — TUI preset cycle row + Ctrl+P save dialog.
+comment: Requires an isolated daemon with at least one discovered model (see
+comment: scripts/tui/README.md). The preset cycle row is always shown — it
+comment: offers `last used` <-> `auto` even when the model has no named presets.
+wait: 4
+snap: boot
+expect: Models
+
+comment: --- open the launch picker; the cursor opens on the Preset row at the
+comment: --- `last used` stop (pre-filled last params, nothing applied yet)
+key: enter
+settle
+snap: picker
+expect: Launch settings
+expect: preset
+iexpect: last used
+
+comment: --- cycle the preset row right: last used -> auto (delegates fit knobs)
+key: right
+settle
+snap: cycle-auto
+expect: auto
+
+comment: --- Ctrl+P opens the save-preset dialog (name entry stage)
+key: ctrl-p
+settle
+snap: save-dialog
+iexpect: save preset
+iexpect: name this preset
+
+comment: --- type a name and save
+type: harness-preset
+settle
+key: enter
+settle
+snap: saved
+iexpect: saved preset
+
+comment: --- Ctrl+P again with an existing name -> overwrite confirm stage
+key: ctrl-p
+settle
+type: harness-preset
+key: enter
+settle
+snap: overwrite
+iexpect: already exists
+iexpect: overwrite
+
+comment: --- cancel out cleanly
+key: esc
+settle

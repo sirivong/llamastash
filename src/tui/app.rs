@@ -18,7 +18,7 @@ use crate::discovery::DiscoveredModel;
 use crate::theme::{palette_for, Palette, ThemeName};
 use crate::tui::filter::rank;
 use crate::tui::keybindings::{Action, Focus, KeyMap};
-use crate::tui::launch_picker::LaunchPickerState;
+use crate::tui::launch_picker::{LaunchPickerState, PresetChoice};
 use crate::tui::list_pane::{build_rows, ListRow, RowInputs, RunningLaunchRow};
 use crate::tui::status_icons::SurfaceState;
 use crate::tui::tabs::{tabs_for_mode, RightTab};
@@ -104,6 +104,10 @@ pub struct ManagedRow {
   /// knob, a pinned number when set — rather than the user's saved
   /// `last_params` delta (which can be empty even for an auto launch).
   pub knobs: crate::config::TypedKnobs,
+  /// The advanced `--` argv tail this launch was dispatched with (the
+  /// live `status` `params.extras`). Empty for external rows. Lets
+  /// `Ctrl+P` save-from-running carry the advanced args into the preset.
+  pub extras: Vec<String>,
 }
 
 /// Persisted "last successful launch params" for one model, fetched
@@ -269,6 +273,11 @@ pub struct App {
   /// Last-known persisted launch params per model path. Keyed off
   /// the canonical `ModelId.path` the daemon emits.
   pub last_params: BTreeMap<PathBuf, LastParamsRow>,
+  /// Raw config `presets:` blocks from `presets_all`, keyed by model
+  /// name / arch id. The launch picker resolves each model's effective
+  /// set against the catalog (see [`crate::launch::presets`]) to build
+  /// its preset cycle. Empty until the first refresh lands.
+  pub config_presets: BTreeMap<String, crate::config::ConfigPresetBlock>,
   /// Top-N recently-launched paths in recency order (most recent
   /// first). Surfaced via the `↺ Recent` section. Populated from
   /// `last_params_list`; see `RECENT_LIST_CAP`.
@@ -357,6 +366,9 @@ pub struct App {
   /// is open; the input pump routes through `Focus::HfDialog` to the
   /// per-stage key handler.
   pub hf_dialog: Option<crate::tui::hf_dialog::HfDialogState>,
+  /// `Ctrl+P` save-preset dialog. `Some(_)` while the modal is open; the
+  /// input pump routes keys to its name / overwrite stages.
+  pub save_preset_dialog: Option<crate::tui::save_preset_dialog::SavePresetDialog>,
   /// Pinned download status strip. Always present; the
   /// renderer reserves a 1-line slot above the body only when
   /// `download_strip.is_active()` is true.
@@ -499,6 +511,7 @@ impl App {
       managed: Vec::new(),
       external: Vec::new(),
       last_params: BTreeMap::new(),
+      config_presets: BTreeMap::new(),
       recent_paths: Vec::new(),
       right_tab: RightTab::Settings,
       chat: Default::default(),
@@ -521,6 +534,7 @@ impl App {
       pending_g_prefix: false,
       confirm_dialog: None,
       hf_dialog: None,
+      save_preset_dialog: None,
       download_strip: crate::tui::download_strip::DownloadStripState::default(),
       rows_cache: None,
       right_tabs_cache: None,
@@ -934,6 +948,19 @@ impl App {
           self.device_catalog = devices;
         }
       }
+    }
+  }
+
+  /// Apply a `presets_all` IPC response — the raw config `presets:`
+  /// blocks. The launch picker resolves each model's effective set from
+  /// this against the catalog. A malformed body leaves the cache as-is.
+  pub fn ingest_presets(&mut self, body: &Value) {
+    if let Some(map) = body
+      .get("presets")
+      .cloned()
+      .and_then(|v| serde_json::from_value(v).ok())
+    {
+      self.config_presets = map;
     }
   }
 
@@ -1395,6 +1422,11 @@ impl App {
         // they ride along inside `last.knobs` without dedicated
         // seeding paths.
         state.user_knobs = last.knobs.clone();
+        // Seed extras here (before `set_presets`) so the preset cycle's
+        // `last used` stop captures them as part of its baseline.
+        if !last.extras.is_empty() {
+          state.extras = last.extras.iter().map(std::ffi::OsString::from).collect();
+        }
       }
     }
     state.active_instances = active_count;
@@ -1412,7 +1444,122 @@ impl App {
     // accept (sourced from their `--list-devices`). The picker cycles
     // this flat list and stores the chosen selector verbatim.
     state.device_catalog = self.device_catalog.clone();
+    // Seed the preset cycle from the model's effective set (per-model ∪
+    // arch, resolved against the catalog). Always called — the Preset row
+    // is always shown (it offers `last used` ↔ `auto` even with no named
+    // presets), and it captures the seeds above as its `last used` baseline.
+    if let Some(p) = &path {
+      let (choices, default) = self.effective_preset_choices(p);
+      state.set_presets(choices, default);
+    }
+    // Open with the cursor on the always-shown Preset row — it leads the form
+    // and is the first thing a user picks when staging a launch. Centralized
+    // here so every construction path agrees (the launch picker *and* the
+    // Settings-tab render fallback); `set_presets` deliberately leaves `field`
+    // alone so tests can drive it in isolation.
+    state.field = crate::tui::launch_picker::PickerField::Preset;
     Some(state)
+  }
+
+  /// Resolve the focused model's effective presets into picker-ready
+  /// choices (ctx/reasoning folded into the typed knobs) plus the default
+  /// index. Reuses [`crate::launch::presets::effective_presets`] against
+  /// the local catalog, so the TUI and daemon agree on classification.
+  fn effective_preset_choices(&self, path: &Path) -> (Vec<PresetChoice>, Option<usize>) {
+    use crate::launch::presets::{effective_presets, preset_body_from_launch_params};
+    if self.config_presets.is_empty() {
+      return (Vec::new(), None);
+    }
+    let (rows, name, arch) = self.preset_resolution_inputs(path);
+    let path_str = path.display().to_string();
+    let eff = effective_presets(
+      &name,
+      &path_str,
+      arch.as_deref(),
+      &self.config_presets,
+      &rows,
+    );
+    let choices: Vec<PresetChoice> = eff
+      .presets
+      .iter()
+      .map(|np| PresetChoice {
+        name: np.name.clone(),
+        knobs: preset_body_from_launch_params(&np.params).knobs,
+        extras: np.params.extras.clone(),
+      })
+      .collect();
+    let default = eff
+      .default
+      .as_ref()
+      .and_then(|d| choices.iter().position(|c| &c.name == d));
+    (choices, default)
+  }
+
+  /// Resolution inputs for `path`: the catalog projected into
+  /// [`crate::launch::resolve::CatalogRow`]s, the model's display name
+  /// (basename fallback off the catalog), and its arch. Shared by the
+  /// preset-cycle and save-dialog paths so they classify identically.
+  fn preset_resolution_inputs(
+    &self,
+    path: &Path,
+  ) -> (
+    Vec<crate::launch::resolve::CatalogRow>,
+    String,
+    Option<String>,
+  ) {
+    use crate::launch::resolve::CatalogRow;
+    let rows: Vec<CatalogRow> = self
+      .models
+      .iter()
+      .map(|m| {
+        CatalogRow::for_resolution(
+          m.path.display().to_string(),
+          m.display_label.clone(),
+          m.metadata.as_ref().and_then(|md| md.arch.clone()),
+        )
+      })
+      .collect();
+    let path_str = path.display().to_string();
+    let row = rows.iter().find(|r| r.path == path_str);
+    let name = row
+      .map(|r| r.name())
+      .unwrap_or_else(|| crate::util::paths::path_basename(path));
+    let arch = row.and_then(|r| r.arch.clone());
+    (rows, name, arch)
+  }
+
+  /// Existing preset names the focused model resolves, split into the
+  /// per-model presets a save would **overwrite** and the arch presets it
+  /// would only **shadow** (a per-model save creates an override; the arch
+  /// entry survives and still applies to other models of that arch). The
+  /// save dialog uses the split to ask the right question.
+  fn existing_preset_names(&self, path: &Path) -> (Vec<String>, Vec<String>) {
+    use crate::launch::presets::effective_presets;
+    if self.config_presets.is_empty() {
+      return (Vec::new(), Vec::new());
+    }
+    let (rows, name, arch) = self.preset_resolution_inputs(path);
+    let path_str = path.display().to_string();
+    // Arch layer skipped (arch = None) → per-model entries only.
+    let per_model: Vec<String> =
+      effective_presets(&name, &path_str, None, &self.config_presets, &rows)
+        .presets
+        .iter()
+        .map(|np| np.name.clone())
+        .collect();
+    let arch_only: Vec<String> = effective_presets(
+      &name,
+      &path_str,
+      arch.as_deref(),
+      &self.config_presets,
+      &rows,
+    )
+    .presets
+    .iter()
+    .map(|np| np.name.clone())
+    .filter(|n| !per_model.contains(n))
+    .collect();
+    (per_model, arch_only)
   }
 
   /// Drill into the focused model row — the action `Enter` fires on
@@ -1456,21 +1603,12 @@ impl App {
   /// gate) and by `Enter`-on-list for idle rows via
   /// [`drill_into_focused_model`](Self::drill_into_focused_model).
   pub fn open_launch_picker(&mut self) {
-    let mut picker = match self.build_default_picker() {
+    let picker = match self.build_default_picker() {
       Some(p) => p,
       None => return,
     };
-    // Seed the extras buffer too when persisted extras exist for
-    // the focused path. This side effect is owned by
-    // `open_launch_picker` — `build_default_picker` stays pure so
-    // render paths can call it freely.
-    if let Some(path) = self.focused_path() {
-      if let Some(last) = self.last_params.get(&path) {
-        if !last.extras.is_empty() {
-          picker.extras = last.extras.iter().map(std::ffi::OsString::from).collect();
-        }
-      }
-    }
+    // `build_default_picker` seeds extras + the preset cycle and opens the
+    // cursor on the Preset row.
     self.launch_picker = Some(picker);
     self.running_view_scroll.set(0);
     self.right_tab = RightTab::Settings;
@@ -1482,6 +1620,56 @@ impl App {
     self.running_view_scroll.set(0);
     self.focus = Focus::List;
     self.right_tab = RightTab::Settings;
+  }
+
+  /// Open the `Ctrl+P` save-preset dialog for the focused model. Captures
+  /// the launch settings in view: a running model's live dispatched knobs +
+  /// advanced `--` tail (from the `status` row), else the open launch
+  /// picker's user knobs (an about-to-launch config staged in Settings),
+  /// else a freshly-built default picker. Auto / inherited markers ride
+  /// through untouched. The caller gates *when* this opens (running-row
+  /// only in the Models pane; always in the Settings pane).
+  pub fn open_save_preset_dialog(&mut self) {
+    let Some(path) = self.focused_path() else {
+      return;
+    };
+    let model_name = self
+      .display_label_for(&path)
+      .unwrap_or_else(|| crate::util::paths::path_basename(&path));
+
+    // Capture knobs + extras from whichever surface is in view.
+    let (knobs, extras) = if let Some(m) = self.focused_managed() {
+      // Running model: the live dispatched knobs and advanced `--` tail.
+      (m.knobs.clone(), m.extras.clone())
+    } else if let Some(p) = &self.launch_picker {
+      (
+        p.user_knobs.clone(),
+        p.extras
+          .iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect(),
+      )
+    } else if let Some(p) = self.build_default_picker() {
+      (
+        p.user_knobs.clone(),
+        p.extras
+          .iter()
+          .map(|s| s.to_string_lossy().into_owned())
+          .collect(),
+      )
+    } else {
+      return;
+    };
+
+    let (existing, arch_shadow) = self.existing_preset_names(&path);
+    self.save_preset_dialog = Some(crate::tui::save_preset_dialog::SavePresetDialog::open(
+      path,
+      model_name,
+      knobs,
+      extras,
+      existing,
+      arch_shadow,
+    ));
   }
 
   pub fn open_filter(&mut self) {
@@ -1885,6 +2073,7 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
     resolved_ctx: None,
     ctx_clamped: false,
     knobs: crate::config::TypedKnobs::default(),
+    extras: Vec::new(),
   })
 }
 
@@ -1957,6 +2146,17 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     .and_then(|p| p.get("knobs"))
     .and_then(|k| serde_json::from_value::<crate::config::TypedKnobs>(k.clone()).ok())
     .unwrap_or_default();
+  // The advanced `--` tail, so `Ctrl+P` save-from-running reproduces it.
+  let extras = row
+    .get("params")
+    .and_then(|p| p.get("extras"))
+    .and_then(Value::as_array)
+    .map(|a| {
+      a.iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect()
+    })
+    .unwrap_or_default();
   Some(ManagedRow {
     launch_id,
     path,
@@ -1968,6 +2168,7 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     resolved_ctx,
     ctx_clamped,
     knobs,
+    extras,
   })
 }
 
@@ -2075,8 +2276,8 @@ mod tests {
       .filter(|f| picker.field_visible(*f))
       .collect();
     assert!(
-      visible.len() == 2,
-      "lemonade picker is ctx + extras only, got {visible:?}"
+      visible.len() == 3,
+      "lemonade picker is preset + ctx + extras only, got {visible:?}"
     );
   }
 
@@ -2702,6 +2903,50 @@ mod tests {
     app.list_cursor = 3;
     let second = app.focused_managed().expect("focused managed at row 3");
     assert_eq!(second.launch_id, "L-41101");
+  }
+
+  #[test]
+  fn save_preset_from_running_launch_carries_dispatched_extras() {
+    // Regression: Ctrl+P on a running model must carry the advanced `--`
+    // tail (the live `status` `params.extras`) into the preset. It used to
+    // pass an empty list, dropping the advanced args off a running launch.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/qwen.gguf", "/m")];
+    let body = serde_json::json!({
+      "models": [{
+        "launch_id": "L1",
+        "id": { "path": "/m/qwen.gguf", "header_hash": "h" },
+        "port": 41100,
+        "state": { "state": "ready" },
+        "params": {
+          "model_path": "/m/qwen.gguf",
+          "extras": ["--override-kv", "tokenizer.ggml.add_bos=bool:false"],
+        },
+      }]
+    });
+    app.ingest_status(&body);
+    let want = vec![
+      "--override-kv".to_string(),
+      "tokenizer.ggml.add_bos=bool:false".to_string(),
+    ];
+    // Plumbed from IPC into the managed row...
+    let row = app
+      .managed
+      .iter()
+      .find(|m| m.launch_id == "L1")
+      .expect("managed row");
+    assert_eq!(row.extras, want, "extras parsed from status params");
+    // ...and captured by the save dialog when Ctrl+P fires on that row
+    // (ingest_status snaps the cursor onto the newly appeared launch).
+    app.open_save_preset_dialog();
+    let dialog = app
+      .save_preset_dialog
+      .as_ref()
+      .expect("save dialog opened on the running row");
+    assert_eq!(
+      dialog.extras, want,
+      "advanced -- tail carried into the preset"
+    );
   }
 
   #[test]

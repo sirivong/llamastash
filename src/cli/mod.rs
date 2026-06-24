@@ -129,11 +129,11 @@ fn persist_llama_server_override(cli: &Cli, config: &crate::config::Config) {
     log::warn!("--llama-server: no writable config path; skipping persist");
     return;
   };
-  let additions = serde_yaml::Value::Mapping({
-    let mut m = serde_yaml::Mapping::new();
+  let additions = yaml_serde::Value::Mapping({
+    let mut m = yaml_serde::Mapping::new();
     m.insert(
-      serde_yaml::Value::String("llama_server_path".into()),
-      serde_yaml::Value::String(resolved.display().to_string()),
+      yaml_serde::Value::String("llama_server_path".into()),
+      yaml_serde::Value::String(resolved.display().to_string()),
     );
     m
   });

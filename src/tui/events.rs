@@ -120,6 +120,22 @@ pub enum WriterCmd {
   FavoriteAdd(PathBuf),
   /// `favorite_remove` for the supplied model path.
   FavoriteRemove(PathBuf),
+  /// `presets_save` — write the captured launch settings to
+  /// `config.yaml` under `name` for `model_path` (`Ctrl+P`). `knobs`
+  /// carries ctx/reasoning folded in plus any Auto markers; `extras` is
+  /// the argv tail. The next `presets_all` refresh reflects it. Boxed
+  /// (like `StartModel`) so the large `TypedKnobs` doesn't bloat the
+  /// other tiny variants.
+  SavePreset(Box<SavePresetCmd>),
+}
+
+/// Payload for [`WriterCmd::SavePreset`].
+#[derive(Debug, Clone)]
+pub struct SavePresetCmd {
+  pub model_path: PathBuf,
+  pub name: String,
+  pub knobs: crate::config::TypedKnobs,
+  pub extras: Vec<String>,
 }
 
 /// One pump of input events. Returns `true` when the App is asking
@@ -173,7 +189,11 @@ fn handle_mouse(
   writer: Option<&mpsc::Sender<WriterCmd>>,
 ) {
   use crossterm::event::{MouseButton, MouseEventKind};
-  if app.hf_dialog.is_some() || app.confirm_dialog.is_some() || app.show_help {
+  if app.hf_dialog.is_some()
+    || app.confirm_dialog.is_some()
+    || app.save_preset_dialog.is_some()
+    || app.show_help
+  {
     return;
   }
   match m.kind {
@@ -294,6 +314,12 @@ fn handle_key(app: &mut App, key: KeyEvent, writer: Option<&mpsc::Sender<WriterC
     } else {
       app.confirm_dialog = None;
     }
+    return;
+  }
+  // Save-preset dialog steals input while open (text entry → overwrite
+  // confirm). Routed here, ahead of focus dispatch, like the HF dialog.
+  if app.save_preset_dialog.is_some() {
+    handle_save_preset_input(app, key, writer);
     return;
   }
   // An open Settings inline edit owns input. All keys route to the
@@ -440,6 +466,8 @@ fn open_focused_inline_edit(app: &mut App) {
       picker.extras_input.set_text(joined);
       picker.extras_input.enter_edit();
     }
+    // Filtered out by the `is_editable` guard above (Preset is cycle-only).
+    PickerField::Preset => {}
   }
 }
 
@@ -569,6 +597,8 @@ fn commit_inline_edit(app: &mut App) -> bool {
       }
     },
     PickerField::Extras => Ok(()),
+    // Preset is cycle-only — never opens an inline edit to commit.
+    PickerField::Preset => Ok(()),
   };
   match result {
     Ok(()) => {
@@ -890,6 +920,18 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     }
     Action::DeleteModel => apply_delete_model(app),
     Action::CancelDownload => apply_cancel_download(app),
+    Action::SavePreset => {
+      // Settings pane always saves (a running model's live knobs, or the
+      // about-to-launch form). The Models list only saves from a running
+      // row — an idle row there has no concrete settings to pin yet.
+      if app.focused_path().is_none() {
+        app.show_toast("no model focused — nothing to save");
+      } else if app.focus == Focus::List && app.focused_managed().is_none() {
+        app.show_toast("open Settings to save launch params, or pick a running model");
+      } else {
+        app.open_save_preset_dialog();
+      }
+    }
     Action::EnterEdit => {
       // Tab-aware:
       //  - Chat / Embed / Rerank: shift focus into the input buffer
@@ -1342,6 +1384,80 @@ fn hf_repo_dir_for_snapshot_path(
     return None;
   }
   Some(candidate)
+}
+
+/// Route a key to the open save-preset dialog. Name stage: typing edits
+/// the buffer, `Enter` saves (or steps to the confirm stage when the name
+/// already resolves — an overwrite or an arch shadow), `Esc` cancels.
+/// Confirm stage: `Enter`/`y` commits, `Esc`/`n` returns to the name input.
+fn handle_save_preset_input(
+  app: &mut App,
+  key: KeyEvent,
+  writer: Option<&mpsc::Sender<WriterCmd>>,
+) {
+  use crate::tui::input_field::InputOutcome;
+  use crate::tui::save_preset_dialog::SaveStage;
+  let Some(dialog) = app.save_preset_dialog.as_mut() else {
+    return;
+  };
+  match dialog.stage {
+    SaveStage::Name => {
+      // Esc cancels the whole dialog (ahead of the input's exit-edit).
+      if matches!(key.code, KeyCode::Esc) {
+        app.save_preset_dialog = None;
+        return;
+      }
+      match dialog.input.handle_key(key) {
+        InputOutcome::Submit => {
+          if dialog.name().is_empty() {
+            dialog.error = Some("name must not be empty".into());
+            return;
+          }
+          dialog.error = None;
+          if dialog.name_needs_confirm() {
+            dialog.stage = SaveStage::Confirm;
+            return;
+          }
+          // New name → fall through to commit (borrow released below).
+        }
+        InputOutcome::Handled => {
+          dialog.error = None;
+          return;
+        }
+        InputOutcome::PassThrough => return,
+      }
+    }
+    SaveStage::Confirm => match key.code {
+      KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {} // commit below
+      KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+        dialog.stage = SaveStage::Name;
+        return;
+      }
+      _ => return,
+    },
+  }
+  commit_save_preset(app, writer);
+}
+
+/// Dispatch the captured preset to `presets_save` and close the dialog.
+fn commit_save_preset(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) {
+  let Some(dialog) = app.save_preset_dialog.take() else {
+    return;
+  };
+  let name = dialog.name();
+  dispatch_writer(
+    app,
+    writer,
+    WriterCmd::SavePreset(Box::new(SavePresetCmd {
+      model_path: dialog.model_path,
+      name: name.clone(),
+      knobs: dialog.knobs,
+      extras: dialog.extras,
+    })),
+    format!("saved preset `{name}`"),
+    "save failed — writer offline",
+    "save unavailable — no daemon writer attached".into(),
+  );
 }
 
 /// Apply a confirmed [`ConfirmAction`] — dispatches the writer
@@ -1847,6 +1963,9 @@ pub enum RefreshTick {
   Status(Value),
   Favorites(Value),
   LastParams(Value),
+  /// Raw config `presets:` map (`presets_all`). The app resolves each
+  /// model's effective set client-side to seed the picker's preset cycle.
+  Presets(Value),
   /// `logs_tail` snapshot for `launch_id`. Triggered by the
   /// dedicated [`spawn_logs_poller`] task — keeps the per-tick
   /// poll cheap when the user moves between launches.
@@ -1890,6 +2009,9 @@ pub fn spawn_refresher(socket: PathBuf, tx: mpsc::Sender<Event>) {
           }
           if let Ok(body) = client.call("last_params_list", None).await {
             let _ = tx.send(Event::Refresh(RefreshTick::LastParams(body))).await;
+          }
+          if let Ok(body) = client.call("presets_all", None).await {
+            let _ = tx.send(Event::Refresh(RefreshTick::Presets(body))).await;
           }
           tokio::time::sleep(REFRESH_INTERVAL).await;
         }
@@ -2074,6 +2196,18 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
     }
     WriterCmd::FavoriteAdd(p) => ("favorite_add", json!({ "model_path": p })),
     WriterCmd::FavoriteRemove(p) => ("favorite_remove", json!({ "model_path": p })),
+    WriterCmd::SavePreset(cmd) => (
+      "presets_save",
+      // `knobs` already folds ctx/reasoning in; the daemon stores them
+      // as-is (it only folds the separate ctx/reasoning params, which we
+      // omit here). Auto markers survive the round-trip.
+      json!({
+        "model_path": cmd.model_path,
+        "name": cmd.name,
+        "knobs": cmd.knobs,
+        "extras": cmd.extras,
+      }),
+    ),
   }
 }
 
@@ -2348,6 +2482,10 @@ fn apply_refresh(app: &mut App, tick: RefreshTick) {
     RefreshTick::LastParams(body) => {
       mark_daemon_connected(app);
       app.ingest_last_params(&body);
+    }
+    RefreshTick::Presets(body) => {
+      mark_daemon_connected(app);
+      app.ingest_presets(&body);
     }
     RefreshTick::Logs { launch_id, lines } => {
       mark_daemon_connected(app);
@@ -2785,6 +2923,55 @@ mod tests {
     assert!(
       toast.contains("stop the launch"),
       "expected stop-first toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn ctrl_p_on_idle_models_row_toasts_not_opens() {
+    // Models pane (Focus::List) on an idle row has no live settings to
+    // capture — Ctrl+P toasts, pointing the user at the Settings pane.
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    assert_eq!(app.focus, Focus::List);
+    pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(
+      app.save_preset_dialog.is_none(),
+      "idle Models row must not open the save dialog"
+    );
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("Settings") || toast.contains("running model"),
+      "expected a guidance toast, got `{toast}`"
+    );
+  }
+
+  #[test]
+  fn ctrl_p_on_running_models_row_opens_save_dialog() {
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(
+      app.save_preset_dialog.is_some(),
+      "running Models row opens the save dialog on Ctrl+P"
+    );
+  }
+
+  #[test]
+  fn ctrl_p_in_settings_pane_opens_for_idle_model() {
+    // Settings pane always allows a save — an idle model's about-to-launch
+    // form is captured via the default picker.
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.go_top();
+    app.focus = Focus::RightPane;
+    app.right_tab = crate::tui::tabs::RightTab::Settings;
+    pump_input(&mut app, key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert!(
+      app.save_preset_dialog.is_some(),
+      "Settings pane opens the save dialog even for an idle model"
     );
   }
 
@@ -3950,6 +4137,7 @@ mod tests {
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
 
+    // The cursor opens on the Preset row, so the first ↓ moves onto Ctx.
     pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.focus, Focus::RightPane, "↓ must not leave the pane");
     let field = app
@@ -3959,13 +4147,13 @@ mod tests {
       .expect("↓ in Settings should materialise the picker form");
     assert_eq!(
       field,
-      PickerField::Knob(crate::launch::flag_aliases::KnobField::Reasoning)
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx)
     );
 
     pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(
       app.launch_picker.as_ref().unwrap().field,
-      PickerField::Knob(crate::launch::flag_aliases::KnobField::NGpuLayers)
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Reasoning)
     );
   }
 
@@ -3980,9 +4168,8 @@ mod tests {
 
     pump_input(&mut app, key(KeyCode::Up, KeyModifiers::NONE));
     assert_eq!(app.focus, Focus::RightPane);
-    // A plain GGUF row hides the Backend chooser (Auto == llama.cpp, no
-    // cross-backend choice), so Ctx is the first row and Up from it wraps to
-    // the last row (Extras).
+    // The cursor opens on the Preset row (the form's lead), so Up wraps
+    // backward to the last row (Extras).
     assert_eq!(
       app.launch_picker.as_ref().expect("picker").field,
       PickerField::Extras
@@ -4001,20 +4188,20 @@ mod tests {
     app.focus = Focus::RightPane;
     app.right_tab = RightTab::Settings;
 
-    // Auto-stages the picker on first key; cursor lands on Ctx. The
-    // first → stop in the ring is Auto (Inherited → Auto → presets…).
-    pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
+    // Auto-stages the picker on first key; the cursor opens on the Preset
+    // row, so Down moves onto Ctx. Then →/← cycle Ctx's value.
+    pump_input(&mut app, key(KeyCode::Down, KeyModifiers::NONE));
     let p = app.launch_picker.as_ref().expect("picker auto-staged");
     assert_eq!(
       p.field,
       PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx)
     );
+    pump_input(&mut app, key(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(
-      p.user_knobs.ctx,
+      app.launch_picker.as_ref().unwrap().user_knobs.ctx,
       Some(KnobValue::Auto),
       "→ advances Ctx to the Auto stop"
     );
-
     pump_input(&mut app, key(KeyCode::Left, KeyModifiers::NONE));
     assert_eq!(
       app.launch_picker.as_ref().unwrap().user_knobs.ctx,
@@ -4114,9 +4301,12 @@ mod tests {
     pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(
       app.launch_picker.as_ref().expect("picker").field,
-      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx),
-      "default focus lands on the ctx row"
+      PickerField::Preset,
+      "default focus leads on the preset row"
     );
+    // Move down to the ctx row to exercise its inline edit.
+    app.launch_picker.as_mut().unwrap().field =
+      PickerField::Knob(crate::launch::flag_aliases::KnobField::Ctx);
     // `e` opens inline edit; type a fresh value; Enter commits.
     pump_input(&mut app, key(KeyCode::Char('e'), KeyModifiers::NONE));
     {

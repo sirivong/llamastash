@@ -30,7 +30,7 @@ const PUBLISHER_ALLOWLIST_YAML: &str = include_str!("../data/gguf-publisher-allo
 #[test]
 fn task_hints_yaml_parses_with_expected_shape() {
   let hints: TaskHints =
-    serde_yaml::from_str(TASK_HINTS_YAML).expect("data/task-hints.yaml must be well-formed YAML");
+    yaml_serde::from_str(TASK_HINTS_YAML).expect("data/task-hints.yaml must be well-formed YAML");
   assert!(
     !hints.prefixes.is_empty(),
     "data/task-hints.yaml has no prefixes — at least one curated entry is required"
@@ -64,7 +64,7 @@ fn task_hints_yaml_parses_with_expected_shape() {
 
 #[test]
 fn gguf_publisher_allowlist_yaml_parses() {
-  let list: PublisherAllowlist = serde_yaml::from_str(PUBLISHER_ALLOWLIST_YAML)
+  let list: PublisherAllowlist = yaml_serde::from_str(PUBLISHER_ALLOWLIST_YAML)
     .expect("data/gguf-publisher-allowlist.yaml must be well-formed YAML");
   assert!(
     !list.allowlist.is_empty(),

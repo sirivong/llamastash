@@ -264,6 +264,12 @@ pub enum Action {
   /// queue — a second `Ctrl+X` cancels whichever pull was promoted
   /// next. No-op (toast) when no pull is active.
   CancelDownload,
+  /// `Ctrl+P` — save the launch settings in view to `config.yaml` as a
+  /// named preset, opening the name-entry dialog. Always available in the
+  /// Settings pane (the about-to-launch form, or a running model's live
+  /// knobs); in the Models list it only fires on a running row (idle rows
+  /// toast, since there's no concrete config to capture there yet).
+  SavePreset,
   /// Jump focus to the Logs tab in the right pane. No-op (with a
   /// toast) when the focused model isn't running, since Logs is
   /// only reachable for live launches.
@@ -510,6 +516,11 @@ fn build_default_bindings() -> Vec<Binding> {
     action: Action::CancelDownload, scopes: FocusSet::NAV,
     hint: "cancel", description: Some("cancel download"),
     chords: [(KeyCode::Char('x'), KeyModifiers::CONTROL, crate::ctrl_label!("x"), CAT_GLOBAL)],
+  });
+  v.extend_from_slice(&binds! {
+    action: Action::SavePreset, scopes: FocusSet::NAV,
+    hint: "save preset", description: Some("save settings as a preset"),
+    chords: [(KeyCode::Char('p'), KeyModifiers::CONTROL, crate::ctrl_label!("p"), CAT_SETTINGS)],
   });
   // ─── Motion (arrows + vi aliases). ↑/↓ extend into HF_DIALOG ──
   // for row selection; k/j stay NAV-only. Two `binds!` calls per
@@ -1064,6 +1075,7 @@ impl Action {
     ("cycle_theme", Action::CycleTheme),
     ("cycle_theme_prev", Action::CycleThemePrev),
     ("open_hf_dialog", Action::OpenHfDialog),
+    ("save_preset", Action::SavePreset),
     ("focus_list", Action::FocusList),
     ("next_focus", Action::NextFocus),
     ("prev_focus", Action::PrevFocus),

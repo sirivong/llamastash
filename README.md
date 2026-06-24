@@ -171,7 +171,7 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 - [Intelligent context auto-fit](FEATURES.md#intelligent-context-auto-fit) — when `ctx` is unset, llamastash picks the largest context that fits free VRAM (or RAM, CPU-only) from the GGUF attention geometry. Sidesteps llama.cpp `--fit`'s 4096 collapse on Linux 7+ iGPUs (AMD Strix Halo) where unified-memory free space is mis-reported.
 - [Typed launch-knob editor](FEATURES.md#typed-launch-knob-editor) with `(source)` chips and a layered preset → last-params → arch-defaults → built-ins resolver.
 - [Multi-GPU device selection](FEATURES.md#typed-launch-knob-editor) — pin a model to one card (`--device`) instead of letting llama.cpp split it across every GPU; the picker lists exactly what `llama-server --list-devices` reports.
-- [Named presets, favorites, last-params recall](FEATURES.md#named-presets-favorites-last-params-recall).
+- [Named presets, favorites, last-params recall](FEATURES.md#named-presets-favorites-last-params-recall) — presets live in `config.yaml` (per-model or per-arch), edited from the CLI, the TUI `Ctrl+P` save dialog, or by hand; a preset cycle row in the Settings form picks one in a keystroke.
 
 ### [A TUI that doesn't get in your way](FEATURES.md#a-tui-that-doesnt-get-in-your-way)
 

@@ -122,6 +122,8 @@ struct DaemonHandle {
   socket: PathBuf,
   state: PathBuf,
   model_dir: PathBuf,
+  /// `config.yaml` the daemon's preset store writes through to.
+  config_path: PathBuf,
 }
 
 impl DaemonHandle {
@@ -218,6 +220,7 @@ async fn spawn_daemon_with_model(label: &str, model_name: &str, arch: &str) -> D
   let model_dir = unique_temp(&format!("{label}-models"));
   std::fs::write(model_dir.join(model_name), build_minimal_gguf(arch))
     .expect("write fixture model");
+  let config_path = state.join("config.yaml");
   let opts = DaemonOptions {
     binary: Some(fake_binary()),
     port_range: allocate_port_range(),
@@ -225,6 +228,7 @@ async fn spawn_daemon_with_model(label: &str, model_name: &str, arch: &str) -> D
       path: model_dir.clone(),
       source: ModelSource::UserPath,
     }]),
+    config_path: Some(config_path.clone()),
     ..DaemonOptions::rooted_at(state.clone())
   };
   let socket = opts.state_dir.clone();
@@ -236,6 +240,7 @@ async fn spawn_daemon_with_model(label: &str, model_name: &str, arch: &str) -> D
     socket,
     state,
     model_dir,
+    config_path,
   }
 }
 
@@ -492,7 +497,6 @@ async fn presets_save_list_delete_round_trip() {
       action: PresetsAction::Save {
         name: "long-ctx".into(),
         ctx: Some(32768),
-        port: None,
         reasoning: Some(ReasoningFlag::On),
         mode: Some(CliLaunchMode::Chat),
         extra: vec![OsString::from("--threads"), OsString::from("4")],
@@ -503,15 +507,13 @@ async fn presets_save_list_delete_round_trip() {
   .await;
   assert_eq!(code, exit_codes::SUCCESS);
 
-  // confirm via state.json (not stdout)
-  let s = state_store::load(&h.state).expect("load state");
-  let presets = s.presets;
-  assert!(
-    presets.iter().any(|e| e
-      .presets
-      .iter()
-      .any(|p| p.name == "long-ctx" && p.params.ctx == Some(32768))),
-    "preset should round-trip into state.json: {presets:?}"
+  // confirm via config.yaml (presets live there now, not state.json)
+  let cfg = llamastash::config::load_config_from_path(&h.config_path).config;
+  assert_eq!(
+    cfg.presets["m.gguf"].entries["long-ctx"].knobs.ctx,
+    Some(llamastash::config::KnobValue::Set(32768)),
+    "preset should round-trip into config.yaml: {:?}",
+    cfg.presets
   );
 
   // list
@@ -541,12 +543,11 @@ async fn presets_save_list_delete_round_trip() {
   .await;
   assert_eq!(code, exit_codes::SUCCESS);
 
-  let s = state_store::load(&h.state).expect("load state");
+  let cfg = llamastash::config::load_config_from_path(&h.config_path).config;
   assert!(
-    s.presets
-      .iter()
-      .all(|e| e.presets.iter().all(|p| p.name != "long-ctx")),
-    "preset should be gone after delete"
+    !cfg.presets.contains_key("m.gguf"),
+    "model key pruned from config.yaml after deleting its only preset: {:?}",
+    cfg.presets
   );
 
   // delete again → USAGE.
@@ -642,6 +643,7 @@ async fn spawn_daemon_with_model_wide_range(
   let model_dir = unique_temp(&format!("{label}-models"));
   std::fs::write(model_dir.join(model_name), build_minimal_gguf(arch))
     .expect("write fixture model");
+  let config_path = state.join("config.yaml");
   let opts = DaemonOptions {
     binary: Some(fake_binary()),
     port_range: allocate_port_range_pair(),
@@ -649,6 +651,7 @@ async fn spawn_daemon_with_model_wide_range(
       path: model_dir.clone(),
       source: ModelSource::UserPath,
     }]),
+    config_path: Some(config_path.clone()),
     ..DaemonOptions::rooted_at(state.clone())
   };
   let socket = opts.state_dir.clone();
@@ -660,6 +663,7 @@ async fn spawn_daemon_with_model_wide_range(
     socket,
     state,
     model_dir,
+    config_path,
   }
 }
 
@@ -676,7 +680,6 @@ async fn presets_list_json_emits_array_for_agents() {
       action: PresetsAction::Save {
         name: "coding".into(),
         ctx: Some(32768),
-        port: None,
         reasoning: Some(ReasoningFlag::On),
         mode: Some(CliLaunchMode::Chat),
         extra: vec![],
@@ -701,15 +704,13 @@ async fn presets_list_json_emits_array_for_agents() {
   .await;
   assert_eq!(code, exit_codes::SUCCESS);
 
-  // Also assert the preset reached state.json with the JSON flag
-  // off so we know the test daemon has anything to render.
-  let s = state_store::load(&h.state).expect("load state");
+  // Also assert the preset reached config.yaml so we know the test
+  // daemon has anything to render.
+  let cfg = llamastash::config::load_config_from_path(&h.config_path).config;
   assert!(
-    s.presets
-      .iter()
-      .any(|e| e.presets.iter().any(|p| p.name == "coding")),
-    "preset should round-trip into state.json: {:?}",
-    s.presets,
+    cfg.presets["m.gguf"].entries.contains_key("coding"),
+    "preset should round-trip into config.yaml: {:?}",
+    cfg.presets,
   );
 
   h.shutdown().await;
@@ -728,7 +729,6 @@ async fn start_preset_chain_seeds_supervisor_with_saved_params() {
       action: PresetsAction::Save {
         name: "coding".into(),
         ctx: Some(16384),
-        port: None,
         reasoning: Some(ReasoningFlag::On),
         mode: Some(CliLaunchMode::Chat),
         extra: vec![OsString::from("--threads"), OsString::from("8")],

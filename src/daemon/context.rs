@@ -66,10 +66,15 @@ pub struct MethodContext {
   /// `None` value means no sampler was attached (catalog-only tests
   /// stay lightweight by leaving it off).
   pub host_metrics: Option<Arc<RwLock<HostMetricsSnapshot>>>,
-  /// Persisted favorites / presets / last_params / running snapshots.
-  /// `start_model`, `presets_*`, and `favorite_*` mutate it and
-  /// flush to `state.json` after each change.
+  /// Persisted favorites / last_params / running snapshots.
+  /// `start_model` and `favorite_*` mutate it and flush to `state.json`
+  /// after each change.
   pub state: PersistedState,
+  /// Live config-preset store (loaded from `Config.presets` at start,
+  /// write-through to `config.yaml`). The single read/write surface the
+  /// `presets_*` handlers and the `status` preset hint use. Empty +
+  /// write-disabled in catalog-only tests.
+  pub presets: crate::daemon::preset_store::ConfigPresetStore,
   /// Inputs the supervisor needs at launch time — binary path, port
   /// range, log directory, probe tuning. Optional because catalog-only
   /// IPC tests don't need to launch anything.
@@ -219,6 +224,7 @@ impl MethodContext {
       gpu_live: None,
       host_metrics: None,
       state: PersistedState::ephemeral(),
+      presets: crate::daemon::preset_store::ConfigPresetStore::empty(),
       launch: None,
       external: Arc::new(RwLock::new(Vec::new())),
       proxy_status: None,
@@ -263,6 +269,12 @@ impl MethodContext {
   /// Builder helper: attach the persisted state-store handle.
   pub fn with_state(mut self, state: PersistedState) -> Self {
     self.state = state;
+    self
+  }
+
+  /// Builder helper: attach the live config-preset store.
+  pub fn with_presets(mut self, presets: crate::daemon::preset_store::ConfigPresetStore) -> Self {
+    self.presets = presets;
     self
   }
 

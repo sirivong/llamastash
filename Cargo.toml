@@ -132,7 +132,6 @@ hf-hub = { version = "0.5", default-features = false, features = [
 ] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
 simplelog = { version = "0.12", default-features = false }
 strum = { version = "0.28", features = ["derive"] }
 # v2 init wizard (Unit 10) + 2026-05-19 interactive wizard work.
@@ -207,6 +206,20 @@ hyper = { version = "1", default-features = false, features = [
 # `tokio::net::TcpStream`.
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
+# YAML stack — one family for the whole config surface. `yaml_serde` is
+# the maintained serde_yaml fork (The YAML Organization, repo yaml/yaml-serde)
+# and is our serde (de)serializer + `Value` type for all config reads and
+# struct round-trips; it replaces the archived `serde_yaml`. `yamlpath`
+# (route to a node) + `yamlpatch` (surgically patch only that node) give
+# comment-/format-preserving writes — every config.yaml mutation goes through
+# `config::yaml_edit` on top of these, so hand-written comments survive a
+# save. All three are MIT (yamlpath/yamlpatch from zizmorcore/zizmor,
+# battle-tested inside the zizmor linter) and already share `yaml_serde` as
+# their value type. yamlpath/yamlpatch pinned to exact patch versions (they
+# release in lockstep).
+yamlpath = "=1.26.1"
+yamlpatch = "=1.26.1"
+yaml_serde = "=0.10.4"
 
 # Windows-only Win32 surface for the Unit 6 process-supervision backend
 # (`src/util/process_control.rs`): Job Objects for kill-on-job-close

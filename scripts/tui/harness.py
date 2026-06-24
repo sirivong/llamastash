@@ -73,6 +73,7 @@ KEYS = {
     "ctrl-c": "\x03",
     "ctrl-d": "\x04",
     "ctrl-h": "\x08",
+    "ctrl-p": "\x10",
     "ctrl-r": "\x12",
 }
 

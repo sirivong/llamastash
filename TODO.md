@@ -166,13 +166,19 @@ places.
 ## R5 (v0.0.5 checklist)
 
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
+- [x] ~~Fix "unable to follow symlinks" issue~~ — config writes now follow a symlinked `config.yaml` to its canonical target (the link is preserved) instead of refusing with `TargetIsSymlink`. `config::writer::preflight` resolves the link chain and the security check runs on the resolved parent; `state.json` keeps its non-following behavior. (the presets writer, init wizard, and `daemon` proxy-key/server-path persistence all go through this)
+- [x] help legends as new row with 1 column
+- [ ] a keybinding to switch left/right pane ratio (configurable in config.yaml)
+- [x] ~~Presets feature from PR #18~~ — shipped. Plan: `docs/plans/2026-06-22-001-feat-config-presets-per-model-plan.md` (config.yaml as the writable source of truth, `yamlpath`+`yamlpatch` comment-safe writes, per-model/arch keys, in-memory store + write-through, one-time `state.json`→config migration, TUI preset cycle row + `Ctrl+P` save). Remaining follow-ups below.
+  - [x] ~~Deferred follow-ups (plan Unit 8): move config **reads** off archived `serde_yaml` onto a maintained parser; move the init wizard's config **writes** onto `yamlpatch` so wizard runs stop stripping comments.~~ — done. Reads consolidated on `yaml_serde` (the maintained serde_yaml fork, already pulled by `yamlpatch`; `serde_yaml` dropped from the dep tree). All `config.yaml` writes now funnel through one comment-safe primitive `config::yaml_edit` (the presets writer + the init/cli `merge_and_write`), so wizard/cli runs preserve hand-written comments.
 - [x] Architecture/UX improvements
-  - [ ] Top hints to non-bold, audit other bolds
+  - [x] Top hints to non-bold, audit other bolds
   - [x] ~~**Unify hand-rolled pane `Block` constructions onto a padding-aware `panel_block`** (U7 follow-up).~~ — added a `Palette::panel()` builder (`src/theme/palette.rs`: optional title/footer `Line`, passable border `Color`, optional `Padding`) that owns the `Borders::ALL` + glyph border-set boilerplate, and migrated all 7 open-coded sites (confirm/help overlays, logo, list/right/render panes) onto it. The 6 dashboard panes stay byte-identical (golden unchanged); help overlay drops the `j/k:scroll` chip + tightens padding, and the HF dialog gets a shorter title with its hints moved into the header.
-  - [ ] add scroll: global hints. audit existing and remove any that are redundant with the top hints  
-  - [ ] right pane header to mute color when inactive       
-  - [ ] hf header hints missing. 
-  - [ ] add a golden test for HF pages, logs/chat page and help page    
+  - [x] add scroll: global hints. audit existing and remove any that are redundant with the top hints
+  - [x] right pane header to mute color when inactive
+  - [x] hf header hints missing.
+  - [x] add a golden test for HF pages, logs/chat page and help page
+  - [x] fix casts so that top bar help hint are not bold
 - [x] why not pick last available upstream? `• [snapshot_stale] benchmark snapshot was bundled 21 days ago — the daily CI refresh has not landed; recommender picks may be stale → fix with: (no action — daily CI refresh will heal automatically; re-run `llamastash doctor` later)`
 - [x] TUI: for multi gpu, dont show a row for each. instead show combined usage and hottest temp in a single gpu row. when multi gpu, show GPU\* with legend entry in help
 - [x] Validate `gpu::is_cross_probe_duplicate` name-matching on more GPUs — closed: `normalize_card_name` now strips a leading vendor token (rocm-smi `Radeon …` vs Vulkan `AMD Radeon …`), and the pure `resolve_devices` core is table-tested across every backend combo (`src/gpu/mod.rs` tests). The PCI-id path (vendor:device parsing) was the actual Strix Halo dedup miss and is fixed + regression-tested.
@@ -227,6 +233,7 @@ places.
 
 ### Low priority
 
+- [ ] **Remove the one-time `state.json`→`config.yaml` presets migration** — the marked `// ONE-TIME MIGRATION` module (`src/daemon/preset_migration.rs`) + its call in `daemon::run_foreground` + the now-dead `state.json` `presets` field (`DaemonState.presets` / `PresetsEntry`) — in a later version (target `v0.2.0`) once it has shipped a release cycle. Source: plan Unit 3.
 - [ ] Benchmark against Ollama, LMStudio and other popular options.
   - [ ] AMD GPU : Linux
   - [ ] AMD GPU: Windows

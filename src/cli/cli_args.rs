@@ -526,8 +526,6 @@ pub enum PresetsAction {
     name: String,
     #[arg(long, value_name = "TOKENS")]
     ctx: Option<u32>,
-    #[arg(long, value_name = "PORT")]
-    port: Option<u16>,
     #[arg(long, value_enum)]
     reasoning: Option<ReasoningFlag>,
     #[arg(long, value_enum)]
@@ -2131,27 +2129,34 @@ mod tests {
   }
 
   #[test]
-  fn presets_save_accepts_port() {
-    let cli = parse(&[
-      "presets",
-      "qwen-coder",
-      "save",
-      "pinned",
-      "--ctx",
-      "32768",
-      "--port",
-      "41150",
-    ]);
+  fn presets_save_parses_ctx() {
+    let cli = parse(&["presets", "qwen-coder", "save", "pinned", "--ctx", "32768"]);
     match cli.command {
       Some(Command::Presets(args)) => match args.action {
-        PresetsAction::Save { port, ctx, .. } => {
-          assert_eq!(port, Some(41150));
-          assert_eq!(ctx, Some(32_768));
-        }
+        PresetsAction::Save { ctx, .. } => assert_eq!(ctx, Some(32_768)),
         other => panic!("expected Save, got {other:?}"),
       },
       other => panic!("expected Presets, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn presets_save_rejects_port() {
+    // Config presets carry no port (per-launch, auto-assigned), so the
+    // flag was removed — clap must reject it now.
+    let result = Cli::try_parse_from([
+      "llamastash",
+      "presets",
+      "qwen-coder",
+      "save",
+      "pinned",
+      "--port",
+      "41150",
+    ]);
+    assert!(
+      result.is_err(),
+      "--port must no longer parse on presets save"
+    );
   }
 
   #[test]
