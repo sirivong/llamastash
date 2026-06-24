@@ -92,7 +92,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ inputs.release-tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.template-ref }}
 
@@ -193,7 +193,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       RELEASE_TAG: ${{ inputs.release-tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.template-ref }}
 
@@ -324,7 +324,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.release-tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.template-ref }}
 
