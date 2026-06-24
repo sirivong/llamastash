@@ -355,7 +355,7 @@ llamastash presets <ref> show <NAME>
 
 Named launch presets for a model. `save` is create-or-update (the response reports `replaced: <old-params>` so callers can audit). `list` shows the model's **effective** set; each row carries `source: "config"` and `is_default`. Apply one at launch with `llamastash start <ref> --preset <NAME>`.
 
-Presets live in `config.yaml` under a `presets:` key, the single writable source. `save` / `delete` write there comment-safely (only the touched entry changes; every other comment and bit of formatting is preserved). On first run after upgrading, any presets in `state.json` are migrated into `config.yaml` once, then cleared.
+Presets live in `config.yaml` under a `presets:` key, the single writable source. `save` / `delete` write there comment-safely. On first run after upgrading, any presets in `state.json` are migrated into `config.yaml` once, then cleared.
 
 A `presets:` key is classified per-resolution against your discovered models: a key that names a model (by file basename, or full path) is **per-model**; otherwise it is read as a GGUF `general.architecture` id and applies to **every model of that arch**. A model's effective set is its per-model entries ∪ its arch entries; the per-model entry wins on a name collision. The CLI writes per-model keys only — arch presets are hand-authored. A `default:` under a key names the preset the TUI cycle opens on (hand-edited only; the CLI never auto-applies it — a plain `start` with no `--preset` launches pure auto-fit defaults). Presets carry no `port` (it is per-launch, auto-assigned). Changes the CLI/TUI make are live immediately; hand-edits to `config.yaml` need a `llamastash daemon restart` to be picked up. See `config.example.yaml` for the full shape.
 
