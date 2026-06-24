@@ -15,7 +15,7 @@ use crate::launch::mode::LaunchMode;
 use crate::theme::{CustomThemeConfig, ThemeName};
 use crate::util::paths::user_config_file;
 
-/// Hard cap on config-file size. `serde_yaml` 0.9 expands anchors and aliases
+/// Hard cap on config-file size. The YAML parser expands anchors and aliases
 /// without depth limits — a hostile file could mushroom in memory. 1 MiB is
 /// far more than any plausible hand-written config and small enough that even
 /// pathological YAML can't OOM the process.
@@ -448,7 +448,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for KnobValue<T> {
   fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
     // Untagged probe: a map carrying an `auto` key is the sentinel;
     // anything else is a bare scalar value. Self-describing formats
-    // (serde_json, serde_yaml) buffer and retry, so this is
+    // (serde_json, yaml_serde) buffer and retry, so this is
     // format-agnostic. Sentinel is tried first; no scalar knob value
     // is a map, so it never shadows a legitimate `Set`.
     #[derive(Deserialize)]
@@ -936,7 +936,7 @@ pub fn config_path(cli_override: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 fn parse_config(contents: &str, path: &Path) -> LoadedConfig {
-  match serde_yaml::from_str::<Config>(contents) {
+  match yaml_serde::from_str::<Config>(contents) {
     Ok(config) => LoadedConfig {
       config,
       warning: None,
@@ -961,7 +961,7 @@ fn parse_config(contents: &str, path: &Path) -> LoadedConfig {
 /// 1. `fs::metadata` rejects anything that isn't a regular file — a config
 ///    path pointed at a FIFO or `/dev/urandom` would otherwise hang the main
 ///    thread.
-/// 2. A 1 MiB size cap (`MAX_CONFIG_BYTES`) prevents `serde_yaml`'s
+/// 2. A 1 MiB size cap (`MAX_CONFIG_BYTES`) prevents `yaml_serde`'s
 ///    unbounded anchor/alias expansion from being weaponised by a hostile
 ///    config file.
 pub fn load_config_from_path(path: &Path) -> LoadedConfig {
@@ -1076,7 +1076,7 @@ mod tests {
     // The serde-flatten + KnobValue (untagged) combination is a known
     // footgun; pin that ctx/reasoning/knobs flatten flat, integers stay
     // integers, the Auto sentinel round-trips, and `mode` stays a sibling.
-    let body: PresetBody = serde_yaml::from_str(
+    let body: PresetBody = yaml_serde::from_str(
       "ctx: 65536\nreasoning: true\nmode: embedding\nflash_attn: true\nn_gpu_layers: { auto: true }\nthreads: 8\nextras: [--rope-freq-base, \"10000\"]\n",
     )
     .unwrap();
@@ -1135,7 +1135,7 @@ presets:
     entries:
       balanced: { ctx: 16384 }
 ";
-    let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+    let cfg: Config = yaml_serde::from_str(yaml).unwrap();
     let block = cfg.presets.get("qwen-coder").unwrap();
     assert_eq!(block.default.as_deref(), Some("long-ctx"));
     assert_eq!(block.entries.len(), 2);
@@ -1152,7 +1152,7 @@ presets:
 
   #[test]
   fn config_without_presets_key_defaults_to_empty() {
-    let cfg: Config = serde_yaml::from_str("theme: latte\n").unwrap();
+    let cfg: Config = yaml_serde::from_str("theme: latte\n").unwrap();
     assert!(cfg.presets.is_empty());
   }
 
@@ -1277,8 +1277,8 @@ presets:
     };
     let json = serde_json::to_string(&knobs).unwrap();
     assert_eq!(serde_json::from_str::<TypedKnobs>(&json).unwrap(), knobs);
-    let yaml = serde_yaml::to_string(&knobs).unwrap();
-    assert_eq!(serde_yaml::from_str::<TypedKnobs>(&yaml).unwrap(), knobs);
+    let yaml = yaml_serde::to_string(&knobs).unwrap();
+    assert_eq!(yaml_serde::from_str::<TypedKnobs>(&yaml).unwrap(), knobs);
   }
 
   #[test]

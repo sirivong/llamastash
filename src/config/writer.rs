@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_yaml::Value;
+use yaml_serde::Value;
 
 pub use crate::util::config_patch::{DiffEntry, DiffKind};
 
@@ -112,9 +112,9 @@ fn walk_diff(prefix: &str, before: &Value, after: &Value, out: &mut Vec<DiffEntr
 }
 
 fn serialise_inline(v: &Value) -> String {
-  // `serde_yaml`'s flow style produces a one-liner suitable for inline
+  // `yaml_serde`'s flow style produces a one-liner suitable for inline
   // diff rendering. Falls back to the default block style on error.
-  serde_yaml::to_string(v)
+  yaml_serde::to_string(v)
     .unwrap_or_default()
     .trim()
     .to_string()
@@ -161,7 +161,7 @@ pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, Wr
   let current = read_or_default(path)?;
   let merged = merge(current.clone(), additions);
   let diff_rows = diff(&current, &merged);
-  let body = serde_yaml::to_string(&merged).map_err(|e| WriteError::Serialise(e.to_string()))?;
+  let body = yaml_serde::to_string(&merged).map_err(|e| WriteError::Serialise(e.to_string()))?;
   if let Some(parent) = path.parent() {
     std::fs::create_dir_all(parent).map_err(|e| WriteError::Io {
       path: parent.to_path_buf(),
@@ -195,13 +195,13 @@ pub fn merge_and_write(path: &Path, additions: Value) -> Result<WriteOutcome, Wr
 /// committing to disk.
 pub fn read_or_default(path: &Path) -> Result<Value, WriteError> {
   match std::fs::read_to_string(path) {
-    Ok(s) if s.trim().is_empty() => Ok(Value::Mapping(serde_yaml::Mapping::new())),
-    Ok(s) => serde_yaml::from_str(&s).map_err(|e| WriteError::ParseCurrent {
+    Ok(s) if s.trim().is_empty() => Ok(Value::Mapping(yaml_serde::Mapping::new())),
+    Ok(s) => yaml_serde::from_str(&s).map_err(|e| WriteError::ParseCurrent {
       path: path.to_path_buf(),
       error: e.to_string(),
     }),
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      Ok(Value::Mapping(serde_yaml::Mapping::new()))
+      Ok(Value::Mapping(yaml_serde::Mapping::new()))
     }
     Err(e) => Err(WriteError::Io {
       path: path.to_path_buf(),
@@ -220,7 +220,7 @@ mod tests {
   }
 
   fn yaml(s: &str) -> Value {
-    serde_yaml::from_str(s).expect("yaml fixture")
+    yaml_serde::from_str(s).expect("yaml fixture")
   }
 
   #[test]
@@ -243,7 +243,7 @@ arch_defaults:
 ",
     );
     let out = merge(cur, add);
-    let s = serde_yaml::to_string(&out).unwrap();
+    let s = yaml_serde::to_string(&out).unwrap();
     assert!(s.contains("theme: latte"), "untouched key survives");
     assert!(s.contains("start: 50000"), "leaf value replaced");
     assert!(
@@ -275,7 +275,7 @@ arch_defaults:
 ",
     );
     let out = merge(cur, add);
-    let s = serde_yaml::to_string(&out).unwrap();
+    let s = yaml_serde::to_string(&out).unwrap();
     assert!(
       s.contains("parallel: 8"),
       "user key under managed block survives"

@@ -329,7 +329,7 @@ base: latte
 accent: '#FF00AA'
 bg: '#101020'
 ";
-    let cfg: CustomThemeConfig = serde_yaml::from_str(yaml).expect("yaml parses");
+    let cfg: CustomThemeConfig = yaml_serde::from_str(yaml).expect("yaml parses");
     assert_eq!(cfg.base, Some(ThemeName::Latte));
     assert_eq!(cfg.accent.as_deref(), Some("#FF00AA"));
     assert_eq!(cfg.bg.as_deref(), Some("#101020"));
@@ -339,7 +339,7 @@ bg: '#101020'
   #[test]
   fn yaml_unknown_field_is_rejected() {
     let yaml = "made_up_slot: red\n";
-    let result: Result<CustomThemeConfig, _> = serde_yaml::from_str(yaml);
+    let result: Result<CustomThemeConfig, _> = yaml_serde::from_str(yaml);
     assert!(
       result.is_err(),
       "deny_unknown_fields should reject unrecognised keys: {result:?}"

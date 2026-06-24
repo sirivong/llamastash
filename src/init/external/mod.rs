@@ -29,7 +29,7 @@ use crate::util::config_patch::{redact_diff, render_human, RedactedDiffEntry};
 /// Serialisation format the patcher's target file uses on disk. We
 /// always model the in-memory additions as `serde_json::Value`
 /// (JSON is the lowest common denominator); the YAML variant goes
-/// through `serde_yaml::to_string` at write time. Reading the
+/// through `yaml_serde::to_string` at write time. Reading the
 /// current file does the reverse for YAML.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {

@@ -306,18 +306,18 @@ fn provision_proxy_key(opts: &mut DaemonOptions, cli: &Cli, foreground: bool) ->
 /// Build the `{ proxy: { api_key: <key> } }` YAML fragment the config
 /// merge persists. Nested so the recursive merge sets only `api_key`
 /// and preserves the user's other `proxy` keys.
-fn proxy_api_key_additions(key: &str) -> serde_yaml::Value {
-  let mut proxy = serde_yaml::Mapping::new();
+fn proxy_api_key_additions(key: &str) -> yaml_serde::Value {
+  let mut proxy = yaml_serde::Mapping::new();
   proxy.insert(
-    serde_yaml::Value::String("api_key".into()),
-    serde_yaml::Value::String(key.to_string()),
+    yaml_serde::Value::String("api_key".into()),
+    yaml_serde::Value::String(key.to_string()),
   );
-  let mut root = serde_yaml::Mapping::new();
+  let mut root = yaml_serde::Mapping::new();
   root.insert(
-    serde_yaml::Value::String("proxy".into()),
-    serde_yaml::Value::Mapping(proxy),
+    yaml_serde::Value::String("proxy".into()),
+    yaml_serde::Value::Mapping(proxy),
   );
-  serde_yaml::Value::Mapping(root)
+  yaml_serde::Value::Mapping(root)
 }
 
 /// One-time banner shown when a LAN proxy key is auto-generated. When

@@ -84,7 +84,7 @@ pub struct DryRunDiff {
 /// Compute the same redacted diff [`write_with_diff`] would emit, but
 /// without writing the file. Used by the interactive wizard's confirm
 /// flow so the diff is visible before the user commits to the write.
-pub fn dry_run_diff(path: &Path, additions: serde_yaml::Value) -> Result<DryRunDiff, WriteError> {
+pub fn dry_run_diff(path: &Path, additions: yaml_serde::Value) -> Result<DryRunDiff, WriteError> {
   let current = read_or_default(path)?;
   let merged = merge(current.clone(), additions);
   let raw_diff = diff(&current, &merged);
@@ -101,7 +101,7 @@ pub fn dry_run_diff(path: &Path, additions: serde_yaml::Value) -> Result<DryRunD
 /// [`WriteResult`] the wizard stitches into its summary.
 pub fn write_with_diff(
   path: &Path,
-  additions: serde_yaml::Value,
+  additions: yaml_serde::Value,
   options: WriteOptions,
 ) -> Result<WriteResult, WriteError> {
   let outcome: WriteOutcome = merge_and_write(path, additions)?;
@@ -170,7 +170,7 @@ mod tests {
     }
     let path = dir.join("config.yaml");
 
-    let additions: serde_yaml::Value = serde_yaml::from_str(
+    let additions: yaml_serde::Value = yaml_serde::from_str(
       "theme: latte\nllama_server_path: /opt/llama-server\nhf_token: hf_xxx\n",
     )
     .unwrap();

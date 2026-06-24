@@ -1,6 +1,6 @@
 //! Comment-preserving writer for the `presets:` block of `config.yaml`.
 //!
-//! The read path parses `config.yaml` whole via `serde_yaml`. This module
+//! The read path parses `config.yaml` whole via `yaml_serde`. This module
 //! is the *only* mutation path for presets: it edits exactly the one node
 //! being changed and leaves every other comment and bit of formatting —
 //! including a hand-authored arch preset — byte-for-byte intact.
@@ -25,7 +25,7 @@
 use std::path::Path;
 
 use serde::Serialize;
-use serde_yaml::Value as YamlValue;
+use yaml_serde::Value as YamlValue;
 use yamlpatch::{apply_yaml_patches, Op, Patch};
 use yamlpath::{Component, Document, FeatureKind, Route};
 
@@ -396,7 +396,7 @@ fn prune_nulls(value: serde_json::Value) -> serde_json::Value {
 }
 
 fn parse(source: &str, path: &Path) -> Result<YamlValue, WriteError> {
-  serde_yaml::from_str(source).map_err(|e| WriteError::ParseCurrent {
+  yaml_serde::from_str(source).map_err(|e| WriteError::ParseCurrent {
     path: path.to_path_buf(),
     error: e.to_string(),
   })
@@ -461,7 +461,7 @@ mod tests {
     fs::read_to_string(path).unwrap()
   }
 
-  fn entries_of<'a>(yaml: &'a YamlValue, model: &str) -> &'a serde_yaml::Mapping {
+  fn entries_of<'a>(yaml: &'a YamlValue, model: &str) -> &'a yaml_serde::Mapping {
     yaml
       .get("presets")
       .and_then(|p| p.get(model))
@@ -488,7 +488,7 @@ mod tests {
       &body(&[("ctx", 65536.into())]),
     )
     .unwrap();
-    let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&read(&path)).unwrap();
     assert_eq!(ctx_of(&yaml, "qwen-coder", "long-ctx"), Some(65536));
     fs::remove_dir_all(&dir).ok();
   }
@@ -511,7 +511,7 @@ mod tests {
     .unwrap();
     let text = read(&path);
     assert!(text.contains("theme: latte"), "unrelated key survives");
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     assert_eq!(
       ctx_of(&yaml, "other-model", "fast"),
       Some(4096),
@@ -551,7 +551,7 @@ presets:
       text.contains("# bump this"),
       "the edited line's trailing comment survives"
     );
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     assert_eq!(
       ctx_of(&yaml, "qwen-coder", "long-ctx"),
       Some(65536),
@@ -589,7 +589,7 @@ presets:
     assert!(text.contains("# hand-authored arch-level preset"));
     assert!(text.contains("default: balanced"));
     assert!(text.contains("balanced: { ctx: 16384, flash_attn: true }  # tuned by hand"));
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     assert_eq!(ctx_of(&yaml, "some-model.gguf", "coding"), Some(8192));
     fs::remove_dir_all(&dir).ok();
   }
@@ -606,7 +606,7 @@ presets:
       ("dropped", serde_json::Value::Null),
     ]);
     upsert_preset(&path, "m", "p", &b).unwrap();
-    let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&read(&path)).unwrap();
     let entry = entries_of(&yaml, "m").get("p").unwrap();
     assert_eq!(entry.get("ctx").unwrap().as_u64(), Some(32768));
     assert_eq!(entry.get("flash_attn").unwrap().as_bool(), Some(true));
@@ -640,7 +640,7 @@ presets:
     assert!(remove_preset(&path, "qwen-coder", "long-ctx").unwrap());
     let text = read(&path);
     assert!(text.contains("short-ctx: { ctx: 8192 }   # keep me"));
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     let entries = entries_of(&yaml, "qwen-coder");
     assert!(entries.contains_key("short-ctx"));
     assert!(!entries.contains_key("long-ctx"));
@@ -656,7 +656,7 @@ presets:
     upsert_preset(&path, "m", "a", &body(&[("ctx", 1.into())])).unwrap();
     upsert_preset(&path, "m", "b", &body(&[("ctx", 2.into())])).unwrap();
     assert!(remove_preset(&path, "m", "a").unwrap());
-    let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&read(&path)).unwrap();
     let entries = entries_of(&yaml, "m");
     assert!(!entries.contains_key("a"));
     assert!(entries.contains_key("b"));
@@ -673,7 +673,7 @@ presets:
     )
     .unwrap();
     assert!(remove_preset(&path, "m", "only").unwrap());
-    let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&read(&path)).unwrap();
     assert!(
       yaml.get("presets").and_then(|p| p.get("m")).is_none(),
       "now-empty model key is pruned"
@@ -700,7 +700,7 @@ presets:
       text.contains("default: only"),
       "hand-authored default survives"
     );
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     assert!(
       yaml
         .get("presets")
@@ -736,7 +736,7 @@ presets:
     upsert_preset(&path, "m", "coding", &body(&[("ctx", 8192.into())])).unwrap();
     let text = read(&path);
     assert!(text.contains("default: coding"));
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     assert_eq!(ctx_of(&yaml, "m", "coding"), Some(8192));
     fs::remove_dir_all(&dir).ok();
   }
@@ -749,7 +749,7 @@ presets:
     let path = dir.join("config.yaml");
     fs::write(&path, "presets:\n  m:\n    entries: {}\n").unwrap();
     upsert_preset(&path, "m", "coding", &body(&[("ctx", 8192.into())])).unwrap();
-    let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&read(&path)).unwrap();
     assert_eq!(ctx_of(&yaml, "m", "coding"), Some(8192));
     fs::remove_dir_all(&dir).ok();
   }
@@ -803,8 +803,8 @@ presets:
     upsert_preset(&path, "a", "p1", &body(&[("ctx", 1024.into())])).unwrap();
     upsert_preset(&path, "b", "p2", &body(&[("ctx", 2048.into())])).unwrap();
     upsert_preset(&path, "a", "p3", &body(&[("ctx", 4096.into())])).unwrap();
-    let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
-    let a: BTreeMap<String, YamlValue> = serde_yaml::from_value(
+    let yaml: YamlValue = yaml_serde::from_str(&read(&path)).unwrap();
+    let a: BTreeMap<String, YamlValue> = yaml_serde::from_value(
       yaml
         .get("presets")
         .unwrap()
@@ -833,7 +833,7 @@ presets:
       upsert_preset(&path, "m", name, &body(&[("ctx", 1.into())])).unwrap();
       upsert_preset(&path, "m", name, &body(&[("ctx", 2.into())])).unwrap();
       // Re-reads cleanly (no duplicate key) and reflects the update.
-      let yaml: YamlValue = serde_yaml::from_str(&read(&path)).unwrap();
+      let yaml: YamlValue = yaml_serde::from_str(&read(&path)).unwrap();
       let entries = entries_of(&yaml, "m");
       let got = entries
         .get(name)
@@ -915,7 +915,7 @@ presets:
       a_line < c_line && c_line < comment,
       "new entry stays with its siblings:\n{text}"
     );
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     assert_eq!(ctx_of(&yaml, "m", "c"), Some(3));
     assert_eq!(ctx_of(&yaml, "qwen2", "b"), Some(2), "arch block intact");
     assert!(text.contains("# arch presets below"));
@@ -936,7 +936,7 @@ presets:
     upsert_preset(&path, "b", "q", &body(&[("ctx", 2.into())])).unwrap();
     let text = read(&path);
     assert!(text.contains("theme: latte"));
-    let yaml: YamlValue = serde_yaml::from_str(&text).unwrap();
+    let yaml: YamlValue = yaml_serde::from_str(&text).unwrap();
     assert_eq!(ctx_of(&yaml, "a", "p"), Some(1));
     assert_eq!(ctx_of(&yaml, "b", "q"), Some(2));
     assert_eq!(yaml.get("theme").and_then(YamlValue::as_str), Some("latte"));
