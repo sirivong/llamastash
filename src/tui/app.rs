@@ -104,6 +104,10 @@ pub struct ManagedRow {
   /// knob, a pinned number when set — rather than the user's saved
   /// `last_params` delta (which can be empty even for an auto launch).
   pub knobs: crate::config::TypedKnobs,
+  /// The advanced `--` argv tail this launch was dispatched with (the
+  /// live `status` `params.extras`). Empty for external rows. Lets
+  /// `Ctrl+P` save-from-running carry the advanced args into the preset.
+  pub extras: Vec<String>,
 }
 
 /// Persisted "last successful launch params" for one model, fetched
@@ -1587,8 +1591,9 @@ impl App {
 
     // Capture knobs + extras from whichever surface is in view.
     let (knobs, extras) = if let Some(m) = self.focused_managed() {
-      // Running model: the live dispatched knobs (ctx/reasoning folded in).
-      (m.knobs.clone(), Vec::new())
+      // Running model: the live dispatched knobs (ctx/reasoning folded in)
+      // and the advanced `--` tail, both from the live `status` row.
+      (m.knobs.clone(), m.extras.clone())
     } else if let Some(p) = &self.launch_picker {
       (
         p.user_knobs.clone(),
@@ -2021,6 +2026,7 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
     resolved_ctx: None,
     ctx_clamped: false,
     knobs: crate::config::TypedKnobs::default(),
+    extras: Vec::new(),
   })
 }
 
@@ -2093,6 +2099,17 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     .and_then(|p| p.get("knobs"))
     .and_then(|k| serde_json::from_value::<crate::config::TypedKnobs>(k.clone()).ok())
     .unwrap_or_default();
+  // The advanced `--` tail, so `Ctrl+P` save-from-running reproduces it.
+  let extras = row
+    .get("params")
+    .and_then(|p| p.get("extras"))
+    .and_then(Value::as_array)
+    .map(|a| {
+      a.iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect()
+    })
+    .unwrap_or_default();
   Some(ManagedRow {
     launch_id,
     path,
@@ -2104,6 +2121,7 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     resolved_ctx,
     ctx_clamped,
     knobs,
+    extras,
   })
 }
 
@@ -2838,6 +2856,50 @@ mod tests {
     app.list_cursor = 3;
     let second = app.focused_managed().expect("focused managed at row 3");
     assert_eq!(second.launch_id, "L-41101");
+  }
+
+  #[test]
+  fn save_preset_from_running_launch_carries_dispatched_extras() {
+    // Regression: Ctrl+P on a running model must carry the advanced `--`
+    // tail (the live `status` `params.extras`) into the preset. It used to
+    // pass an empty list, dropping the advanced args off a running launch.
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake("/m/qwen.gguf", "/m")];
+    let body = serde_json::json!({
+      "models": [{
+        "launch_id": "L1",
+        "id": { "path": "/m/qwen.gguf", "header_hash": "h" },
+        "port": 41100,
+        "state": { "state": "ready" },
+        "params": {
+          "model_path": "/m/qwen.gguf",
+          "extras": ["--override-kv", "tokenizer.ggml.add_bos=bool:false"],
+        },
+      }]
+    });
+    app.ingest_status(&body);
+    let want = vec![
+      "--override-kv".to_string(),
+      "tokenizer.ggml.add_bos=bool:false".to_string(),
+    ];
+    // Plumbed from IPC into the managed row...
+    let row = app
+      .managed
+      .iter()
+      .find(|m| m.launch_id == "L1")
+      .expect("managed row");
+    assert_eq!(row.extras, want, "extras parsed from status params");
+    // ...and captured by the save dialog when Ctrl+P fires on that row
+    // (ingest_status snaps the cursor onto the newly appeared launch).
+    app.open_save_preset_dialog();
+    let dialog = app
+      .save_preset_dialog
+      .as_ref()
+      .expect("save dialog opened on the running row");
+    assert_eq!(
+      dialog.extras, want,
+      "advanced -- tail carried into the preset"
+    );
   }
 
   #[test]
