@@ -259,9 +259,83 @@ pub(crate) fn kv_row_focused(
   Line::from(spans)
 }
 
+/// Clip a styled line to `max_width` display columns, marking any cut
+/// with a single muted `…`. Lines within budget pass through untouched,
+/// styles preserved. The Settings views render with this (and without
+/// `Wrap`) so an overlong `value  (server default)` row truncates on one
+/// line instead of wrapping — wrapping shifts every row below it, which
+/// makes preset cycling and live knob updates visibly jump.
+pub(crate) fn clip_line(line: Line<'static>, max_width: usize, palette: &Palette) -> Line<'static> {
+  let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
+  if total <= max_width {
+    return line;
+  }
+  let line_style = line.style;
+  let line_alignment = line.alignment;
+  let budget = max_width.saturating_sub(1); // reserve one column for the …
+  let mut out: Vec<Span<'static>> = Vec::new();
+  let mut used = 0usize;
+  for span in line.spans {
+    let w = span.content.width();
+    if used + w <= budget {
+      used += w;
+      out.push(span);
+      continue;
+    }
+    let remaining = budget - used;
+    if remaining > 0 {
+      let mut taken = String::new();
+      let mut acc = 0usize;
+      for ch in span.content.chars() {
+        let cw = ch.to_string().width();
+        if acc + cw > remaining {
+          break;
+        }
+        taken.push(ch);
+        acc += cw;
+      }
+      if !taken.is_empty() {
+        out.push(Span::styled(taken, span.style));
+      }
+    }
+    break;
+  }
+  out.push(Span::styled("…", palette.muted_style()));
+  let mut clipped = Line::from(out);
+  clipped.style = line_style;
+  clipped.alignment = line_alignment;
+  clipped
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn demo_palette() -> &'static Palette {
+    crate::theme::palette_for(crate::theme::ThemeName::Macchiato)
+  }
+
+  #[test]
+  fn clip_line_truncates_overflow_with_ellipsis() {
+    let p = demo_palette();
+    let line = Line::from("ctx             inherited  (model default)".to_string());
+    let clipped = clip_line(line, 20, p);
+    let w: usize = clipped.spans.iter().map(|s| s.content.width()).sum();
+    assert!(w <= 20, "clipped width {w} should fit 20 cols");
+    let text: String = clipped.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.ends_with('…'), "truncation marked with …: {text:?}");
+    assert!(!text.contains("default)"), "tail must be cut: {text:?}");
+  }
+
+  #[test]
+  fn clip_line_leaves_fitting_lines_unchanged() {
+    let p = demo_palette();
+    let line = Line::from(vec![Span::raw("ctx  "), Span::raw("32768")]);
+    let clipped = clip_line(line, 80, p);
+    let text: String = clipped.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "ctx  32768");
+    assert!(!text.contains('…'));
+  }
 
   #[test]
   fn format_tokens_basic_ranges() {

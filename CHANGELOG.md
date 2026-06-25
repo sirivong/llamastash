@@ -4,6 +4,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Fixed
+
+- TUI Settings knob rows no longer wrap when a `(model/server default)` source label doesn't fit the pane — they truncate on one line with `…`, so cycling presets or live updates don't make the form jump. The running view and the editable form now render through one shared path, so both show/hide/truncate these labels identically.
+
 ## [0.0.5] — 2026-06-25
 
 ### Added

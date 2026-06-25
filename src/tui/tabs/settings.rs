@@ -9,7 +9,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::config::{KnobValue, KnobValueOpt};
@@ -21,110 +21,47 @@ use crate::tui::launch_picker::{LaunchPickerState, PickerField, INHERITED_LABEL}
 
 /// Render the Settings tab body into `area`.
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-  let mut lines: Vec<Line<'_>> = Vec::new();
-
-  if app.launch_picker.is_none() {
-    if let Some(m) = app.focused_managed() {
-      lines.push(heading("Running launch", palette));
-      lines.push(crate::tui::fmt::kv_row(
-        "launch",
-        m.launch_id.clone(),
-        palette,
-      ));
-      // port / state / rss / cpu already render in the header info
-      // row above the divider — dropping them here removes the
-      // duplication that bloated the running-launch view.
-      // A running launch shows what the server is *actually running*
-      // with: the live dispatched knobs (`m.knobs`) — `auto` for a
-      // fit-delegated row, a pinned number when set — not the user's
-      // saved `last_params` delta (which is empty even for an auto
-      // launch). `ctx` is overlaid with the real window `--fit` resolved
-      // (read from `/props`); it's the one placement value llama-server
-      // reports back, so every other row honestly stays `auto`.
-      let dispatched = &m.knobs;
-      let resolved_ctx = m.resolved_ctx.or(dispatched.ctx.set_value().copied());
-      for group in knob_display_groups() {
-        // Match the editable form: the whole Multi-GPU placement group
-        // is hidden on single-GPU / CPU-only hosts.
-        if group.multi_device_only && !app.multi_device() {
-          continue;
-        }
-        lines.push(group_header(group.title, palette));
-        for field in group.fields {
-          let value = match field {
-            KnobField::Ctx => resolved_ctx
-              .map(|v| {
-                // Flag a memory-driven clamp so the user knows the
-                // window was squeezed to the floor, not chosen freely.
-                if m.ctx_clamped {
-                  format!("{v} · clamped to floor")
-                } else {
-                  v.to_string()
-                }
-              })
-              .unwrap_or_else(|| format_persisted_knob_value(dispatched, KnobField::Ctx)),
-            _ => format_persisted_knob_value(dispatched, *field),
-          };
-          lines.push(crate::tui::fmt::kv_row(field.field_name(), value, palette));
-        }
-      }
-      let extras: String = app
-        .last_params
-        .get(&m.path)
-        .map(|p| p.extras.join(" "))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "(none)".into());
-      lines.push(crate::tui::fmt::kv_row("extras", extras, palette));
-      lines.push(Line::default());
-      let edit_chip = app
-        .hint_with(Focus::RightPane, Action::EnterEdit, "edit for launch")
-        .map(|c| chip_label(&c).to_string())
-        .unwrap_or_else(|| "e".to_string());
-      lines.push(
-        Span::styled(
-          format!("Press `{edit_chip}` to edit next-launch params, or `s` to stop and re-launch."),
-          palette.muted_style(),
-        )
-        .into(),
-      );
-      // Clamp scroll to the actual rendered height vs the viewport so
-      // a window resize doesn't leave the view blanked. The stored
-      // scroll is bumped freely by ↑/↓ event handlers — this is the
-      // single point that ensures the rendered offset is in-bounds.
-      // Write the clamped value back so over-scrolling past the
-      // bottom doesn't inflate the stored offset (which would make a
-      // subsequent ↑ press feel unresponsive until the offset
-      // dropped back below `max_scroll`).
-      //
-      // Count *wrapped* rows, not logical lines: the trailing hint
-      // ("Press `e` … re-launch.") wraps on a narrow pane, so a
-      // logical-line clamp under-counts and leaves the tail unreachable
-      // — cut off at the bottom edge.
-      let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-      let max_scroll = (para.line_count(area.width) as u16).saturating_sub(area.height);
-      let scroll = app.running_view_scroll.get().min(max_scroll);
-      app.running_view_scroll.set(scroll);
-      frame.render_widget(para.scroll((scroll, 0)), area);
-      return;
-    }
-  }
-
-  // Editable form.
-  let default_picker: LaunchPickerState;
-  let picker_view: &LaunchPickerState = match app.launch_picker.as_ref() {
-    Some(p) => p,
-    None => {
-      default_picker = app.build_default_picker().unwrap_or_else(|| {
-        let name = app.focused_name().unwrap_or_else(|| "(none)".into());
-        LaunchPickerState::for_model(name)
-      });
-      &default_picker
-    }
+  // One render path for both the read-only running view and the editable
+  // launch form. They differ only in `editable` (and where each row's
+  // value comes from), so sharing the loop keeps the source-chip
+  // breakpoint and the `…`-truncation identical — neither view wraps or
+  // jumps as values change.
+  let managed = if app.launch_picker.is_none() {
+    app.focused_managed()
+  } else {
+    None
   };
-  let no_focus = app.focused_path().is_none();
+  let editable = managed.is_none();
 
+  // The editable path resolves a picker (the live one, or a default built
+  // from the focused model); the read-only path reads `managed` directly.
+  let default_picker: LaunchPickerState;
+  let picker_view: Option<&LaunchPickerState> = if editable {
+    Some(match app.launch_picker.as_ref() {
+      Some(p) => p,
+      None => {
+        default_picker = app.build_default_picker().unwrap_or_else(|| {
+          let name = app.focused_name().unwrap_or_else(|| "(none)".into());
+          LaunchPickerState::for_model(name)
+        });
+        &default_picker
+      }
+    })
+  } else {
+    None
+  };
+  let no_focus = editable && app.focused_path().is_none();
+
+  let show_source = area.width >= SHOW_SOURCE_MIN_WIDTH;
+  // Track the focused row's index so the editable view keeps it on-screen
+  // with a margin; the read-only view leaves this `None` and scrolls free.
+  let mut focused_line: Option<u16> = None;
+
+  let mut lines: Vec<Line<'static>> = Vec::new();
   lines.push(heading(
-    if no_focus {
+    if !editable {
+      "Running launch"
+    } else if no_focus {
       "No model focused"
     } else {
       "Launch settings"
@@ -132,52 +69,39 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     palette,
   ));
 
-  // Duplicate-launch heads-up. Surfaces at the top of the panel so
-  // it remains visible even when the typed-knob list (12 rows) pushes
-  // the launch-chip footer below the viewport.
-  if picker_view.active_instances > 0 {
-    lines.push(
-      Span::styled(
-        format!(
-          "⚠ {n} instance{plural} already running — Enter launches a new one on a fresh port",
-          n = picker_view.active_instances,
-          plural = if picker_view.active_instances == 1 {
-            ""
-          } else {
-            "s"
-          }
-        ),
-        Style::default()
-          .fg(palette.warning)
-          .add_modifier(Modifier::BOLD),
-      )
-      .into(),
-    );
-  }
-
-  // Show the right-aligned source chip once the pane has room for a
-  // `label + value + (chip)` row. In wide mode the right pane is only
-  // 35% of the terminal, so a 50-col gate kept the chip hidden until
-  // ~150-col terminals; 40 surfaces it at realistic widths (a row fits
-  // `2 marker + 16 label + value + "  (server default)"` by ~38 cols).
-  let show_source = area.width >= 40;
-  let row_for = |field: PickerField| picker_view.field == field;
-  // Track the line index of the focused row so we can adjust the
-  // scroll offset below — on tall viewports nothing scrolls; on
-  // short ones the focused row stays visible with ≥1 row of context.
-  let mut focused_line: Option<u16> = None;
-
-  // Preset cycle row — always leads the form. ←/→ cycles
-  // `last used → auto → [default] → named presets`, rewriting every knob
-  // row below live. No source chip: it's a selector, not an inherited value.
-  {
-    let focused = row_for(PickerField::Preset);
+  if let Some(m) = managed {
+    // Read-only: name the launch (port / state / rss live in the header).
+    lines.push(crate::tui::fmt::kv_row(
+      "launch",
+      m.launch_id.clone(),
+      palette,
+    ));
+  } else if let Some(pv) = picker_view {
+    // Editable: duplicate-launch heads-up, then the preset cycle row.
+    if pv.active_instances > 0 {
+      lines.push(
+        Span::styled(
+          format!(
+            "⚠ {n} instance{plural} already running — Enter launches a new one on a fresh port",
+            n = pv.active_instances,
+            plural = if pv.active_instances == 1 { "" } else { "s" }
+          ),
+          Style::default()
+            .fg(palette.warning)
+            .add_modifier(Modifier::BOLD),
+        )
+        .into(),
+      );
+    }
+    // Preset cycle row leads the form. No source chip: it's a selector,
+    // not an inherited value.
+    let focused = pv.field == PickerField::Preset;
     if focused {
       focused_line = Some(lines.len() as u16);
     }
     lines.push(crate::tui::fmt::kv_row_focused(
       "preset",
-      picker_view.preset_value_label(),
+      pv.preset_value_label(),
       None,
       focused,
       true,
@@ -186,145 +110,212 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     ));
   }
 
-  // Every typed knob — including ctx and reasoning — flows through
-  // the same `value (chip)` shape, grouped by function with a header
-  // per cluster (display order is distinct from argv order). Empty
-  // rows render `inherited` as the value; the chip names the layer that
-  // would supply it.
+  // Every typed knob flows through the same `value (chip)` row shape in
+  // both views. The read-only view shows the *dispatched* values (`auto`
+  // for a fit-delegated row), with ctx overlaid by the `--fit`-resolved
+  // window read from `/props`; no chip, since a live value has no
+  // inheritance layer to name.
+  let resolved_ctx = managed.map(|m| m.resolved_ctx.or(m.knobs.ctx.set_value().copied()));
   for group in knob_display_groups() {
-    // Skip the whole group — header included — when every row in it is
-    // hidden (the Multi-GPU placement group on single-GPU / CPU-only
-    // hosts, where each control can only ever hold `inherited`).
-    if !group
-      .fields
-      .iter()
-      .any(|f| picker_view.field_visible(PickerField::Knob(*f)))
-    {
+    // Skip the whole group — header included — when it has no visible row
+    // (the Multi-GPU placement group on single-GPU / CPU-only hosts).
+    let group_visible = match picker_view {
+      Some(pv) => group
+        .fields
+        .iter()
+        .any(|f| pv.field_visible(PickerField::Knob(*f))),
+      None => !group.multi_device_only || app.multi_device(),
+    };
+    if !group_visible {
       continue;
     }
     lines.push(group_header(group.title, palette));
     for field in group.fields {
       let field = *field;
-      if !picker_view.field_visible(PickerField::Knob(field)) {
-        continue;
-      }
-      let focused = row_for(PickerField::Knob(field));
-      if focused {
-        focused_line = Some(lines.len() as u16);
-      }
-      if picker_view.inline_edit.is_open()
-        && picker_view.inline_edit.field == Some(PickerField::Knob(field))
-      {
-        lines.push(inline_edit_row(
-          field.field_name(),
-          picker_view.inline_edit.input.buffer(),
-          focused,
-          palette,
-        ));
-        if let Some(err) = &picker_view.inline_edit.error {
-          lines.push(inline_warning_row(err, palette));
+      match picker_view {
+        Some(pv) => {
+          if !pv.field_visible(PickerField::Knob(field)) {
+            continue;
+          }
+          let focused = pv.field == PickerField::Knob(field);
+          if focused {
+            focused_line = Some(lines.len() as u16);
+          }
+          if pv.inline_edit.is_open() && pv.inline_edit.field == Some(PickerField::Knob(field)) {
+            lines.push(inline_edit_row(
+              field.field_name(),
+              pv.inline_edit.input.buffer(),
+              focused,
+              palette,
+            ));
+            if let Some(err) = &pv.inline_edit.error {
+              lines.push(inline_warning_row(err, palette));
+            }
+          } else {
+            let value = format_knob_value(pv, field);
+            let source = pv.source_for(field).label();
+            lines.push(crate::tui::fmt::kv_row_focused(
+              field.field_name(),
+              value,
+              Some(source),
+              focused,
+              true,
+              palette,
+              show_source,
+            ));
+          }
         }
-      } else {
-        let value = format_knob_value(picker_view, field);
-        let source = picker_view.source_for(field).label();
-        lines.push(crate::tui::fmt::kv_row_focused(
-          field.field_name(),
-          value,
-          Some(source),
-          focused,
-          true,
-          palette,
-          show_source,
-        ));
+        None => {
+          let m = managed.expect("read-only view implies a managed row");
+          let value = match field {
+            KnobField::Ctx => resolved_ctx
+              .flatten()
+              .map(|v| {
+                // Flag a memory-driven clamp so the user knows the window
+                // was squeezed to the floor, not chosen freely.
+                if m.ctx_clamped {
+                  format!("{v} · clamped to floor")
+                } else {
+                  v.to_string()
+                }
+              })
+              .unwrap_or_else(|| format_persisted_knob_value(&m.knobs, KnobField::Ctx)),
+            _ => format_persisted_knob_value(&m.knobs, field),
+          };
+          // Not focused, not cyclable, no source chip — renders as a plain
+          // `label  value` row through the shared formatter.
+          lines.push(crate::tui::fmt::kv_row_focused(
+            field.field_name(),
+            value,
+            None,
+            false,
+            false,
+            palette,
+            show_source,
+          ));
+        }
       }
     }
   }
 
-  // extras row
-  let extras_focused = row_for(PickerField::Extras);
-  if extras_focused {
-    focused_line = Some(lines.len() as u16);
-  }
-  if picker_view.extras_input.is_editing() {
-    lines.push(inline_edit_row(
-      "extras",
-      picker_view.extras_input.buffer(),
-      extras_focused,
-      palette,
-    ));
-  } else {
-    let extras_text = if picker_view.extras.is_empty() {
-      "(none)".to_string()
-    } else {
-      picker_view
-        .extras
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(" ")
-    };
-    lines.push(crate::tui::fmt::kv_row_focused(
-      "extras",
-      extras_text,
-      None,
-      extras_focused,
-      false,
-      palette,
-      show_source,
-    ));
-  }
-
-  // Forbidden-flag warning under extras row.
-  let banned = crate::launch::params::forbidden_in_extras(&picker_view.extras);
-  if !banned.is_empty() {
-    let redacted = crate::launch::params::redact_for_display(&picker_view.extras);
-    lines.push(inline_warning_row(
-      &format!("forbidden: {redacted}"),
-      palette,
-    ));
+  // Extras row.
+  match picker_view {
+    Some(pv) => {
+      let extras_focused = pv.field == PickerField::Extras;
+      if extras_focused {
+        focused_line = Some(lines.len() as u16);
+      }
+      if pv.extras_input.is_editing() {
+        lines.push(inline_edit_row(
+          "extras",
+          pv.extras_input.buffer(),
+          extras_focused,
+          palette,
+        ));
+      } else {
+        let extras_text = if pv.extras.is_empty() {
+          "(none)".to_string()
+        } else {
+          pv.extras
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+        };
+        lines.push(crate::tui::fmt::kv_row_focused(
+          "extras",
+          extras_text,
+          None,
+          extras_focused,
+          false,
+          palette,
+          show_source,
+        ));
+      }
+      // Forbidden-flag warning under the extras row.
+      if !crate::launch::params::forbidden_in_extras(&pv.extras).is_empty() {
+        let redacted = crate::launch::params::redact_for_display(&pv.extras);
+        lines.push(inline_warning_row(
+          &format!("forbidden: {redacted}"),
+          palette,
+        ));
+      }
+    }
+    None => {
+      let m = managed.expect("read-only view implies a managed row");
+      let extras: String = app
+        .last_params
+        .get(&m.path)
+        .map(|p| p.extras.join(" "))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "(none)".into());
+      lines.push(crate::tui::fmt::kv_row_focused(
+        "extras",
+        extras,
+        None,
+        false,
+        false,
+        palette,
+        show_source,
+      ));
+    }
   }
 
   lines.push(Line::default());
-  let launch_chip = app
-    .hint_with(Focus::RightPane, Action::Submit, "launch")
-    .map(|chip| {
-      format!(
-        "Press {} again to launch with these settings.",
-        chip_label(&chip)
-      )
-    })
-    .unwrap_or_else(|| "Launch binding removed — set `submit` in config.".to_string());
-  lines.push(
-    Span::styled(
-      if no_focus {
-        "Select a model in the list to configure launch settings.".to_string()
-      } else {
-        launch_chip
-      },
-      palette.muted_style(),
-    )
-    .into(),
-  );
+  let hint = if managed.is_some() {
+    let edit_chip = app
+      .hint_with(Focus::RightPane, Action::EnterEdit, "edit for launch")
+      .map(|c| chip_label(&c).to_string())
+      .unwrap_or_else(|| "e".to_string());
+    format!("Press `{edit_chip}` to edit next-launch params, or `s` to stop and re-launch.")
+  } else if no_focus {
+    "Select a model in the list to configure launch settings.".to_string()
+  } else {
+    app
+      .hint_with(Focus::RightPane, Action::Submit, "launch")
+      .map(|chip| {
+        format!(
+          "Press {} again to launch with these settings.",
+          chip_label(&chip)
+        )
+      })
+      .unwrap_or_else(|| "Launch binding removed — set `submit` in config.".to_string())
+  };
+  lines.push(Span::styled(hint, palette.muted_style()).into());
 
-  // Minimal-scroll-with-margin policy: keep ≥1 row of context above
-  // and below the focused row so the user sees what's adjacent. When
-  // the focused row crosses an edge, scroll just enough to restore
-  // the margin — no jumping to top/bottom, no centring. Recomputed
-  // every render so window resizes self-correct.
-  let scroll = clamp_scroll_with_margin(
-    picker_view.scroll_offset.get(),
-    focused_line.unwrap_or(0),
-    area.height,
-    lines.len() as u16,
-  );
-  picker_view.scroll_offset.set(scroll);
+  // Clip each row to the pane width with `…` and render without `Wrap`,
+  // so an overlong `value  (server default)` row truncates on one line
+  // instead of wrapping (which shifts the rows below it and makes preset
+  // cycling / live updates jump). With nothing wrapping, the rendered row
+  // count equals the logical line count, so scroll clamps stay exact.
+  let max_w = area.width as usize;
+  let total_rows = lines.len() as u16;
+  let clipped: Vec<Line<'static>> = lines
+    .into_iter()
+    .map(|l| crate::tui::fmt::clip_line(l, max_w, palette))
+    .collect();
 
-  frame.render_widget(
-    Paragraph::new(lines)
-      .scroll((scroll, 0))
-      .wrap(Wrap { trim: false }),
-    area,
-  );
+  let scroll = if let Some(pv) = picker_view {
+    // Editable: keep the focused row visible with ≥1 row of margin.
+    let s = clamp_scroll_with_margin(
+      pv.scroll_offset.get(),
+      focused_line.unwrap_or(0),
+      area.height,
+      total_rows,
+    );
+    pv.scroll_offset.set(s);
+    s
+  } else {
+    // Read-only: free scroll, clamped in-bounds.
+    let s = app
+      .running_view_scroll
+      .get()
+      .min(total_rows.saturating_sub(area.height));
+    app.running_view_scroll.set(s);
+    s
+  };
+
+  frame.render_widget(Paragraph::new(clipped).scroll((scroll, 0)), area);
 }
 
 /// Minimal scroll with margin: keep the focused row visible with
@@ -471,6 +462,11 @@ fn group_header(title: &str, palette: &Palette) -> Line<'static> {
 }
 
 const LABEL_W: usize = 16;
+
+/// Pane width at/above which a knob row has room for its `(source)` chip.
+/// In wide mode the right pane is only ~35% of the terminal, so the gate
+/// trips well below 50 cols. Shared by both Settings views.
+const SHOW_SOURCE_MIN_WIDTH: u16 = 40;
 
 fn chip_label(chip: &str) -> &str {
   chip.split(':').next().unwrap_or(chip)
