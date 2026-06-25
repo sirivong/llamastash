@@ -4,6 +4,8 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+## [0.0.5] — 2026-06-25
+
 ### Added
 
 - Named launch presets now live in `config.yaml` (a `presets:` key) — the single writable source. `presets save` / `delete` (CLI) and the new TUI `Ctrl+P` save dialog (the Settings form, or a running model's live knobs) write there comment-safely. A `presets:` key is per-model when it names a discovered model (basename, path fallback), otherwise an arch id applying to every model of that arch; a model's effective set is per-model ∪ arch (model wins), plus an optional config-only `default:` (one stop in the cycle; the CLI never auto-applies it). The TUI Settings form gains an always-shown top-of-form preset cycle (`last used → auto → [default] → named presets`) that rewrites the knobs live; it opens on `last used` (your pre-filled last params). Entries are written in readable block YAML — a knob set to `auto` delegates it to `--fit` (e.g. `n_gpu_layers: auto`; `{ value: auto }` escapes a literal `auto`). Existing `state.json` presets migrate into `config.yaml` once on upgrade. `status` model rows gain `preset_count` + `default`. See `config.example.yaml`.
