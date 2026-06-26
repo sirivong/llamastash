@@ -258,7 +258,21 @@ pub(crate) async fn compose_and_spawn(
   // (identity rule); an explicit choice from `start --backend` / the TUI
   // picker overrides it. Resolved into a backend at the selection seam below.
   launch_params.backend = parsed.backend.unwrap_or_default();
-  launch_params.extras = parsed.extras.into_iter().map(OsString::from).collect();
+  // Resolve extras from the caller's request. If the caller didn't provide
+  // extras (e.g. proxy auto-start), inherit from the model's last_params so
+  // free-form flags (`--chat-template-file`, `--mmproj`, etc.) survive reload
+  // cycles. When the caller *does* provide extras — including an empty vec —
+  // use them verbatim (the TUI always sends extras, even when cleared).
+  launch_params.extras = if parsed.extras.is_empty() {
+    let snap = ctx.state.snapshot().await;
+    snap
+      .last_params_map()
+      .get(&identity)
+      .map(|p| p.extras.clone())
+      .unwrap_or_default()
+  } else {
+    parsed.extras.into_iter().map(OsString::from).collect()
+  };
   // Resolve the multimodal projector: an explicit `mmproj_path` wins;
   // otherwise auto-detect a companion next to the model — unless the
   // caller is already managing the projector through `extras`
