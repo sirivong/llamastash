@@ -26,7 +26,7 @@ use crate::daemon::registry::LaunchId;
 use crate::daemon::shutdown::ShutdownToken;
 use crate::daemon::state_store::RunningSnapshot;
 use crate::daemon::supervisor::{
-  spawn as supervisor_spawn, ManagedModel, ManagedSpawn, ManagedState,
+  spawn as supervisor_spawn, LaunchOrigin, ManagedModel, ManagedSpawn, ManagedState,
 };
 use crate::gguf::header::{read_path as read_gguf_header, HeaderReadOptions};
 use crate::gguf::identity::ModelId;
@@ -258,16 +258,22 @@ pub(crate) async fn compose_and_spawn(
   // (identity rule); an explicit choice from `start --backend` / the TUI
   // picker overrides it. Resolved into a backend at the selection seam below.
   launch_params.backend = parsed.backend.unwrap_or_default();
-  // Resolve extras from the caller's request. If the caller didn't provide
-  // extras (e.g. proxy auto-start), inherit from the model's last_params so
-  // free-form flags (`--chat-template-file`, `--mmproj`, etc.) survive reload
-  // cycles. When the caller *does* provide extras — including an empty vec —
-  // use them verbatim (the TUI always sends extras, even when cleared).
-  launch_params.extras = if parsed.extras.is_empty() {
+  // The model's last successful launch params. Taken once here and reused
+  // for the last-used knob layer below, so state is cloned a single time.
+  let last_params = {
     let snap = ctx.state.snapshot().await;
-    snap
-      .last_params_map()
-      .get(&identity)
+    snap.last_params_map().get(&identity).map(|p| (**p).clone())
+  };
+
+  // Free-form extras. A proxy auto-start arrives with an empty request, so
+  // it inherits the model's last_params extras to keep flags like
+  // `--chat-template-file` / `--mmproj` across reload cycles. Manual launches
+  // (TUI / `llamastash start` / IPC `start_model`) are taken verbatim, so a
+  // user who clears extras actually gets none. The empty-vs-set check can't
+  // tell a cleared manual launch from an auto-start, but the origin can.
+  launch_params.extras = if origin == LaunchOrigin::AutoStart {
+    last_params
+      .as_ref()
       .map(|p| p.extras.clone())
       .unwrap_or_default()
   } else {
@@ -300,16 +306,12 @@ pub(crate) async fn compose_and_spawn(
     user_knobs.reasoning = parsed.reasoning.map(KnobValue::Set);
   }
 
-  // Pull the model's last_params from persisted state so a returning
-  // user inherits the knobs they last shipped.
-  let last_params_knobs = {
-    let snap = ctx.state.snapshot().await;
-    snap
-      .last_params_map()
-      .get(&identity)
-      .map(|p| p.knobs.clone())
-      .unwrap_or_default()
-  };
+  // Last-used knobs from the snapshot taken above, so a returning user
+  // inherits the knobs they last shipped.
+  let last_params_knobs = last_params
+    .as_ref()
+    .map(|p| p.knobs.clone())
+    .unwrap_or_default();
   let empty_yaml = crate::config::TypedKnobs::default();
   let yaml_knobs = arch
     .as_deref()

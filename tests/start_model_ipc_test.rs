@@ -639,6 +639,121 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_start_with_no_extras_does_not_inherit_last_params_extras() {
+  // Proxy auto-start inherits last_params extras so free-form flags
+  // survive reload; a *manual* launch must NOT. Keying the inheritance
+  // off `parsed.extras.is_empty()` would conflate the two, so a user
+  // who clears their extras would silently get the old ones back and
+  // have no way to launch with zero extras. The gate is the launch
+  // origin, not the empty vec — this locks that in.
+  let state = unique_temp("manual-extras-no-inherit");
+  let model_dir = unique_temp("manual-extras-no-inherit-models");
+  let model_path = model_dir.join("m.gguf");
+  std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
+
+  // Two-port range so call 2 has somewhere to land after call 1 stops.
+  let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+  let p0 = probe.local_addr().unwrap().port();
+  drop(probe);
+  let probe2 = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+  let p1 = probe2.local_addr().unwrap().port();
+  drop(probe2);
+  let (lo, hi) = if p0 < p1 { (p0, p1) } else { (p1, p0) };
+
+  let opts = DaemonOptions {
+    binary: Some(fake_binary()),
+    port_range: PortRange { start: lo, end: hi },
+    ..DaemonOptions::rooted_at(state.clone())
+  };
+  let socket = opts.state_dir.clone();
+  let state_dir = opts.state_dir.clone();
+  let daemon = tokio::spawn(async move { run_foreground(opts).await });
+  wait_for_socket(&socket).await;
+  let mut client = Client::connect(&socket).await.expect("connect");
+
+  // Call 1 (manual): ship a free-form extra. After Ready it persists
+  // into last_params, where call 2's resolver could pick it up.
+  let first = client
+    .call(
+      "start_model",
+      Some(json!({
+        "model_path": &model_path_canon,
+        "extras": ["--chat-template-file", "/tmp/custom.jinja"],
+      })),
+    )
+    .await
+    .expect("start_model call 1");
+  let first_launch = first["launch_id"].as_str().unwrap().to_string();
+
+  // Wait for call 1's extras to land on disk (60 s for slow CI runners,
+  // matching the sibling last_params tests).
+  let deadline = std::time::Instant::now() + Duration::from_secs(60);
+  loop {
+    let s = state_store::load(&state_dir).expect("load state");
+    if s.last_params.first().is_some_and(|e| {
+      e.params
+        .extras
+        .iter()
+        .any(|x| x.to_str() == Some("--chat-template-file"))
+    }) {
+      break;
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("call 1 last_params.extras never persisted");
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+  }
+
+  // Stop call 1 to free its port.
+  let _ = client
+    .call(
+      "stop_model",
+      Some(json!({"launch_id": &first_launch, "grace_secs": 5})),
+    )
+    .await
+    .expect("stop_model");
+
+  // Call 2 (manual): no extras, but a distinguishing knob (`mlock`) so
+  // we can tell call 2's persisted entry apart from call 1's.
+  let _ = client
+    .call(
+      "start_model",
+      Some(json!({
+        "model_path": &model_path_canon,
+        "knobs": {"mlock": true},
+      })),
+    )
+    .await
+    .expect("start_model call 2");
+
+  // Poll until call 2's entry lands (mlock marks it), then check extras.
+  let deadline = std::time::Instant::now() + Duration::from_secs(60);
+  let extras = loop {
+    let s = state_store::load(&state_dir).expect("load state");
+    if let Some(entry) = s.last_params.first() {
+      if entry.params.knobs.mlock == Some(KnobValue::Set(true)) {
+        break entry.params.extras.clone();
+      }
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("call 2 last_params (mlock marker) never persisted");
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+  };
+
+  assert!(
+    extras.is_empty(),
+    "a manual launch with no extras must not inherit call 1's extras; got {extras:?}"
+  );
+
+  let _ = client.call("shutdown", None).await;
+  let _ = timeout(Duration::from_secs(3), daemon).await;
+  std::fs::remove_dir_all(&state).ok();
+  std::fs::remove_dir_all(&model_dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_model_returns_error_when_binary_unconfigured() {
   // Production daemon resolves the binary at startup; if it wasn't
   // resolved (e.g. user has no `llama-server` on PATH), `start_model`
