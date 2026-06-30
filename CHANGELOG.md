@@ -7,6 +7,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 ### Fixed
 
 - TUI Settings knob rows no longer wrap when a `(model/server default)` source label doesn't fit the pane — they truncate on one line with `…`, so cycling presets or live updates don't make the form jump. The running view and the editable form now render through one shared path, so both show/hide/truncate these labels identically.
+- Free-form `llama-server` flags (e.g. `--chat-template-file`, `--mmproj`) now survive a proxy auto-start reload: an auto-started model inherits the extras from its last manual launch instead of dropping them. Manual launches still take their extras verbatim, so clearing them works. (#49)
 
 ## [0.0.5] — 2026-06-25
 
