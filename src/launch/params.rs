@@ -444,6 +444,11 @@ fn format_f32(v: f32) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LayerLabel {
   User,
+  /// The model's configured `default:` preset, resolved server-side in
+  /// `compose_and_spawn`. Ranks below an explicit `User` choice but above
+  /// `LastUsed`, so a standing default overrides the last manual launch
+  /// while still letting last_params fill fields the default leaves unset.
+  PresetDefault,
   LastUsed,
   ArchDefault,
   ModelDefault,
@@ -455,6 +460,7 @@ impl LayerLabel {
   pub fn label(self) -> &'static str {
     match self {
       LayerLabel::User => "user",
+      LayerLabel::PresetDefault => "default preset",
       LayerLabel::LastUsed => "last used",
       LayerLabel::ArchDefault => "arch default",
       LayerLabel::ModelDefault => "model default",
@@ -1311,6 +1317,45 @@ mod tests {
     ]);
     assert_eq!(r.knobs.threads, Some(KnobValue::Set(1)));
     assert_eq!(r.sources.get(&KnobField::Threads), Some(&LayerLabel::User));
+  }
+
+  #[test]
+  fn resolve_layered_preset_default_wins_over_last_used_but_last_fills_gaps() {
+    let _lock = crate::cli::test_lock::serialize();
+    // The default-preset layer outranks last_params for a field it sets,
+    // while last_params still fills a field the default-preset leaves unset.
+    let default_preset = TypedKnobs {
+      threads: Some(KnobValue::Set(1)),
+      ..TypedKnobs::default()
+    };
+    let last = TypedKnobs {
+      threads: Some(KnobValue::Set(2)),
+      mlock: Some(KnobValue::Set(true)),
+      ..TypedKnobs::default()
+    };
+    let r = resolve_layered(&[
+      (LayerLabel::PresetDefault, &default_preset),
+      (LayerLabel::LastUsed, &last),
+    ]);
+    assert_eq!(
+      r.knobs.threads,
+      Some(KnobValue::Set(1)),
+      "default preset wins"
+    );
+    assert_eq!(
+      r.sources.get(&KnobField::Threads),
+      Some(&LayerLabel::PresetDefault)
+    );
+    assert_eq!(
+      r.knobs.mlock,
+      Some(KnobValue::Set(true)),
+      "last_params fills the gap the default preset left"
+    );
+    assert_eq!(
+      r.sources.get(&KnobField::Mlock),
+      Some(&LayerLabel::LastUsed)
+    );
+    assert_eq!(LayerLabel::PresetDefault.label(), "default preset");
   }
 
   #[test]

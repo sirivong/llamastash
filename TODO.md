@@ -169,6 +169,7 @@ places.
 - [x] help legends as new row with 1 column
 - [x] ~~Presets feature from PR #18~~ — shipped. Plan: `docs/plans/2026-06-22-001-feat-config-presets-per-model-plan.md` (config.yaml as the writable source of truth, `yamlpath`+`yamlpatch` comment-safe writes, per-model/arch keys, in-memory store + write-through, one-time `state.json`→config migration, TUI preset cycle row + `Ctrl+P` save). Remaining follow-ups below.
   - [x] ~~Deferred follow-ups (plan Unit 8): move config **reads** off archived `serde_yaml` onto a maintained parser; move the init wizard's config **writes** onto `yamlpatch` so wizard runs stop stripping comments.~~ — done. Reads consolidated on `yaml_serde` (the maintained serde_yaml fork, already pulled by `yamlpatch`; `serde_yaml` dropped from the dep tree). All `config.yaml` writes now funnel through one comment-safe primitive `config::yaml_edit` (the presets writer + the init/cli `merge_and_write`), so wizard/cli runs preserve hand-written comments.
+  - [x] ~~**Default preset auto-applies (server-side resolver layer)**~~ — the model's `default:` is now its standing launch config, applied on a no-selection launch (plain `start`, proxy auto-start) via a new `LayerLabel::PresetDefault` rung (`User > PresetDefault > LastUsed > ArchDefault > fit`). `default: auto` = pure fit; `start --preset auto` = clean per-launch override. Drives off a `selection` field on `start_model`. **Supersedes the PR #49 extras origin gate** — a no-selection launch now inherits last_params extras like knobs do. Plan: `docs/plans/2026-06-30-001-feat-default-preset-resolver-layer-plan.md`.
 - [x] Architecture/UX improvements
   - [x] Top hints to non-bold, audit other bolds
   - [x] ~~**Unify hand-rolled pane `Block` constructions onto a padding-aware `panel_block`** (U7 follow-up).~~ — added a `Palette::panel()` builder (`src/theme/palette.rs`: optional title/footer `Line`, passable border `Color`, optional `Padding`) that owns the `Borders::ALL` + glyph border-set boilerplate, and migrated all 7 open-coded sites (confirm/help overlays, logo, list/right/render panes) onto it. The 6 dashboard panes stay byte-identical (golden unchanged); help overlay drops the `j/k:scroll` chip + tightens padding, and the HF dialog gets a shorter title with its hints moved into the header.
@@ -201,7 +202,7 @@ places.
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
 - [ ] a keybinding (shift+l) to switch left/right pane ratio (configurable in config.yaml. 4 slots with defaults current/50/70/90)
 - [x] ~~The (model/server default) label for setting knobs should not wrap; cut off what doesn't fit and show `…`.~~ — Settings rows clip to the pane width with `…` (no `Wrap`); the running view and editable form now share one render path (`fmt::clip_line` is the shared primitive), so both truncate identically. (821c26b)
-- [ ] show a label (N) near the prest knob in settings to indicate how many presets are available for the current model. (N=0 if none)
+- [x] ~~show a label (N) near the prest knob in settings to indicate how many presets are available for the current model. (N=0 if none)~~ — the Settings preset row renders `preset (N)` (count of effective named presets), `preset (0)` when none.
 
 ## General Roadmap
 

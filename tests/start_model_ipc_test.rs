@@ -14,8 +14,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use std::collections::BTreeMap;
+
 use llamastash::config::loader::PortRange;
-use llamastash::config::KnobValue;
+use llamastash::config::{ConfigPresetBlock, KnobValue, PresetBody, TypedKnobs};
 use llamastash::daemon::state_store;
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::gguf::test_fixtures::build_minimal_gguf;
@@ -639,15 +641,15 @@ async fn last_params_persists_only_user_supplied_knob_deltas() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_start_with_no_extras_does_not_inherit_last_params_extras() {
-  // Proxy auto-start inherits last_params extras so free-form flags
-  // survive reload; a *manual* launch must NOT. Keying the inheritance
-  // off `parsed.extras.is_empty()` would conflate the two, so a user
-  // who clears their extras would silently get the old ones back and
-  // have no way to launch with zero extras. The gate is the launch
-  // origin, not the empty vec — this locks that in.
-  let state = unique_temp("manual-extras-no-inherit");
-  let model_dir = unique_temp("manual-extras-no-inherit-models");
+async fn no_selection_start_inherits_last_params_extras() {
+  // A no-selection launch (plain `start` / proxy auto-start) inherits the
+  // model's effective default extras — last_params here, since no config
+  // `default:` is set. This mirrors how knobs already inherit last_params on
+  // a plain start, and supersedes the old origin gate (which wrongly kept a
+  // plain manual launch from inheriting). The clean "inherit nothing" gesture
+  // is `selection: auto`, exercised separately.
+  let state = unique_temp("no-selection-extras-inherit");
+  let model_dir = unique_temp("no-selection-extras-inherit-models");
   let model_path = model_dir.join("m.gguf");
   std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
   let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
@@ -714,8 +716,9 @@ async fn manual_start_with_no_extras_does_not_inherit_last_params_extras() {
     .await
     .expect("stop_model");
 
-  // Call 2 (manual): no extras, but a distinguishing knob (`mlock`) so
-  // we can tell call 2's persisted entry apart from call 1's.
+  // Call 2 (no selection): no extras, no `selection` field (defaults to the
+  // no-selection `default`), plus a distinguishing knob (`mlock`) so we can
+  // tell call 2's persisted entry apart from call 1's.
   let _ = client
     .call(
       "start_model",
@@ -743,8 +746,211 @@ async fn manual_start_with_no_extras_does_not_inherit_last_params_extras() {
   };
 
   assert!(
-    extras.is_empty(),
-    "a manual launch with no extras must not inherit call 1's extras; got {extras:?}"
+    extras
+      .iter()
+      .any(|x| x.to_str() == Some("--chat-template-file")),
+    "a no-selection launch inherits call 1's last_params extras; got {extras:?}"
+  );
+
+  let _ = client.call("shutdown", None).await;
+  let _ = timeout(Duration::from_secs(3), daemon).await;
+  std::fs::remove_dir_all(&state).ok();
+  std::fs::remove_dir_all(&model_dir).ok();
+}
+
+// Seed a daemon with a single per-model config preset block.
+fn preset_block(default: Option<&str>, name: &str, ctx: u32, extras: &[&str]) -> ConfigPresetBlock {
+  let mut entries = BTreeMap::new();
+  entries.insert(
+    name.to_string(),
+    PresetBody {
+      mode: None,
+      knobs: TypedKnobs {
+        ctx: Some(KnobValue::Set(ctx)),
+        ..TypedKnobs::default()
+      },
+      extras: (!extras.is_empty()).then(|| extras.iter().map(|s| s.to_string()).collect()),
+    },
+  );
+  ConfigPresetBlock {
+    default: default.map(str::to_string),
+    entries,
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_selection_start_applies_configured_default_preset() {
+  // A model with a config `default:` preset launches with that preset's
+  // knobs + extras on a no-selection start (plain `start` / proxy
+  // auto-start) — the daemon resolves the default server-side.
+  let state = unique_temp("default-preset-apply");
+  let model_dir = unique_temp("default-preset-apply-models");
+  let model_path = model_dir.join("m.gguf");
+  std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
+
+  let mut presets = BTreeMap::new();
+  presets.insert(
+    "m.gguf".to_string(),
+    preset_block(
+      Some("long"),
+      "long",
+      65536,
+      &["--chat-template-file", "/tmp/preset.jinja"],
+    ),
+  );
+
+  let opts = DaemonOptions {
+    binary: Some(fake_binary()),
+    port_range: allocate_port_range(),
+    presets,
+    ..DaemonOptions::rooted_at(state.clone())
+  };
+  let socket = opts.state_dir.clone();
+  let state_dir = opts.state_dir.clone();
+  let daemon = tokio::spawn(async move { run_foreground(opts).await });
+  wait_for_socket(&socket).await;
+  let mut client = Client::connect(&socket).await.expect("connect");
+
+  // No selection field, no knobs, no extras → daemon applies the default.
+  let resp = client
+    .call(
+      "start_model",
+      Some(json!({"model_path": &model_path_canon})),
+    )
+    .await
+    .expect("start_model");
+  let port = resp["port"].as_u64().unwrap() as u16;
+
+  let deadline = std::time::Instant::now() + Duration::from_secs(60);
+  let params = loop {
+    let s = state_store::load(&state_dir).expect("load state");
+    if let Some(r) = s.running.iter().find(|r| r.port == port) {
+      break r.params.clone();
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("default-preset launch never recorded a running snapshot");
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+  };
+
+  assert_eq!(
+    params.ctx,
+    Some(65536),
+    "default preset's ctx applied on a no-selection launch"
+  );
+  assert!(
+    params
+      .extras
+      .iter()
+      .any(|x| x.to_str() == Some("--chat-template-file")),
+    "default preset's extras applied; got {:?}",
+    params.extras
+  );
+
+  let _ = client.call("shutdown", None).await;
+  let _ = timeout(Duration::from_secs(3), daemon).await;
+  std::fs::remove_dir_all(&state).ok();
+  std::fs::remove_dir_all(&model_dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_selection_start_inherits_nothing() {
+  // `selection: auto` is pure fit: it skips last_params (and the default
+  // preset), so a prior launch's extras are NOT carried forward. This is
+  // the clean "inherit nothing" gesture.
+  let state = unique_temp("auto-selection-clean");
+  let model_dir = unique_temp("auto-selection-clean-models");
+  let model_path = model_dir.join("m.gguf");
+  std::fs::write(&model_path, build_minimal_gguf("llama")).unwrap();
+  let model_path_canon = llamastash::util::paths::canonicalize(&model_path).unwrap();
+
+  let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+  let p0 = probe.local_addr().unwrap().port();
+  drop(probe);
+  let probe2 = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+  let p1 = probe2.local_addr().unwrap().port();
+  drop(probe2);
+  let (lo, hi) = if p0 < p1 { (p0, p1) } else { (p1, p0) };
+
+  let opts = DaemonOptions {
+    binary: Some(fake_binary()),
+    port_range: PortRange { start: lo, end: hi },
+    ..DaemonOptions::rooted_at(state.clone())
+  };
+  let socket = opts.state_dir.clone();
+  let state_dir = opts.state_dir.clone();
+  let daemon = tokio::spawn(async move { run_foreground(opts).await });
+  wait_for_socket(&socket).await;
+  let mut client = Client::connect(&socket).await.expect("connect");
+
+  // Call 1: extras → last_params.
+  let first = client
+    .call(
+      "start_model",
+      Some(json!({
+        "model_path": &model_path_canon,
+        "extras": ["--chat-template-file", "/tmp/custom.jinja"],
+      })),
+    )
+    .await
+    .expect("start_model call 1");
+  let first_launch = first["launch_id"].as_str().unwrap().to_string();
+
+  let deadline = std::time::Instant::now() + Duration::from_secs(60);
+  loop {
+    let s = state_store::load(&state_dir).expect("load state");
+    if s.last_params.first().is_some_and(|e| {
+      e.params
+        .extras
+        .iter()
+        .any(|x| x.to_str() == Some("--chat-template-file"))
+    }) {
+      break;
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("call 1 last_params.extras never persisted");
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+  }
+
+  let _ = client
+    .call(
+      "stop_model",
+      Some(json!({"launch_id": &first_launch, "grace_secs": 5})),
+    )
+    .await
+    .expect("stop_model");
+
+  // Call 2: selection=auto → pure fit, no extras inherited.
+  let resp = client
+    .call(
+      "start_model",
+      Some(json!({
+        "model_path": &model_path_canon,
+        "selection": "auto",
+      })),
+    )
+    .await
+    .expect("start_model call 2");
+  let port = resp["port"].as_u64().unwrap() as u16;
+
+  let deadline = std::time::Instant::now() + Duration::from_secs(60);
+  let params = loop {
+    let s = state_store::load(&state_dir).expect("load state");
+    if let Some(r) = s.running.iter().find(|r| r.port == port) {
+      break r.params.clone();
+    }
+    if std::time::Instant::now() > deadline {
+      panic!("auto-selection launch never recorded a running snapshot");
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+  };
+
+  assert!(
+    params.extras.is_empty(),
+    "selection=auto inherits nothing; got {:?}",
+    params.extras
   );
 
   let _ = client.call("shutdown", None).await;

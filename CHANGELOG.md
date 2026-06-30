@@ -4,10 +4,14 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Added
+
+- A model's `default:` preset is now its standing launch config and **auto-applies** — on a plain `start <model>` (no `--preset`) and on proxy auto-start, not just as a TUI cycle hint. Resolved server-side as a new precedence layer (`your flags > default preset > last-used > arch defaults > fit`). `default: auto` launches pure fit; `start --preset auto` is the clean per-launch "ignore last-used + default" gesture. The TUI cycle drops the separate `[default]` stop, marks whichever stop is the default with `(default)` and opens on it, and the preset row shows the available count (`preset (N)`). See `docs/plans/2026-06-30-001-feat-default-preset-resolver-layer-plan.md`.
+
 ### Fixed
 
 - TUI Settings knob rows no longer wrap when a `(model/server default)` source label doesn't fit the pane — they truncate on one line with `…`, so cycling presets or live updates don't make the form jump. The running view and the editable form now render through one shared path, so both show/hide/truncate these labels identically.
-- Free-form `llama-server` flags (e.g. `--chat-template-file`, `--mmproj`) now survive a proxy auto-start reload: an auto-started model inherits the extras from its last manual launch instead of dropping them. Manual launches still take their extras verbatim, so clearing them works. (#49)
+- Free-form `llama-server` flags (e.g. `--chat-template-file`, `--mmproj`) survive a proxy auto-start reload and a plain restart: a launch that doesn't pick params inherits its model's effective default (the default preset, else last-used). Use `--preset auto` to launch with nothing inherited. (#49, supersedes the earlier origin-gated behavior)
 
 ## [0.0.5] — 2026-06-25
 

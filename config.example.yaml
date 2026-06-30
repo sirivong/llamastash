@@ -579,11 +579,17 @@ keybindings: {}
 # `{ value: auto }`. The app writes entries in block style (shown below);
 # flow style (`{ ctx: 8192 }`) is also accepted when you hand-author.
 #
-# `default:` is one stop in the TUI's preset cycle (which itself opens on
-# `last used`, not on `default`). It is hand-edited only (there is no
-# set-default command) and is ignored if it names an entry that doesn't
-# exist. The CLI never auto-applies it — a plain `start` with no `--preset`
-# launches with pure auto-fit defaults.
+# `default:` is the model's standing launch config. It is hand-edited only
+# (there is no set-default command) and is ignored if it names an entry that
+# doesn't exist. It AUTO-APPLIES on any launch where you don't pick something:
+# a plain `start <model>` with no `--preset`, and proxy auto-start. Precedence
+# is: your inline flags > default preset > last-used params > arch defaults >
+# fit. Two reserved forms: `default: <name>` applies that preset; `default:
+# auto` launches pure fit (ignores last-used + the default). With no `default:`
+# set, last-used stays the implicit default. Pick a preset explicitly with
+# `start --preset <name>`; `start --preset auto` is the clean "fit fresh"
+# per-launch override. In the TUI the cycle marks the default stop `(default)`
+# and opens on it.
 #
 # Changes the app writes are live immediately; hand-edits here need a
 # `llamastash daemon restart` to be picked up.
@@ -591,7 +597,8 @@ keybindings: {}
 # presets:
 #   # per-model preset, keyed by the GGUF file's basename
 #   Qwen3-Coder-30B-Q4_K_M.gguf:
-#     default: long-ctx               # a stop in the TUI cycle (not auto-applied)
+#     default: long-ctx               # standing default; auto-applies on a plain start
+#                                     # (use `default: auto` for pure fit instead)
 #     entries:
 #       short-ctx:
 #         ctx: 8192

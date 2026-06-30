@@ -181,14 +181,38 @@ pub fn classify_preset_key(key: &str, catalog: &[CatalogRow]) -> KeyClass {
   }
 }
 
-/// A model's resolved preset set plus its default name.
+/// The reserved `default:` value meaning "launch pure-fit by default"
+/// (skip the default-preset + last_params layers). Mirrors the reserved
+/// `auto` knob value. Any other `default:` value names a preset.
+pub const AUTO_DEFAULT: &str = "auto";
+
+/// A model's resolved preset set plus its default selection.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EffectivePresets {
   pub presets: Presets,
-  /// The default preset's name — per-model `default` else arch `default`,
-  /// kept only when it names a present entry. Drives the TUI cycle's
-  /// opening selection; never auto-applied on the CLI.
+  /// The model's `default:` selection — per-model `default` else arch
+  /// `default`. Either the reserved [`AUTO_DEFAULT`] sentinel, or a name
+  /// kept only when it matches a present entry (an absent name resolves to
+  /// `None`). Drives both the TUI cycle's opening stop and the server-side
+  /// `PresetDefault` resolver layer.
   pub default: Option<String>,
+}
+
+impl EffectivePresets {
+  /// `true` when `default: auto` — the model launches pure-fit by default.
+  pub fn default_is_auto(&self) -> bool {
+    self.default.as_deref() == Some(AUTO_DEFAULT)
+  }
+
+  /// The default preset's body, when `default:` names a present entry
+  /// (not the `auto` sentinel). This is the `PresetDefault` resolver layer
+  /// source for a no-selection launch.
+  pub fn default_preset(&self) -> Option<&NamedPreset> {
+    match self.default.as_deref() {
+      Some(d) if d != AUTO_DEFAULT => self.presets.get(d),
+      _ => None,
+    }
+  }
 }
 
 /// Resolve a model's effective preset set from the config store: the union
@@ -243,9 +267,11 @@ pub fn effective_presets(
   for np in merged.into_values() {
     presets.upsert(np);
   }
+  // `auto` is the reserved "pure-fit default" sentinel and is kept verbatim;
+  // any other name is kept only when it matches a present entry.
   let default = model_default
     .or(arch_default)
-    .filter(|d| presets.get(d).is_some());
+    .filter(|d| d.eq_ignore_ascii_case(AUTO_DEFAULT) || presets.get(d).is_some());
   EffectivePresets { presets, default }
 }
 
@@ -528,6 +554,53 @@ mod tests {
     assert_eq!(
       eff.default, None,
       "a default naming a missing entry is ignored"
+    );
+  }
+
+  #[test]
+  fn effective_presets_keeps_auto_default_sentinel() {
+    let catalog = vec![catalog_row("/m/coder.gguf", "qwen2")];
+    let mut store = BTreeMap::new();
+    store.insert(
+      "coder.gguf".into(),
+      block(&[("m1", body_ctx(1))], Some("auto")),
+    );
+    let eff = effective_presets(
+      "coder.gguf",
+      "/m/coder.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
+    assert_eq!(
+      eff.default.as_deref(),
+      Some("auto"),
+      "auto sentinel survives"
+    );
+    assert!(eff.default_is_auto(), "recognized as the auto default");
+    assert!(eff.default_preset().is_none(), "auto names no preset entry");
+  }
+
+  #[test]
+  fn effective_presets_default_preset_resolves_named_entry() {
+    let catalog = vec![catalog_row("/m/coder.gguf", "qwen2")];
+    let mut store = BTreeMap::new();
+    store.insert(
+      "coder.gguf".into(),
+      block(&[("m1", body_ctx(42))], Some("m1")),
+    );
+    let eff = effective_presets(
+      "coder.gguf",
+      "/m/coder.gguf",
+      Some("qwen2"),
+      &store,
+      &catalog,
+    );
+    assert!(!eff.default_is_auto());
+    assert_eq!(
+      eff.default_preset().map(|np| np.name.as_str()),
+      Some("m1"),
+      "named default resolves to its entry"
     );
   }
 

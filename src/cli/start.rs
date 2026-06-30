@@ -40,12 +40,24 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
   // Mode: explicit override > catalog hint (unless `unknown`).
   let mode = resolve_mode(&row, args.mode)?;
 
+  // Launch selection (drives daemon-side default-preset + last_params
+  // inheritance). `--preset auto` is the reserved "pure fit" choice (no
+  // preset fetch); a named `--preset` is an explicit baseline; a plain
+  // `start` makes no selection, so the daemon applies the model's `default:`.
+  let preset_is_auto = args.preset.as_deref() == Some(crate::launch::presets::AUTO_DEFAULT);
+  let selection = match args.preset.as_deref() {
+    Some(p) if p == crate::launch::presets::AUTO_DEFAULT => "auto",
+    Some(_) => "explicit",
+    None => "default",
+  };
+
   // Preset baseline → IPC params. `presets_show` returns the saved
   // params so the daemon doesn't have to re-resolve the model id.
-  let mut params = if let Some(preset_name) = args.preset.as_ref() {
-    fetch_preset_params(&mut client, &row.path, preset_name).await?
-  } else {
-    PartialParams::default()
+  let mut params = match args.preset.as_ref() {
+    Some(preset_name) if !preset_is_auto => {
+      fetch_preset_params(&mut client, &row.path, preset_name).await?
+    }
+    _ => PartialParams::default(),
   };
 
   match args.ctx {
@@ -91,7 +103,13 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     }
   }
 
-  let payload = build_payload(&row.path, mode, &params, args.backend.map(|b| b.wire()));
+  let payload = build_payload(
+    &row.path,
+    mode,
+    &params,
+    args.backend.map(|b| b.wire()),
+    selection,
+  );
   let resp = client
     .call("start_model", Some(payload))
     .await
@@ -435,13 +453,22 @@ fn parse_cli_knobs(
   Ok((knobs, extras))
 }
 
-fn build_payload(model_path: &str, mode: &str, p: &PartialParams, backend: Option<&str>) -> Value {
+fn build_payload(
+  model_path: &str,
+  mode: &str,
+  p: &PartialParams,
+  backend: Option<&str>,
+  selection: &str,
+) -> Value {
   let mut obj = serde_json::Map::new();
   obj.insert(
     "model_path".into(),
     Value::String(PathBuf::from(model_path).display().to_string()),
   );
   obj.insert("mode".into(), Value::String(mode.to_string()));
+  // Drives whether the daemon applies the model's `default:` preset +
+  // last_params inheritance. `default` (no selection) is the common case.
+  obj.insert("selection".into(), Value::String(selection.to_string()));
   // Per-model backend override. Omitted when unset so the daemon
   // applies its default (`Auto` → identity rule).
   if let Some(b) = backend {
@@ -607,9 +634,10 @@ mod tests {
       knobs,
       extras: vec!["--rope-freq-base".into(), "10000".into()],
     };
-    let v = build_payload("/m/a.gguf", "chat", &p, None);
+    let v = build_payload("/m/a.gguf", "chat", &p, None, "default");
     assert_eq!(v["model_path"], serde_json::json!("/m/a.gguf"));
     assert_eq!(v["mode"], serde_json::json!("chat"));
+    assert_eq!(v["selection"], serde_json::json!("default"));
     assert_eq!(v["ctx"], serde_json::json!(32768));
     assert!(v.get("port").is_none(), "port unset must be absent");
     assert_eq!(v["reasoning"], serde_json::json!(true));
@@ -633,8 +661,9 @@ mod tests {
       knobs: TypedKnobs::default(),
       extras: vec![],
     };
-    let v = build_payload("/m/a.gguf", "chat", &p, Some("llamacpp"));
+    let v = build_payload("/m/a.gguf", "chat", &p, Some("llamacpp"), "explicit");
     assert_eq!(v["backend"], serde_json::json!("llamacpp"));
+    assert_eq!(v["selection"], serde_json::json!("explicit"));
   }
 
   fn osvec(args: &[&str]) -> Vec<OsString> {

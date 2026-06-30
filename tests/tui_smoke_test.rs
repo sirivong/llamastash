@@ -308,8 +308,9 @@ fn settings_focused_cyclable_field_renders_arrow_glyphs() {
   app.models = vec![fake_model("/m/qwen.gguf", "/m")];
   app.go_top();
   pump_input(&mut app, key(KeyCode::Enter, KeyModifiers::NONE));
-  // Cursor lands on Ctx (the first field) by default.
-  let frame = render_to_string(&mut app, 120, 24);
+  // Cursor lands on the Preset row (it leads the form). Render wide enough
+  // that the focused row's `◀ value ▶` hint isn't clipped by the right pane.
+  let frame = render_to_string(&mut app, 160, 24);
   assert!(
     frame.contains("◀") && frame.contains("▶"),
     "focused cyclable field must show ◀ … ▶ value hint: {frame}"

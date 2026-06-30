@@ -18,7 +18,7 @@ use crate::discovery::DiscoveredModel;
 use crate::theme::{palette_for, Palette, ThemeName};
 use crate::tui::filter::rank;
 use crate::tui::keybindings::{Action, Focus, KeyMap};
-use crate::tui::launch_picker::{LaunchPickerState, PresetChoice};
+use crate::tui::launch_picker::{LaunchPickerState, PresetChoice, PresetStop};
 use crate::tui::list_pane::{build_rows, ListRow, RowInputs, RunningLaunchRow};
 use crate::tui::status_icons::SurfaceState;
 use crate::tui::tabs::{tabs_for_mode, RightTab};
@@ -427,6 +427,11 @@ pub struct StartModelArgs {
   /// Per-model backend choice from the Launch picker. `Auto` runs
   /// the identity rule on the daemon side.
   pub backend: crate::launch::params::BackendChoice,
+  /// Launch selection signal for the daemon resolver. The TUI flattens
+  /// the form client-side, so a form launch is `"explicit"`; the `auto`
+  /// cycle stop sends `"auto"` (pure fit). Never `"default"` — the TUI
+  /// always resolves a concrete stop.
+  pub selection: &'static str,
 }
 
 /// How alarming a confirm prompt is, so the overlay can tone its
@@ -1449,8 +1454,8 @@ impl App {
     // is always shown (it offers `last used` ↔ `auto` even with no named
     // presets), and it captures the seeds above as its `last used` baseline.
     if let Some(p) = &path {
-      let (choices, default) = self.effective_preset_choices(p);
-      state.set_presets(choices, default);
+      let (choices, default_stop) = self.effective_preset_choices(p);
+      state.set_presets(choices, default_stop);
     }
     // Open with the cursor on the always-shown Preset row — it leads the form
     // and is the first thing a user picks when staging a launch. Centralized
@@ -1463,12 +1468,14 @@ impl App {
 
   /// Resolve the focused model's effective presets into picker-ready
   /// choices (ctx/reasoning folded into the typed knobs) plus the default
-  /// index. Reuses [`crate::launch::presets::effective_presets`] against
-  /// the local catalog, so the TUI and daemon agree on classification.
-  fn effective_preset_choices(&self, path: &Path) -> (Vec<PresetChoice>, Option<usize>) {
+  /// cycle stop. Reuses [`crate::launch::presets::effective_presets`] against
+  /// the local catalog, so the TUI and daemon agree on classification: the
+  /// default stop is `Auto` for `default: auto`, `Named(i)` for a configured
+  /// named default, else `LastUsed` (unset).
+  fn effective_preset_choices(&self, path: &Path) -> (Vec<PresetChoice>, PresetStop) {
     use crate::launch::presets::{effective_presets, preset_body_from_launch_params};
     if self.config_presets.is_empty() {
-      return (Vec::new(), None);
+      return (Vec::new(), PresetStop::LastUsed);
     }
     let (rows, name, arch) = self.preset_resolution_inputs(path);
     let path_str = path.display().to_string();
@@ -1488,11 +1495,18 @@ impl App {
         extras: np.params.extras.clone(),
       })
       .collect();
-    let default = eff
+    let default_stop = if eff.default_is_auto() {
+      PresetStop::Auto
+    } else if let Some(i) = eff
       .default
       .as_ref()
-      .and_then(|d| choices.iter().position(|c| &c.name == d));
-    (choices, default)
+      .and_then(|d| choices.iter().position(|c| &c.name == d))
+    {
+      PresetStop::Named(i)
+    } else {
+      PresetStop::LastUsed
+    };
+    (choices, default_stop)
   }
 
   /// Resolution inputs for `path`: the catalog projected into

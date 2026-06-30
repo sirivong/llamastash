@@ -48,7 +48,7 @@ Carried from the PR #18 brainstorm's goals, re-scoped by the 2026-06-23 deepenin
 - **No `presets_set_default` op.** The default is config-only (hand-edited). No CLI/TUI sets it.
 - **No TUI list/delete.** The TUI only *saves* (`Ctrl+P`) and *selects* (cycle row). Listing/deleting is CLI.
 - **CLI/TUI write per-model keys only.** Arch-level presets are hand-authored in `config.yaml`.
-- **No CLI default auto-apply.** `start <model>` with no `--preset` launches "auto" (pure resolver/fit defaults), exactly as today. `--preset <name>` applies one. (No `--no-preset` flag — there's nothing to opt out of.)
+- **No CLI default auto-apply.** `start <model>` with no `--preset` launches "auto" (pure resolver/fit defaults), exactly as today. `--preset <name>` applies one. (No `--no-preset` flag — there's nothing to opt out of.) **[SUPERSEDED 2026-06-30** by `docs/plans/2026-06-30-001-feat-default-preset-resolver-layer-plan.md`: the `default:` preset now auto-applies server-side on a no-selection launch (`default: auto` is the pure-fit form), and `--preset auto` is the clean per-launch override.**]**
 - **No new resolver `LayerLabel`.** A selected/explicit preset keeps collapsing into the `User` layer client-side, as `--preset` does today.
 - **No preset inheritance, cross-machine sync beyond the config file, versioning, or live-validation against a running server.**
 - **Config presets carry no `port`** (per-launch, auto-assigned).

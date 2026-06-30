@@ -94,13 +94,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       );
     }
     // Preset cycle row leads the form. No source chip: it's a selector,
-    // not an inherited value.
+    // not an inherited value. The label carries the count of named presets
+    // available for this model (`preset (0)` when none).
     let focused = pv.field == PickerField::Preset;
     if focused {
       focused_line = Some(lines.len() as u16);
     }
+    let preset_label = format!("preset ({})", pv.presets.len());
     lines.push(crate::tui::fmt::kv_row_focused(
-      "preset",
+      &preset_label,
       pv.preset_value_label(),
       None,
       focused,

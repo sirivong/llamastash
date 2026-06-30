@@ -1875,6 +1875,13 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
   // scripted clients, so project them out of `knobs` for the call.
   let name = app.display_name_for(&path);
   let active_instances = app.managed.iter().filter(|m| m.path == path).count();
+  // The TUI flattens the resolved form client-side, so a form launch is an
+  // explicit selection (daemon won't re-apply the default/last_params). The
+  // `auto` cycle stop is pure fit.
+  let selection = match picker.preset_stop {
+    crate::tui::launch_picker::PresetStop::Auto => "auto",
+    _ => "explicit",
+  };
   let args = Box::new(crate::tui::app::StartModelArgs {
     ctx: knobs.ctx.set_value().copied(),
     reasoning: knobs.reasoning.set_value().copied(),
@@ -1884,6 +1891,7 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
     mode,
     prefer_port: picker.prefer_port,
     backend: picker.model_backend,
+    selection,
   });
 
   if active_instances > 0 {
@@ -2162,6 +2170,7 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
         mode,
         prefer_port,
         backend,
+        selection,
       } = *args;
       let mode_str = mode.map(|m| match m {
         crate::launch::mode::LaunchMode::Chat => "chat",
@@ -2180,6 +2189,8 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
           "prefer_port": prefer_port,
           // Per-model backend override; serde → "auto"/"llamacpp".
           "backend": backend,
+          // Drives daemon default-preset + last_params inheritance.
+          "selection": selection,
         }),
       )
     }

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::backend::identity::ModelIdentity;
 use crate::backend::{Backend, LaunchPlan};
@@ -26,7 +26,7 @@ use crate::daemon::registry::LaunchId;
 use crate::daemon::shutdown::ShutdownToken;
 use crate::daemon::state_store::RunningSnapshot;
 use crate::daemon::supervisor::{
-  spawn as supervisor_spawn, LaunchOrigin, ManagedModel, ManagedSpawn, ManagedState,
+  spawn as supervisor_spawn, ManagedModel, ManagedSpawn, ManagedState,
 };
 use crate::gguf::header::{read_path as read_gguf_header, HeaderReadOptions};
 use crate::gguf::identity::ModelId;
@@ -83,6 +83,27 @@ pub(crate) struct StartParams {
   /// forces a backend. Set by `start --backend` and the TUI Launch picker.
   #[serde(default)]
   pub(crate) backend: Option<crate::launch::params::BackendChoice>,
+  /// How the caller selected launch params — drives whether the daemon
+  /// applies the model's configured `default:` preset and `last_params`
+  /// inheritance. Absent on the wire ⇒ `Default` (no selection), which is
+  /// what the proxy's `StartParams::default()` auto-start path sends.
+  #[serde(default)]
+  pub(crate) selection: LaunchSelection,
+}
+
+/// How a launch chose its parameters. See the resolver rule in
+/// `compose_and_spawn`: `Default` applies the effective default
+/// (`PresetDefault` → `LastUsed`); `Explicit` means the caller already
+/// flattened a named preset / inline flags into `knobs`/`extras` (skip the
+/// default layer, let `last_params` fill knob gaps, extras verbatim);
+/// `Auto` is pure fit (skip the default layer and `last_params`, no extras).
+#[derive(Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LaunchSelection {
+  #[default]
+  Default,
+  Explicit,
+  Auto,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -265,19 +286,60 @@ pub(crate) async fn compose_and_spawn(
     snap.last_params_map().get(&identity).map(|p| (**p).clone())
   };
 
-  // Free-form extras. A proxy auto-start arrives with an empty request, so
-  // it inherits the model's last_params extras to keep flags like
-  // `--chat-template-file` / `--mmproj` across reload cycles. Manual launches
-  // (TUI / `llamastash start` / IPC `start_model`) are taken verbatim, so a
-  // user who clears extras actually gets none. The empty-vs-set check can't
-  // tell a cleared manual launch from an auto-start, but the origin can.
-  launch_params.extras = if origin == LaunchOrigin::AutoStart {
-    last_params
+  // The model's configured `default:` preset (config-only), resolved
+  // server-side so it applies uniformly on CLI plain `start`, the TUI, and
+  // proxy auto-start. Only a no-selection launch consults it, so explicit /
+  // auto launches skip the preset-store snapshot + catalog projection. Read
+  // via the same `effective_presets` the IPC handlers use.
+  let is_default_sel = matches!(parsed.selection, LaunchSelection::Default);
+  let effective_default = if is_default_sel {
+    let store = ctx.presets.snapshot().await;
+    let rows = crate::ipc::methods::catalog_rows(ctx).await;
+    let key = crate::util::paths::path_basename(&parsed.model_path);
+    let path_str = parsed.model_path.display().to_string();
+    Some(crate::launch::presets::effective_presets(
+      &key,
+      &path_str,
+      arch.as_deref(),
+      &store,
+      &rows,
+    ))
+  } else {
+    None
+  };
+
+  // Collapse the launch into one resolution shape. `Auto` (explicit
+  // `--preset auto`) and a no-selection launch whose config default is
+  // `auto` both mean "pure fit": skip the default-preset and last_params
+  // layers entirely. A no-selection launch otherwise applies the effective
+  // default (the `PresetDefault` layer when `default:` names a preset, then
+  // last_params). An explicit launch carries its own flattened knobs/extras.
+  let default_is_auto = effective_default
+    .as_ref()
+    .is_some_and(|e| e.default_is_auto());
+  let pure_fit = matches!(parsed.selection, LaunchSelection::Auto) || default_is_auto;
+  let no_selection = is_default_sel && !pure_fit;
+
+  // Free-form extras (whole-list, no per-flag merge). Explicit inline extras
+  // are always honored verbatim. Otherwise a no-selection launch inherits the
+  // effective default's extras (the default preset's when `default:` names one
+  // with extras, else last_params'); everything else (pure fit, or an
+  // explicit preset that carried no extras) gets none. This supersedes the
+  // PR #49 origin gate — inheritance is driven by "did the caller make a
+  // selection", not Manual-vs-AutoStart, and `auto` is the clean "no inherit"
+  // gesture.
+  launch_params.extras = if !parsed.extras.is_empty() {
+    parsed.extras.iter().cloned().map(OsString::from).collect()
+  } else if no_selection {
+    effective_default
       .as_ref()
-      .map(|p| p.extras.clone())
+      .and_then(|e| e.default_preset())
+      .map(|np| np.params.extras.clone())
+      .filter(|e| !e.is_empty())
+      .or_else(|| last_params.as_ref().map(|p| p.extras.clone()))
       .unwrap_or_default()
   } else {
-    parsed.extras.into_iter().map(OsString::from).collect()
+    Vec::new()
   };
   // Resolve the multimodal projector: an explicit `mmproj_path` wins;
   // otherwise auto-detect a companion next to the model — unless the
@@ -312,6 +374,17 @@ pub(crate) async fn compose_and_spawn(
     .as_ref()
     .map(|p| p.knobs.clone())
     .unwrap_or_default();
+  // The default preset's knobs (no-selection + named default only). Built
+  // via `preset_body_from_launch_params` so the preset's `ctx`/`reasoning`
+  // (held as `LaunchParams` siblings) fold back into the knob set.
+  let default_preset_knobs = if no_selection {
+    effective_default
+      .as_ref()
+      .and_then(|e| e.default_preset())
+      .map(|np| crate::launch::presets::preset_body_from_launch_params(&np.params).knobs)
+  } else {
+    None
+  };
   let empty_yaml = crate::config::TypedKnobs::default();
   let yaml_knobs = arch
     .as_deref()
@@ -322,20 +395,22 @@ pub(crate) async fn compose_and_spawn(
     Some(a) => crate::launch::defaults_table::lookup(a, backend),
     None => crate::launch::defaults_table::lookup("", backend),
   };
-  // yaml + built-in share the `ArchDefault` chip — yaml wins per
-  // field via precedence order.
-  let mut resolved = crate::launch::params::resolve_layered(&[
-    (crate::launch::params::LayerLabel::User, &user_knobs),
-    (
-      crate::launch::params::LayerLabel::LastUsed,
-      &last_params_knobs,
-    ),
-    (crate::launch::params::LayerLabel::ArchDefault, yaml_knobs),
-    (
-      crate::launch::params::LayerLabel::ArchDefault,
-      &builtin_knobs,
-    ),
-  ]);
+  // Build the precedence chain per resolution shape. `User` always leads.
+  // `PresetDefault` (named config default) ranks below User, above LastUsed.
+  // `LastUsed` is skipped under pure fit. yaml + built-in share the
+  // `ArchDefault` chip — yaml wins per field via precedence order.
+  use crate::launch::params::LayerLabel;
+  let mut layers: Vec<(LayerLabel, &crate::config::TypedKnobs)> =
+    vec![(LayerLabel::User, &user_knobs)];
+  if let Some(k) = default_preset_knobs.as_ref() {
+    layers.push((LayerLabel::PresetDefault, k));
+  }
+  if !pure_fit {
+    layers.push((LayerLabel::LastUsed, &last_params_knobs));
+  }
+  layers.push((LayerLabel::ArchDefault, yaml_knobs));
+  layers.push((LayerLabel::ArchDefault, &builtin_knobs));
+  let mut resolved = crate::launch::params::resolve_layered(&layers);
   // Seed knobs no layer filled per the default launch mode: under
   // `Auto` a layer-less knob delegates to `--fit` (an Auto knob emits
   // nothing, exactly like the unset slot it replaces). The mode is
@@ -1359,5 +1434,25 @@ mod tests {
     let path = build_log_path(std::path::Path::new("/tmp"), &id);
     let name = path.file_name().unwrap().to_string_lossy();
     assert!(name.starts_with("model-"), "fallback stem: {name}");
+  }
+
+  #[test]
+  fn launch_selection_defaults_to_default_and_round_trips() {
+    // An absent `selection` on the wire is the no-selection default — what
+    // the proxy's `StartParams::default()` auto-start path relies on.
+    let parsed: StartParams =
+      serde_json::from_value(serde_json::json!({"model_path": "/m/x.gguf"})).unwrap();
+    assert_eq!(parsed.selection, LaunchSelection::Default);
+    assert_eq!(StartParams::default().selection, LaunchSelection::Default);
+    for (s, want) in [
+      ("default", LaunchSelection::Default),
+      ("explicit", LaunchSelection::Explicit),
+      ("auto", LaunchSelection::Auto),
+    ] {
+      let p: StartParams =
+        serde_json::from_value(serde_json::json!({"model_path": "/m/x.gguf", "selection": s}))
+          .unwrap();
+      assert_eq!(p.selection, want, "selection {s} round-trips");
+    }
   }
 }
