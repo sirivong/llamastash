@@ -164,6 +164,58 @@ llamastash logs <launch-id> -f
 
 Once the underlying launch issue is fixed, the fallback path stops firing. To turn the fallback off entirely is tracked as a deferred decision in `TODO.md §R1` (`proxy.fallback: false`).
 
+## My DeepSeek-V4 model launched on llama.cpp, not ds4
+
+**This is expected in several cases** — ds4 is preferred, not required, and llama.cpp runs DeepSeek-V4 too, so an auto launch never refuses. Walk the checklist:
+
+- **ds4-server not found.** ds4 is default-on only when the binary resolves. Check `llamastash status --json | jq '.backends[] | select(.id=="ds4")'` — `installed: false` means no `ds4-server` on `PATH` and no valid `ds4.binary`. See the [ds4 backend](usage.md#ds4-backend) setup.
+- **ds4 force-disabled.** `ds4.enabled: false` in config turns it off even when the binary is present.
+- **The GGUF isn't ds4-compatible.** A generic third-party `deepseek4` quant (K-quants on attention tensors, Q6_K experts) fails ds4's quant contract and stays a llama.cpp model. `llamastash list --json | jq '.models[] | {name, backend}'` badges `ds4` only on files that would actually route there.
+- **Embedding / rerank mode.** `--mode embedding` or `--mode rerank` routes a compatible model to llama.cpp — ds4 serves chat/completions only.
+
+**Force it:** `llamastash start <model> --backend ds4` bypasses the predicate (ds4-server surfaces its own error if the file is a genuine mismatch).
+
+## ds4 model out-of-memories at load
+
+**Symptom:** a DeepSeek-V4 launch is admitted, then the backend dies allocating VRAM/RAM. These GGUFs are 81–300+ GB; the practical floor is ~128 GB (CUDA/ROCm) / ~96 GB (Metal).
+
+**Fix:** set the **`ssd_streaming` native knob** to stream weights from disk instead of requiring full residency. This is the one launch where the pre-spawn admission gate is deliberately skipped. Two caveats:
+
+- The bypass keys on the **native knob only**. An extras-spelled `-- --ssd-streaming` reaches ds4-server but still hits LlamaStash's admission gate first, so the launch can be refused before spawn. Use the native knob (launch picker / preset), not the extras tail.
+- Every deepseek4 launch also prints **"KV demand not modeled for deepseek4"** — the admission estimate omits the KV term for this arch, so it can admit a launch that then OOMs at a large context. Watch your memory headroom and lower `--ctx` if a load stalls.
+
+(Verified: an 86 GB Flash IQ2XXS reached Ready via `ssd_streaming` on a 121 GB box, and OOMed without it.)
+
+## ds4 split PRO half-file refused
+
+**Symptom:** launching `DeepSeek-V4-Pro-Q4K-Layers00-30.gguf` or `…-Layers-31-output.gguf` is refused before spawn with "ds4 distributed mode unsupported".
+
+**This is the design.** Those two files are one split PRO model that ds4 runs only in distributed mode, which LlamaStash does not support — each half is unloadable on its own by either engine. Use a **single-file** DeepSeek-V4 GGUF instead (the `…-Pro-IQ2XXS-…-Instruct` and Flash quants are single-file). `--backend ds4` bypasses the guard if you want ds4-server to surface its own error.
+
+## ds4 response says a different model name
+
+**Symptom:** every response from a ds4-backed model — including streamed chunks — has `"model": "deepseek-v4-flash"` (or `"deepseek-v4-pro"`) instead of the name you requested.
+
+**This is expected.** ds4-server reports a fixed alias on `/v1/models` and echoes it in every response body; LlamaStash forwards it verbatim rather than rewriting streamed bodies. The TUI right pane shows a "serves as deepseek-v4-*" line on the running model so the mapping is visible. Clients that assert on the response `model` field must expect the alias.
+
+## ds4 embeddings / rerank request fails
+
+**Symptom:** a `POST /v1/embeddings` or `/v1/rerank` request that resolves to a running ds4 model returns a JSON error ("the ds4 backend serves chat/completions only, not embeddings or rerank").
+
+**This is the design.** ds4-server has no embeddings/rerank endpoints. Launch the model on llama.cpp for those modes — a plain `--mode embedding` / `--mode rerank` launch of a ds4-compatible GGUF already routes to llama.cpp automatically. Reserve ds4 for chat/completions.
+
+## Codex / Responses-API client can't reach a ds4 model
+
+**Symptom:** a client that speaks only the OpenAI Responses API (`POST /v1/responses`) — e.g. recent Codex CLI — can't drive a ds4 model through the proxy.
+
+**Known gap.** ds4-server speaks `/v1/responses`, but the LlamaStash proxy does not route it yet (tracked in `TODO.md`). Use a Chat Completions (`/v1/chat/completions`) or Anthropic Messages (`/v1/messages`) client against the proxy for now.
+
+## `state.json` quarantined after downgrading LlamaStash
+
+**Symptom:** after running a newer LlamaStash that launched a ds4 model and then reverting to an older binary, the daemon quarantines `state.json` as `state.json.broken-<ts>` and boots with defaults.
+
+**This is expected pre-release.** The ds4 work added a `resolved_backend` tag on last-params rows and a `"ds4"` backend value the older binary's state schema doesn't understand, so it rejects the file rather than misreading it. LlamaStash keeps no backward-compatibility guarantees before the first stable release. Favorites / last-params / the running snapshot reset for that boot; named presets live in `config.yaml` and survive. Don't hop between old and new binaries against one state dir.
+
 ## HuggingFace pull does nothing
 
 **This is intentional.** The in-app HF pull worker is deferred to v2 (R46). The `pull` subcommand is hidden from `--help` and exits unimplemented. Use `huggingface-cli download ...` for now; llamastash discovers the downloaded files via its cache scanner.

@@ -268,8 +268,11 @@ Launch a model. Layered resolution: catalog row → optional preset → per-invo
 ```
 llamastash start <ref> [--preset NAME] [--ctx N] [--port N] [--wait]
                      [--reasoning on|off] [--mode chat|embedding|rerank]
+                     [--backend auto|ds4|llamacpp|lemonade]
                      [--<advanced-knob> ...] [-- <llama-server-flags>...]
 ```
+
+`--backend` defaults to `auto` (picks the engine by model identity — a DeepSeek-V4 GGUF routes to the [ds4 backend](#ds4-backend) when available, everything else to llama.cpp). Override it to force a specific engine.
 
 Every typed knob the Settings editor exposes is also a first-class `start` flag — `--n-gpu-layers`, `--threads`, `--device`, `--tensor-split`, `--main-gpu`, `--split-mode`, `--flash-attn`, `--cache-type-k`/`-v`, `--batch-size`, `--mlock`, … Run `start --help` for the full list under **Advanced launch params** (the flags are generated from the same spec table the TUI uses, so the two surfaces can't drift). Booleans take `--flash-attn` (= on) or `--flash-attn=false`. Anything `start` doesn't recognise as a knob — including `llama-server`'s single-dash shorts like `-ngl` — still works verbatim after `--`. A knob set both inline and after `--` resolves to the `--` value.
 
@@ -396,6 +399,64 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 `daemon stop` calls the IPC `shutdown` RPC, then waits (up to 10 s) for the daemon process to actually exit before printing `daemon: stopped` — so `daemon stop && daemon start` never races the dying daemon's lockfile or its managed `lemond` umbrella. If teardown outlives the wait it falls back to `daemon: shutdown requested (still exiting, pid N)`. When `runtime.json` is missing (the IPC channel can't be opened because a stale daemon from an older version is holding the lockfile) pass `--force` (or `-f`) to fall back to a `SIGTERM` on the PID recorded in `daemon.pid`. The CLI auto-detects this state on every command and prints the exact `kill` / `--force` invocation needed.
 
 `daemon status --json` emits the raw `version` IPC response (the same `{name, version, protocol_version, pid, uptime_seconds, connections}` object an agent would get by hitting the UDS directly). The plain form is a human key/value block and is not a stable machine contract — agents should always use `--json`.
+
+## ds4 backend
+
+[ds4](https://github.com/antirez/ds4) (antirez's DwarfStar) is a third backend: a direct, process-per-model engine that runs the `ds4-server` binary for the DeepSeek-V4 Flash/PRO GGUFs at [huggingface.co/antirez/deepseek-v4-gguf](https://huggingface.co/antirez/deepseek-v4-gguf). It is the purpose-built engine for those files (disk KV cache, SSD streaming); llama.cpp also runs DeepSeek-V4, so ds4 is preferred, never required.
+
+**You supply the binary.** LlamaStash does not install ds4-server — build it from the repo (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and either put `ds4-server` on `PATH` or point `ds4.binary` at it. ds4 is **default-on the moment the binary resolves**; it stays completely dormant when it doesn't (no discovery, no new JSON fields on other rows).
+
+Enable / configure:
+
+```yaml
+ds4:
+  # binary: /opt/ds4/ds4-server   # explicit path; else `ds4-server` on PATH
+  # enabled:                       # tri-state:
+  #   (unset)  auto — on when the binary is found (the default)
+  #   true     force on
+  #   false    force off even when the binary is present
+```
+
+`--ds4` on `daemon start` and `LLAMASTASH_DS4=1` also force ds4 on (OR-merged with the config, and carried through the detached daemon re-exec).
+
+### Which GGUFs run on ds4
+
+Routing is automatic and keys on a header-level compatibility predicate — arch `deepseek4` **plus** ds4's quant contract (routed-expert tensors `ffn_*_exps` in `IQ2_XXS` / `Q2_K` / `Q4_K`, every other tensor in `F32` / `F16` / `Q8_0` / `I32`). Both published Flash/PRO variants pass; a generic third-party `deepseek4` K-quant does not and stays an ordinary llama.cpp model.
+
+- A **compatible** GGUF launches on ds4 when ds4 is available and the mode is chat/completions.
+- Otherwise it **falls back to llama.cpp** — never a refusal. llama.cpp master runs DeepSeek-V4 too.
+- `start <model> --backend ds4` forces ds4 (it surfaces its own error if the file is a mismatch); `--backend llamacpp` forces llama.cpp on a compatible file. `--backend` accepts `auto` (default) | `ds4` | `llamacpp` | `lemonade`.
+- `--mode embedding` / `--mode rerank` on a compatible model routes to llama.cpp — ds4 serves chat/completions only.
+- The split PRO half-files (`…-Layers00-30.gguf` / `…-Layers-31-output.gguf`) are refused before spawn with "ds4 distributed mode unsupported"; use a single-file DeepSeek-V4 GGUF. Single-file PRO quants (e.g. the `…-Pro-IQ2XXS-…-Instruct` variants) are fine.
+
+### ds4 native knobs
+
+ds4-server takes six backend-specific tunables that have no llama.cpp equivalent. Set them per-launch in the TUI launch picker or persist them in a preset; ds4 honors exactly one typed knob from the shared set — `ctx` (→ `--ctx`).
+
+| Knob             | ds4-server flag      | What it does |
+| ---------------- | -------------------- | ------------ |
+| `power`          | `--power`            | GPU duty-cycle target, 1–100 (ds4 default 100) |
+| `tokens`         | `--tokens`           | Default max output tokens when a client omits a limit |
+| `threads`        | `--threads`          | CPU helper-thread count for host-side work |
+| `kv_disk_dir`    | `--kv-disk-dir`      | Directory for ds4's persistent disk KV cache (see privacy note below) |
+| `kv_disk_space_mb` | `--kv-disk-space-mb` | Disk KV cache budget in MB (ds4 default 4096 when enabled) |
+| `ssd_streaming`  | `--ssd-streaming`    | Stream weights from disk (below-RAM-floor mode; skips the admission gate) |
+
+Any other ds4-server flag (`--kv-cache-*`, `--prefill-chunk`, …) rides the free-form extras tail after `--`, e.g. `start <model> -- --prefill-chunk 512`. The loopback/credential denylist still applies, extended for ds4 with `--cors` and `--dist-` — those are stripped/refused.
+
+> **Note on MTP:** DeepSeek-V4's MTP (speculative-decoding) sidecar GGUF exists on HuggingFace, but the `ds4-server` binary does not consume it (`--mtp` is a ds4-CLI-only flag). There is no MTP knob.
+
+### Oversized models and below-floor hardware
+
+The DeepSeek-V4 GGUFs are 81–300+ GB; the practical RAM floor is roughly 128 GB on CUDA/ROCm and 96 GB on Metal. On a box below the floor, full residency out-of-memories. Set the **`ssd_streaming` native knob** to stream weights from disk instead — this is the one launch where the pre-spawn admission gate is skipped (the on-disk size no longer maps to memory demand). This bypass keys on the native knob only: an extras-spelled `--ssd-streaming` still hits the admission gate. Because DeepSeek-V4's KV-cache geometry is not modeled, every deepseek4 launch also prints a one-line "KV demand not modeled for deepseek4" advisory — watch your memory headroom on load.
+
+### Response model alias
+
+ds4-server reports a fixed model id on `/v1/models` and echoes it in the `model` field of every response (including streamed chunks) — `deepseek-v4-flash` or `deepseek-v4-pro`, not the name you requested. LlamaStash does not rewrite it. The TUI right pane shows a "serves as deepseek-v4-*" line on a running ds4 model so the mismatch is explicable.
+
+### kv-disk cache privacy
+
+`--kv-disk-dir` is ds4's own persistent cache, reused across restarts. LlamaStash never subdir-mangles or cleans it — it is entirely ds4-owned state. It durably holds conversation-derived data under ds4's own permissions (umask) at exactly the path you type, without any of LlamaStash's `0600` state-file hygiene. **Point it at a private, user-owned directory.**
 
 ## Proxy (OpenAI-compatible listener)
 

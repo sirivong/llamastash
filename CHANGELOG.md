@@ -6,6 +6,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Added
 
+- ds4 (DwarfStar) backend for DeepSeek-V4 GGUFs — runs antirez's `ds4-server` for the Flash/PRO models, auto-routing a compatible GGUF to it when the binary resolves and falling back to llama.cpp otherwise (never a refusal). Default-on when found; enable/force via `[ds4]` config, `--ds4`, or `LLAMASTASH_DS4=1`. Six ds4-native launch knobs, `--ssd-streaming` for below-RAM-floor hardware, a `ds4_unavailable` doctor advisory, and a `status.backends` ds4 row. See `docs/usage.md#ds4-backend`.
 - A model's `default:` preset is now its standing launch config and **auto-applies** — on a plain `start <model>` (no `--preset`) and on proxy auto-start, not just as a TUI cycle hint. Resolved server-side as a new precedence layer (`your flags > default preset > last-used > arch defaults > fit`). `default: auto` launches pure fit; `start --preset auto` is the clean per-launch "ignore last-used + default" gesture. The TUI cycle drops the separate `[default]` stop, marks whichever stop is the default with `(default)` and opens on it, and the preset row shows the available count (`preset (N)`). See `docs/plans/2026-06-30-001-feat-default-preset-resolver-layer-plan.md`.
 
 ### Fixed

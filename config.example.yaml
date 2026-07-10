@@ -409,6 +409,35 @@ lemonade:
   # Sources — CLI: (none) · Env: (none). Config-only.
   port: 13305
 
+# ─── ds4 (DwarfStar) — DeepSeek V4 backend ────────────────────────
+#
+# A third backend that runs antirez's `ds4-server` for the DeepSeek-V4
+# Flash/PRO GGUFs. A ds4-compatible GGUF auto-routes to ds4 when the
+# binary resolves; anything else (and any incompatible quant) stays on
+# llama.cpp — ds4 is preferred, never required. You supply the binary:
+# build ds4-server from https://github.com/antirez/ds4 and either put it
+# on PATH or point `binary` at it. Zero footprint when it's absent.
+#
+# Unknown keys inside this block are rejected loudly (no
+# silently-tolerated typos). See docs/usage.md#ds4-backend.
+#
+# ds4:
+  # Force the backend on or off. Tri-state — leave unset for the
+  # default (auto: on whenever `ds4-server` resolves), `true` to force
+  # on, `false` to force off even when the binary is present.
+  #
+  # Sources — CLI: daemon start --ds4 (force on) ·
+  #           Env: LLAMASTASH_DS4=1 (force on).
+  # (The flag and env only force on; `false` here still wins as an
+  # explicit off.)
+  # enabled: true
+
+  # Explicit path to the `ds4-server` binary. Comment out to fall back
+  # to a `ds4-server` found on `$PATH`.
+  #
+  # Sources — CLI: (none) · Env: (none). Config-only.
+  # binary: /opt/ds4/ds4-server
+
 # ─── Keybindings ──────────────────────────────────────────────────
 #
 # Override the default keymap. Each entry maps an action name

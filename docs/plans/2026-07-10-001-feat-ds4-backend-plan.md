@@ -937,7 +937,7 @@ rows)
 **Verification:** TUI E2E per `AGENTS.md` (launch, eyeball the panels);
 `doctor --json` carries the advisory with `schema_version` still 2.
 
-- [ ] **Unit 9: Docs sweep, TODO ledger, PR #46 coordination**
+- [x] **Unit 9: Docs sweep, TODO ledger, PR #46 coordination**
 
 **Goal:** Docs ship with the code; every deliberate omission is written down
 where the next reader will look.

@@ -42,11 +42,12 @@ daemon's state directory:
   constant time and never logged. TLS is not yet implemented, so LAN
   mode is plaintext HTTP — keep it on a trusted network or front it
   with a TLS-terminating reverse proxy.
-- `llama-server` children **always** listen on `127.0.0.1` only. The
-  proxy reaches them over loopback; the `extras` denylist (`--host`,
-  `--listen`, `--bind`, `--api-key`, `--ssl-*`) blocks any attempt to
-  rebind them. LAN exposure is the proxy's job alone — models are never
-  put on the network.
+- Backend children (`llama-server`, `ds4-server`) **always** listen on
+  `127.0.0.1` only. The proxy reaches them over loopback; the `extras`
+  denylist (`--host`, `--listen`, `--bind`, `--api-key`, `--ssl-*`,
+  plus ds4's `--cors` and `--dist-`) blocks any attempt to rebind them
+  or weaken the browser same-origin posture. LAN exposure is the
+  proxy's job alone — models are never put on the network.
 - The daemon does **not** persist or transmit telemetry.
 
 Issues we treat as in scope:
@@ -54,8 +55,9 @@ Issues we treat as in scope:
 - Any path that lets a non-owner (different UID) read `runtime.json`
   or otherwise attach to the control plane.
 - Any path that lets a remote attacker reach the **control plane** or a
-  **`llama-server`** instance LlamaStash launched (e.g., accidentally
-  binding either to `0.0.0.0`) — both must stay loopback always.
+  **backend child** LlamaStash launched (`llama-server`, `ds4-server`)
+  (e.g., accidentally binding either to `0.0.0.0`) — both must stay
+  loopback always.
 - Any **auth bypass** on the LAN-exposed proxy: reaching the proxy's
   data routes without a valid bearer key when one is configured, or the
   daemon binding a non-loopback proxy without a key when
@@ -70,7 +72,8 @@ Issues we treat as in scope:
 
 Out of scope:
 
-- `llama.cpp` / `llama-server` upstream behaviour (please report there).
+- Backend-engine upstream behaviour — `llama.cpp` / `llama-server`,
+  `ds4` / `ds4-server`, Lemonade / `lemond` (please report there).
 - Local denial-of-service by a malicious user against their own daemon.
 - Issues that require the attacker to already have shell access as
   the daemon owner.

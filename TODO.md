@@ -200,6 +200,14 @@ places.
 ## R6 (v0.0.6 checklist)
 
 - [ ] MLX as a native peer backend (the generic `ModelIdentity` seam already supports it; would drop in alongside llama.cpp/Lemonade).
+- [x] ~~ds4 (DwarfStar) as a direct peer backend for DeepSeek V4 GGUFs.~~ — shipped: the PR #46 native-knob channel landed first, then the ds4 backend (`src/backend/ds4/`), compat-predicate routing with llama.cpp fallback (`ds4_compatible`), config/enablement (`[ds4]`, `--ds4`, `LLAMASTASH_DS4`), admission/`ssd_streaming` bypass, adoption + external sweep, proxy `/ui` exclusion, `ds4_unavailable` doctor advisory, and docs. Plan: [`docs/plans/2026-07-10-001-feat-ds4-backend-plan.md`](docs/plans/2026-07-10-001-feat-ds4-backend-plan.md). Deferred follow-ups (documented as scope-out, not gaps):
+  - [ ] `/v1/responses` proxy forwarding — ds4-server speaks it; the proxy doesn't route it yet. See [`src/proxy/router.rs`](src/proxy/router.rs).
+  - [ ] deepseek4 KV-cache geometry in the admission demand model — the KV term degrades to 0 for `deepseek4`, so launches carry a "KV demand not modeled" advisory. See [`src/gguf/memory.rs`](src/gguf/memory.rs) and the KV-blind branch in [`src/daemon/launch_service.rs`](src/daemon/launch_service.rs).
+  - [ ] distributed / split-GGUF PRO mode — the `…-Layers00-30` / `…-Layers-31-output` pair is refused pre-spawn (`is_ds4_split_half`). See [`src/backend/ds4/mod.rs`](src/backend/ds4/mod.rs).
+  - [ ] MTP auto-pairing — the MTP GGUF exists on HF but `ds4-server` doesn't consume it, and there's no auto-detect/pair of the sidecar.
+  - [ ] measured ds4 admission overhead band — the demand model has no ds4-specific overhead term; needs real-hardware measurement.
+  - [ ] ds4 in `init` — the wizard doesn't offer ds4 install (mirrors Lemonade's user-driven enablement).
+  - [ ] real-hardware ds4 UAT automation — the integration suite is fixture-backed; no automated run against a real `ds4-server` on a 96 GB+ box.
 - [ ] a keybinding (shift+l) to switch left/right pane ratio (configurable in config.yaml. 4 slots with defaults current/50/70/90)
 - [x] ~~The (model/server default) label for setting knobs should not wrap; cut off what doesn't fit and show `…`.~~ — Settings rows clip to the pane width with `…` (no `Wrap`); the running view and editable form now share one render path (`fmt::clip_line` is the shared primitive), so both truncate identically. (821c26b)
 - [x] ~~show a label (N) near the prest knob in settings to indicate how many presets are available for the current model. (N=0 if none)~~ — the Settings preset row renders `preset (N)` (count of effective named presets), `preset (0)` when none.

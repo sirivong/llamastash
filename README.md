@@ -206,6 +206,10 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 - **A pluggable backend seam.** llama.cpp is the direct, zero-overhead default; [Lemonade](https://github.com/lemonade-sdk/lemonade) (`lemond`) plugs in as a second backend for engines llama.cpp can't reach — **NPU inference** on AMD Ryzen AI / XDNA, plus ROCm / ONNX / others. Off by default; enable per `[lemonade]` config, `--lemonade`, or `LLAMASTASH_LEMONADE=1`.
 - **You install Lemonade; LlamaStash drives it.** No auto-install — LlamaStash finds `lemond` (PATH or `lemonade.binary`), supervises the shared umbrella, discovers its models, routes inference through the proxy, and evicts idle models by API unload. See **[Lemonade setup](docs/lemonade-setup.md)**.
 
+### [ds4 (DwarfStar) — DeepSeek V4 GGUFs](docs/usage.md#ds4-backend)
+
+- **A third backend for antirez's [ds4](https://github.com/antirez/ds4).** ds4-server is the purpose-built engine for the DeepSeek-V4 Flash/PRO GGUFs (disk KV cache, SSD streaming). A ds4-compatible GGUF auto-routes to ds4 when the `ds4-server` binary is found, and **falls back to llama.cpp when it isn't** — llama.cpp master runs DeepSeek-V4 too, so ds4 is preferred, never required. Default-on when the binary resolves; enable/force via `[ds4]` config, `--ds4`, or `LLAMASTASH_DS4=1`. An SSD-streaming launch knob runs the 81–300+ GB models on below-floor RAM. See **[ds4 backend](docs/usage.md#ds4-backend)**.
+
 ### [Built to be safe to run](FEATURES.md#built-to-be-safe-to-run)
 
 - [Bearer-token loopback control plane (`runtime.json` `0600`)](FEATURES.md#bearer-token-control-plane) — the per-daemon token + URL live in `$XDG_STATE_HOME/llamastash/runtime.json`; same-UID trust, no network exposure.
