@@ -48,6 +48,10 @@ struct RunningEntry {
   model_id: ModelId,
   port: u16,
   name: String,
+  /// Whether this backend serves a browser web UI `/ui` can reverse-proxy
+  /// (D-ui). ds4 serves none, so its rows are never auto-pinned and render
+  /// non-selectable in the chooser.
+  serves_ui: bool,
 }
 
 /// Where a `/ui/...` request should be served from.
@@ -124,20 +128,32 @@ fn active_pin(headers: &HeaderMap, running: &[RunningEntry]) -> Option<String> {
   running.iter().any(|e| e.launch_id == pin).then_some(pin)
 }
 
-/// Apply the four-step selection rule over the running list.
+/// Apply the selection rule over the running list, honoring the UI-less
+/// exclusion (D-ui): a backend that serves no web UI (ds4) is never
+/// auto-pinned and never satisfies a cookie pin — it can only appear in the
+/// chooser as a non-selectable row. The "no model running" page stays
+/// reserved for *zero* running models, so a running ds4 model never reads as
+/// "nothing running".
 fn resolve_target(headers: &HeaderMap, mut running: Vec<RunningEntry>) -> UiTarget {
-  // 1. Cookie pin → that backend, if it is still running.
+  if running.is_empty() {
+    return UiTarget::None;
+  }
+  // 1. Cookie pin → that backend, but only if it serves a web UI.
   if let Some(pin) = read_target_cookie(headers) {
-    if let Some(idx) = running.iter().position(|e| e.launch_id == pin) {
+    if let Some(idx) = running
+      .iter()
+      .position(|e| e.launch_id == pin && e.serves_ui)
+    {
       return UiTarget::Forward(running.swap_remove(idx));
     }
   }
-  // 2/3/4. Degenerate cases on the running count.
-  match running.len() {
-    0 => UiTarget::None,
-    1 => UiTarget::Forward(running.pop().expect("len == 1")),
-    _ => UiTarget::Chooser(running),
+  // 2. Auto-forward only to a *lone* UI-serving model; anything else (a lone
+  //    UI-less model, or several models) shows the chooser — which renders
+  //    UI-less rows non-selectable.
+  if running.len() == 1 && running[0].serves_ui {
+    return UiTarget::Forward(running.pop().expect("len == 1"));
   }
+  UiTarget::Chooser(running)
 }
 
 /// Snapshot every Ready, servable supervisor as a [`RunningEntry`].
@@ -168,11 +184,19 @@ async fn collect_running(state: &Arc<ProxyState>) -> Vec<RunningEntry> {
           .unwrap_or_else(|| crate::util::paths::model_display_name(&m.path))
       })
       .unwrap_or_else(|| crate::util::paths::model_display_name(&id.path));
+    // ds4-backed models serve no web UI (D-ui). Derive from the catalog row
+    // via the same badge the daemon routes on; a model missing from the
+    // catalog defaults to "serves a UI" (llama.cpp).
+    let serves_ui = by_path
+      .get(&path_key)
+      .map(|m| !crate::discovery::catalog::ds4_badge_for(m, state.ctx.ds4_available()))
+      .unwrap_or(true);
     out.push(RunningEntry {
       launch_id: launch_id.as_str().to_string(),
       model_id: id,
       port: model.port(),
       name,
+      serves_ui,
     });
   }
   out
@@ -300,18 +324,31 @@ fn chooser_html(running: &[RunningEntry], active: Option<&str>) -> String {
     } else {
       ""
     };
-    items.push_str(&format!(
-      "<li><a href=\"/ui/?target={id}\">{name}<span class=\"port\">:{port}{current}</span></a></li>",
-      id = escape_html(&e.launch_id),
-      name = escape_html(&e.name),
-      port = e.port,
-    ));
+    if e.serves_ui {
+      items.push_str(&format!(
+        "<li><a href=\"/ui/?target={id}\">{name}<span class=\"port\">:{port}{current}</span></a></li>",
+        id = escape_html(&e.launch_id),
+        name = escape_html(&e.name),
+        port = e.port,
+      ));
+    } else {
+      // UI-less backend (ds4): shown so the user knows it is running, but not
+      // a link — it serves no web UI to open.
+      items.push_str(&format!(
+        "<li class=\"no-ui\"><span class=\"name\">{name}</span>\
+         <span class=\"port\">:{port}{current}</span> \
+         <span class=\"reason\">no web UI</span></li>",
+        name = escape_html(&e.name),
+        port = e.port,
+      ));
+    }
   }
   page(
     "Choose a model",
     &format!(
       "<h1>Choose a model</h1>\
-       <p>Several models are running. Pick the one whose web UI you want to open.</p>\
+       <p>Pick the model whose web UI you want to open. Models marked \
+       <em>no web UI</em> are running but serve no browser interface.</p>\
        <ul class=\"models\">{items}</ul>\
        <p class=\"tip\">Already on a model? Open \
        <a href=\"/ui/switch\"><code>/ui/switch</code></a> to come back here and pick \
@@ -413,6 +450,10 @@ mod tests {
   }
 
   fn entry(launch_id: &str, port: u16, name: &str) -> RunningEntry {
+    entry_ui(launch_id, port, name, true)
+  }
+
+  fn entry_ui(launch_id: &str, port: u16, name: &str, serves_ui: bool) -> RunningEntry {
     RunningEntry {
       launch_id: launch_id.to_string(),
       model_id: ModelId {
@@ -421,6 +462,7 @@ mod tests {
       },
       port,
       name: name.to_string(),
+      serves_ui,
     }
   }
 
@@ -509,6 +551,44 @@ mod tests {
       resolve_target(&HeaderMap::new(), Vec::new()),
       UiTarget::None
     ));
+  }
+
+  #[test]
+  fn resolve_target_lone_ui_less_model_shows_chooser_not_none() {
+    // A single running ds4 model (UI-less) must NOT auto-pin and must NOT
+    // read as "nothing running" — it renders the chooser (D-ui).
+    let running = vec![entry_ui("L1", 41100, "deepseek-v4-flash", false)];
+    assert!(matches!(
+      resolve_target(&HeaderMap::new(), running),
+      UiTarget::Chooser(_)
+    ));
+  }
+
+  #[test]
+  fn resolve_target_ui_less_is_excluded_from_autopin_and_cookie() {
+    // With one ds4 (UI-less) + one llama (UI) running and no cookie, the
+    // chooser lists both — ds4 non-selectable, llama selectable.
+    let running = vec![
+      entry_ui("L1", 41100, "deepseek-v4-flash", false),
+      entry_ui("L2", 41101, "qwen3", true),
+    ];
+    match resolve_target(&HeaderMap::new(), running) {
+      UiTarget::Chooser(entries) => {
+        let html = chooser_html(&entries, None);
+        assert!(html.contains("no web UI"), "ds4 row marked no-ui: {html}");
+        assert!(html.contains("/ui/?target=L2"), "llama row selectable");
+        assert!(!html.contains("/ui/?target=L1"), "ds4 row not a link");
+      }
+      _ => panic!("expected chooser"),
+    }
+    // A cookie pinned to the UI-less ds4 model is ignored (it can't serve UI).
+    let mut headers = HeaderMap::new();
+    headers.insert(hyper::header::COOKIE, "ls_ui_target=L1".parse().unwrap());
+    let pinned = vec![entry_ui("L1", 41100, "deepseek-v4-flash", false)];
+    assert!(
+      matches!(resolve_target(&headers, pinned), UiTarget::Chooser(_)),
+      "cookie pin to a UI-less model must not forward"
+    );
   }
 
   #[test]

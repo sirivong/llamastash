@@ -815,7 +815,7 @@ wiring), `tests/start_model_ipc_test.rs` (in-process daemon +
 watch `status` show the row re-adopted; `cargo test --features test-fixtures
 --test ds4_backend_test` green.
 
-- [ ] **Unit 7: Proxy and `/ui` integration**
+- [x] **Unit 7: Proxy and `/ui` integration**
 
 **Goal:** ds4 models work end-to-end through the proxy (auto-start, chat,
 Anthropic surface) and `/ui` never strands a browser on a UI-less backend.

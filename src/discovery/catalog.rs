@@ -86,7 +86,7 @@ impl ModelCatalog {
 /// header read for every other model), and the file passes the full ds4
 /// quant-contract predicate. This is the *same* [`ds4_compatible`] the daemon
 /// routes on, so a row badges `ds4` exactly when a plain launch would.
-fn ds4_badge_for(m: &DiscoveredModel, ds4_available: bool) -> bool {
+pub(crate) fn ds4_badge_for(m: &DiscoveredModel, ds4_available: bool) -> bool {
   if !ds4_available {
     return false;
   }

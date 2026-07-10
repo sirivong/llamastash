@@ -169,6 +169,26 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
   };
 
   let decision = route::decide(&state, parsed.model).await;
+  // ds4 serves chat/completions, not embeddings/rerank (D-ui scope). When an
+  // embeddings/rerank request resolves to a running ds4 model, answer with a
+  // clear JSON error instead of forwarding into ds4-server's bare 404.
+  let req_path = uri.path().to_string();
+  let is_embed_or_rerank = req_path == "/v1/embeddings" || req_path == "/v1/rerank";
+  if is_embed_or_rerank {
+    if let RouteDecision::ReadyAt {
+      served_model_key, ..
+    } = &decision
+    {
+      if ds4_backs_model(&state, served_model_key).await {
+        return error_response(
+          StatusCode::BAD_REQUEST,
+          "unsupported_endpoint",
+          "the ds4 backend serves chat/completions only, not embeddings or rerank; \
+           launch an embedding-capable model (it routes to llama.cpp) for this endpoint",
+        );
+      }
+    }
+  }
   // Both the Ready and NotRunning arms need the same inbound bundle;
   // build it once before the match so the two arms stay short and the
   // forward path sees one canonical shape.
@@ -681,6 +701,22 @@ fn unauthorized_body() -> Vec<u8> {
 /// message)` triple. Centralised so the 404 / `model_not_running`
 /// arms all emit the same
 /// `{"error":{"type":..., "message":...}}` envelope.
+/// Whether the resolved running model is ds4-backed — via the same honest
+/// badge the daemon routes on. Used to answer embeddings/rerank against a ds4
+/// model with a clear error rather than ds4-server's bare 404.
+async fn ds4_backs_model(state: &Arc<ProxyState>, id: &crate::gguf::identity::ModelId) -> bool {
+  if !state.ctx.ds4_available() {
+    return false;
+  }
+  let cat = state.ctx.catalog.snapshot().await;
+  let by_path = route::index_catalog_by_path(&cat);
+  let key = id.path.to_string_lossy().into_owned();
+  by_path
+    .get(&key)
+    .map(|m| crate::discovery::catalog::ds4_badge_for(m, true))
+    .unwrap_or(false)
+}
+
 pub(crate) fn error_response(status: StatusCode, r#type: &str, message: &str) -> ProxyResponse {
   let body = ErrorResponse {
     error: ErrorObject::new(r#type, message),
