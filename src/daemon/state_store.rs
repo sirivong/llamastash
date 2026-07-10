@@ -57,6 +57,19 @@ pub struct DaemonState {
 pub struct LastParamsEntry {
   pub id: ModelIdentity,
   pub params: LaunchParams,
+  /// The backend id this launch *resolved* to (`llamacpp` / `lemonade` /
+  /// `ds4`) — the cross-backend contamination guard (D-contamination). The
+  /// persisted `params.backend` choice stays `auto` for an auto-routed
+  /// launch, so it can't serve as the tag. `#[serde(default)]` reads a
+  /// pre-tag row as `llamacpp` (its only possible backend then).
+  #[serde(default = "default_resolved_backend")]
+  pub resolved_backend: String,
+}
+
+/// Serde default for [`LastParamsEntry::resolved_backend`]: `llamacpp`, the
+/// only backend that could have written a pre-tag `state.json` row.
+fn default_resolved_backend() -> String {
+  "llamacpp".to_string()
 }
 
 /// One entry in `presets` — a model's named-preset list.
@@ -103,9 +116,21 @@ impl DaemonState {
   /// as the "recent launches" projection the TUI surfaces in its
   /// `↺ Recent` section. On re-upsert of an existing id the entry
   /// moves to the front too — re-launching a model "promotes" it.
-  pub fn upsert_last_params(&mut self, id: ModelIdentity, params: LaunchParams) {
+  pub fn upsert_last_params(
+    &mut self,
+    id: ModelIdentity,
+    params: LaunchParams,
+    resolved_backend: String,
+  ) {
     self.last_params.retain(|e| e.id != id);
-    self.last_params.insert(0, LastParamsEntry { id, params });
+    self.last_params.insert(
+      0,
+      LastParamsEntry {
+        id,
+        params,
+        resolved_backend,
+      },
+    );
   }
 
   /// Insert or replace the preset list for `id`.
@@ -276,7 +301,11 @@ mod tests {
     let mut s = DaemonState::default();
     s.favorites.add(id("/m/a.gguf", 1));
     s.favorites.add(id("/m/b.gguf", 2));
-    s.upsert_last_params(id("/m/a.gguf", 1), fake_params("/m/a.gguf"));
+    s.upsert_last_params(
+      id("/m/a.gguf", 1),
+      fake_params("/m/a.gguf"),
+      "llamacpp".into(),
+    );
     let mut presets_for_a = Presets::new();
     presets_for_a.upsert(NamedPreset {
       name: "coding".into(),
@@ -299,6 +328,34 @@ mod tests {
   }
 
   #[test]
+  fn resolved_backend_tag_round_trips_and_legacy_rows_default_to_llamacpp() {
+    // A tagged row survives save→load; a legacy row (no `resolved_backend`
+    // key) reads back as `llamacpp` (D-contamination default).
+    let dir = temp_state_dir("resolved-backend-tag");
+    let mut s = DaemonState::default();
+    s.upsert_last_params(
+      id("/m/a.gguf", 1),
+      fake_params("/m/a.gguf"),
+      "ds4".to_string(),
+    );
+    save(&dir, &s).expect("save");
+    let back = load(&dir).expect("load");
+    assert_eq!(back.last_params[0].resolved_backend, "ds4");
+    // Legacy row without the field deserialises to the llamacpp default:
+    // serialise a real entry, strip `resolved_backend`, read it back.
+    let entry = LastParamsEntry {
+      id: id("/m/legacy.gguf", 2),
+      params: fake_params("/m/legacy.gguf"),
+      resolved_backend: "ds4".to_string(),
+    };
+    let mut v = serde_json::to_value(&entry).unwrap();
+    v.as_object_mut().unwrap().remove("resolved_backend");
+    let legacy: LastParamsEntry = serde_json::from_value(v).expect("legacy row parses");
+    assert_eq!(legacy.resolved_backend, "llamacpp");
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
   fn non_empty_backend_knobs_round_trips_through_state_json() {
     // The `skip_serializing_if = is_empty` field must still survive a
     // save→load when populated (no silent data loss on daemon restart).
@@ -312,7 +369,7 @@ mod tests {
     params
       .backend_knobs
       .insert("quality".into(), KnobValue::Auto);
-    s.upsert_last_params(id("/m/a.gguf", 1), params.clone());
+    s.upsert_last_params(id("/m/a.gguf", 1), params.clone(), "llamacpp".into());
     save(&dir, &s).expect("save");
     let back = load(&dir).expect("load");
     let restored = &back.last_params.first().unwrap().params;
@@ -329,14 +386,14 @@ mod tests {
     let mut s = DaemonState::default();
     let a = id("/m/a.gguf", 1);
     let b = id("/m/b.gguf", 2);
-    s.upsert_last_params(a.clone(), fake_params("/m/a.gguf"));
-    s.upsert_last_params(b.clone(), fake_params("/m/b.gguf"));
+    s.upsert_last_params(a.clone(), fake_params("/m/a.gguf"), "llamacpp".into());
+    s.upsert_last_params(b.clone(), fake_params("/m/b.gguf"), "llamacpp".into());
     assert_eq!(s.last_params[0].id, b, "newest insertion sits at the front");
 
     // Re-launch `a` — it should hop to the front again.
     let mut p2 = fake_params("/m/a.gguf");
     p2.ctx = Some(32768);
-    s.upsert_last_params(a.clone(), p2.clone());
+    s.upsert_last_params(a.clone(), p2.clone(), "llamacpp".into());
     assert_eq!(s.last_params.len(), 2, "re-upsert is in-place, not append");
     assert_eq!(s.last_params[0].id, a, "promoted to front on re-launch");
     assert_eq!(s.last_params[0].params, p2);
@@ -345,8 +402,16 @@ mod tests {
   #[test]
   fn map_views_align_with_pair_storage() {
     let mut s = DaemonState::default();
-    s.upsert_last_params(id("/m/a.gguf", 1), fake_params("/m/a.gguf"));
-    s.upsert_last_params(id("/m/b.gguf", 2), fake_params("/m/b.gguf"));
+    s.upsert_last_params(
+      id("/m/a.gguf", 1),
+      fake_params("/m/a.gguf"),
+      "llamacpp".into(),
+    );
+    s.upsert_last_params(
+      id("/m/b.gguf", 2),
+      fake_params("/m/b.gguf"),
+      "llamacpp".into(),
+    );
     let view = s.last_params_map();
     assert_eq!(view.len(), 2);
     assert!(view.contains_key(&id("/m/a.gguf", 1)));
@@ -468,7 +533,7 @@ mod tests {
     .into();
     let mut s = DaemonState::default();
     s.favorites.add(bid.clone());
-    s.upsert_last_params(bid.clone(), fake_params("/unused"));
+    s.upsert_last_params(bid.clone(), fake_params("/unused"), "llamacpp".into());
     let mut presets = Presets::new();
     presets.upsert(NamedPreset {
       name: "fast".into(),
@@ -504,7 +569,11 @@ mod tests {
     // wrote and read.
     let dir = temp_state_dir("wire-compat");
     let mut s = DaemonState::default();
-    s.upsert_last_params(id("/m/a.gguf", 1), fake_params("/m/a.gguf"));
+    s.upsert_last_params(
+      id("/m/a.gguf", 1),
+      fake_params("/m/a.gguf"),
+      "llamacpp".into(),
+    );
     save(&dir, &s).unwrap();
     let raw = fs::read_to_string(path(&dir)).unwrap();
     assert!(raw.contains("\"path\""), "id keeps the bare path field");

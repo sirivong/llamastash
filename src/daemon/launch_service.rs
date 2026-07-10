@@ -319,14 +319,49 @@ pub(crate) async fn compose_and_spawn(
   launch_params.port = Some(port);
   // Per-model backend override: `None` keeps the default `Auto`
   // (identity rule); an explicit choice from `start --backend` / the TUI
-  // picker overrides it. Resolved into a backend at the selection seam below.
+  // picker overrides it.
   launch_params.backend = parsed.backend.unwrap_or_default();
-  // The model's last successful launch params. Taken once here and reused
-  // for the last-used knob layer below, so state is cloned a single time.
-  let last_params = {
-    let snap = ctx.state.snapshot().await;
-    snap.last_params_map().get(&identity).map(|p| (**p).clone())
+
+  // Resolve the backend up front (D-route) so both the launch plan *and* the
+  // cross-backend contamination gate below see the same decision. Selection
+  // honors the per-model override, then the ds4-compatibility signal (a
+  // compatible GGUF prefers ds4 when it's available and the mode fits), then
+  // the identity rule (`Auto` → GGUF binds llama.cpp; a `deepseek4` GGUF still
+  // runs there as fallback).
+  let sel_ctx = crate::backend::SelectionContext {
+    ds4_compatible,
+    ds4_available: ctx.ds4_available(),
+    // ds4-server serves chat/completions, not embeddings/rerank — a mode
+    // mismatch routes to llama.cpp (a routing input, not an error).
+    ds4_mode_ok: mode == LaunchMode::Chat,
   };
+  let inference_backend =
+    crate::backend::resolve_backend_for_launch(&identity, launch_params.backend, &sel_ctx);
+  let resolved_backend_id = crate::backend::Backend::id(&inference_backend).to_string();
+
+  // The model's last successful launch params + the backend it resolved to.
+  // Cloned once here and reused for the last-used knob layer below.
+  let last_params_entry = {
+    let snap = ctx.state.snapshot().await;
+    snap
+      .last_params
+      .iter()
+      .find(|e| e.id == identity)
+      .map(|e| (e.params.clone(), e.resolved_backend.clone()))
+  };
+  // D-contamination: the implicit LastUsed layer + extras inheritance apply
+  // only when the stored launch resolved to the *same* backend, so llama.cpp
+  // extras (`--rope-freq-base …`) saved before ds4 existed can't poison a ds4
+  // spawn (and vice versa). Explicit config (presets, inline extras) is
+  // untouched. A legacy row with no tag reads as `llamacpp`.
+  let last_params_backend_ok = last_params_entry
+    .as_ref()
+    .map(|(_, tag)| tag == &resolved_backend_id)
+    .unwrap_or(false);
+  let last_params = last_params_entry
+    .as_ref()
+    .filter(|_| last_params_backend_ok)
+    .map(|(p, _)| p.clone());
 
   // The model's configured `default:` preset (config-only), resolved
   // server-side so it applies uniformly on CLI plain `start`, the TUI, and
@@ -383,11 +418,22 @@ pub(crate) async fn compose_and_spawn(
   } else {
     Vec::new()
   };
-  // Native knobs pass through verbatim (not layered by the typed-knob
-  // resolver). Empty for llama.cpp / Lemonade; ds4 is the first consumer.
-  // Cross-backend inheritance from last_params is gated on the resolved
-  // backend tag in Unit 5 (D-contamination).
-  launch_params.backend_knobs = parsed.backend_knobs.clone();
+  // Native knobs (not layered by the typed-knob resolver): explicit inline
+  // values win verbatim; else a no-selection relaunch inherits the last-used
+  // native knobs — but only through the backend-matched `last_params` gate
+  // above (D-contamination), so a ds4 relaunch re-applies its `--power` /
+  // `--kv-disk-*` while a cross-backend run inherits nothing. Empty for
+  // llama.cpp / Lemonade.
+  launch_params.backend_knobs = if !parsed.backend_knobs.is_empty() {
+    parsed.backend_knobs.clone()
+  } else if no_selection {
+    last_params
+      .as_ref()
+      .map(|p| p.backend_knobs.clone())
+      .unwrap_or_default()
+  } else {
+    std::collections::BTreeMap::new()
+  };
   // Resolve the multimodal projector: an explicit `mmproj_path` wins;
   // otherwise auto-detect a companion next to the model — unless the
   // caller is already managing the projector through `extras`
@@ -578,21 +624,8 @@ pub(crate) async fn compose_and_spawn(
     None => env.binary.clone(),
   };
 
-  // Translate the resolved knob IR into a launch plan via the backend.
-  // Selection honors the per-model override, then the ds4-compatibility
-  // routing signal (D-route: a compatible GGUF prefers ds4 when it's
-  // available and the mode fits), then the identity rule (`Auto` → GGUF binds
-  // llama.cpp — a `deepseek4` GGUF still runs there as fallback). The
-  // orchestrator owns the branch on plan shape below.
-  let sel_ctx = crate::backend::SelectionContext {
-    ds4_compatible,
-    ds4_available: ctx.ds4_available(),
-    // ds4-server serves chat/completions, not embeddings/rerank — a mode
-    // mismatch routes to llama.cpp (a routing input, not an error).
-    ds4_mode_ok: mode == LaunchMode::Chat,
-  };
-  let inference_backend =
-    crate::backend::resolve_backend_for_launch(&identity, launch_params.backend, &sel_ctx);
+  // `inference_backend` was resolved up front (before the last_params gate).
+  // The orchestrator owns the branch on plan shape below.
 
   // Backend-specific extras denylist, checked once the backend is known: ds4
   // adds `--cors` / `--dist-` on top of the base loopback/auth heads already
@@ -890,6 +923,10 @@ pub(crate) async fn compose_and_spawn(
     model.clone(),
     identity.clone(),
     persist_params,
+    // Tag the recorded row with the backend this launch resolved to
+    // (D-contamination) so a future cross-backend launch of the same model
+    // skips the LastUsed layer + extras inheritance.
+    resolved_backend_id,
     // Slow HIP/Metal loads routinely exceed the old fixed 180 s wall
     // clock; key the recorder's deadline off the same size-scaled probe
     // budget the supervisor uses (base +2 h cap) so a slow load still
@@ -1181,6 +1218,7 @@ fn spawn_last_params_recorder(
   model: ManagedModel,
   id: ModelIdentity,
   params: LaunchParams,
+  resolved_backend: String,
   probe_budget: Duration,
   shutdown: ShutdownToken,
 ) {
@@ -1195,7 +1233,7 @@ fn spawn_last_params_recorder(
       match model.state().await {
         ManagedState::Ready => {
           state
-            .mutate(|s| s.upsert_last_params(id.clone(), params.clone()))
+            .mutate(|s| s.upsert_last_params(id.clone(), params.clone(), resolved_backend.clone()))
             .await;
           // Post-launch actuals: stamp what `--fit` actually chose
           // on the running snapshot so `status` / the TUI Running view /

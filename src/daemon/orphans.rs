@@ -79,11 +79,12 @@ pub struct ExternalProcess {
 #[derive(Debug, Clone)]
 pub struct SweepInputs<'a> {
   pub recorded_running: &'a [RunningSnapshot],
-  /// Substring matched against process command lines to detect
-  /// `llama-server` invocations the daemon doesn't own. Defaults
-  /// to "llama-server" in production; tests inject a unique
-  /// substring so they don't trip on the real binary.
-  pub external_marker: &'a str,
+  /// Process basenames matched to detect backend-child invocations the
+  /// daemon doesn't own. Defaults to `["llama-server", "ds4-server"]` in
+  /// production (D-adopt: the sweep learns ds4's process marker alongside
+  /// llama.cpp's); tests inject a unique substring so they don't trip on the
+  /// real binaries.
+  pub external_markers: &'a [&'a str],
   /// Per-probe network timeout. Each adoption candidate gets one
   /// `/v1/models` call capped at this budget. Production defaults
   /// to 1s; tests can shorten.
@@ -94,7 +95,7 @@ impl<'a> SweepInputs<'a> {
   pub fn new(recorded: &'a [RunningSnapshot]) -> Self {
     Self {
       recorded_running: recorded,
-      external_marker: "llama-server",
+      external_markers: &["llama-server", "ds4-server"],
       probe_timeout: Duration::from_secs(1),
     }
   }
@@ -154,11 +155,34 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
         continue;
       }
     };
-    // Three-factor confirmation: PID alive (above), port listening,
-    // and `/v1/models` returns the recorded model path. Only then is
-    // it safe to claim ownership again — otherwise we may be looking
-    // at a recycled PID or an unrelated `llama-server` invocation.
-    if !models_endpoint_matches(snap.port, &path, inputs.probe_timeout).await {
+    // Three-factor confirmation: PID alive (above), port listening, and the
+    // `/v1/models` id matches — but the id contract is backend-specific
+    // (D-adopt). Dispatch on the live process's basename: a `ds4-server`
+    // child reports a fixed alias (never the path), so we match the alias
+    // set AND cross-check its argv `-m` against the recorded path (the alias
+    // alone can't discriminate two ds4 instances); every other child follows
+    // llama.cpp's path/basename rule.
+    let proc = sys.process(sysinfo::Pid::from_u32(snap.pid as u32));
+    let is_ds4 = proc
+      .map(|p| p.name().to_string_lossy().contains("ds4-server"))
+      .unwrap_or(false);
+    let matched = if is_ds4 {
+      let argv: Vec<String> = proc
+        .map(|p| p.cmd().iter().map(|s| s.to_string_lossy().into()).collect())
+        .unwrap_or_default();
+      let argv_path = extract_model_path(&argv);
+      // argv `-m` must equal the recorded canonical path (restores the
+      // per-file discrimination the alias loses), and the endpoint must
+      // report a ds4 alias.
+      let argv_ok = argv_path
+        .as_deref()
+        .map(|mp| paths_equal(mp, &path))
+        .unwrap_or(false);
+      argv_ok && models_endpoint_reports_ds4_alias(snap.port, inputs.probe_timeout).await
+    } else {
+      models_endpoint_matches(snap.port, &path, inputs.probe_timeout).await
+    };
+    if !matched {
       stale.push(snap);
       continue;
     }
@@ -195,7 +219,7 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
       // basename — for `/usr/bin/llama-server` it is `llama-server`,
       // for `target/debug/llamastash` it is `llamastash`.
       let basename = proc.name().to_string_lossy();
-      if !basename.contains(inputs.external_marker) {
+      if !inputs.external_markers.iter().any(|m| basename.contains(m)) {
         return None;
       }
       let model_path = extract_model_path(&cmd);
@@ -246,6 +270,45 @@ async fn models_endpoint_matches(port: u16, expected: &Path, timeout: Duration) 
   match fetch_models_body(port, timeout).await {
     Ok((200, body)) => body_mentions_path(&body, expected),
     _ => false,
+  }
+}
+
+/// ds4 adoption id contract (D-adopt): `/v1/models` → 200 with a `data[].id`
+/// in ds4's fixed alias set (`deepseek-v4-*`). ds4 never echoes the path, so
+/// the caller pairs this with an argv `-m` cross-check for per-file
+/// discrimination.
+async fn models_endpoint_reports_ds4_alias(port: u16, timeout: Duration) -> bool {
+  let Ok((200, body)) = fetch_models_body(port, timeout).await else {
+    return false;
+  };
+  let Ok(text) = std::str::from_utf8(&body) else {
+    return false;
+  };
+  let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) else {
+    return false;
+  };
+  parsed
+    .get("data")
+    .and_then(|v| v.as_array())
+    .map(|arr| {
+      arr.iter().any(|row| {
+        row
+          .get("id")
+          .and_then(|v| v.as_str())
+          .map(crate::backend::ds4::is_ds4_alias)
+          .unwrap_or(false)
+      })
+    })
+    .unwrap_or(false)
+}
+
+/// Compare two model paths for adoption, tolerant of canonicalisation: try a
+/// canonical compare first (resolves symlinks / `..`), fall back to a direct
+/// path compare when either can't be canonicalised (file already gone).
+fn paths_equal(a: &Path, b: &Path) -> bool {
+  match (a.canonicalize(), b.canonicalize()) {
+    (Ok(ca), Ok(cb)) => ca == cb,
+    _ => a == b,
   }
 }
 
@@ -557,7 +620,7 @@ mod tests {
     let recorded = vec![fake_snapshot(dead, 41123, "/m/a.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_marker: "llamastash-sweep-marker-that-matches-nothing-9f3a",
+      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;
@@ -575,7 +638,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/a.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_marker: "llamastash-sweep-marker-that-matches-nothing-9f3a",
+      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;
@@ -596,7 +659,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_marker: "llamastash-sweep-marker-that-matches-nothing-9f3a",
+      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_secs(1),
     })
     .await;
@@ -621,7 +684,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_marker: "llamastash-sweep-marker-that-matches-nothing-9f3a",
+      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_secs(1),
     })
     .await;
@@ -650,7 +713,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/expected.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_marker: "llamastash-sweep-marker-that-matches-nothing-9f3a",
+      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_secs(1),
     })
     .await;
@@ -687,7 +750,7 @@ mod tests {
     let recorded: Vec<RunningSnapshot> = Vec::new();
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_marker: "sleep",
+      external_markers: &["sleep"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;
@@ -724,7 +787,7 @@ mod tests {
     let recorded: Vec<RunningSnapshot> = Vec::new();
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_marker: "llama-server",
+      external_markers: &["llama-server"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;

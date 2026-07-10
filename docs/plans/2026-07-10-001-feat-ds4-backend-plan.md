@@ -712,7 +712,7 @@ flipping `ds4.enabled` flips all three together.
 
 ### Phase C — lifecycle correctness
 
-- [ ] **Unit 5: Backend-tagged last-params (cross-backend contamination fix)**
+- [x] **Unit 5: Backend-tagged last-params (cross-backend contamination fix)**
 
 **Goal:** Implicit inheritance (LastUsed layer + extras) can never carry one
 backend's flags into another backend's spawn.
@@ -756,7 +756,7 @@ backend's flags into another backend's spawn.
 → ds4 spawn failure) is reproducible on main-plus-Units-1-4 and gone after
 this unit.
 
-- [ ] **Unit 6: Orphan adoption, external sweep, and the fake ds4 fixture**
+- [x] **Unit 6: Orphan adoption, external sweep, and the fake ds4 fixture**
 
 **Goal:** Daemon restarts re-adopt running ds4-server children instead of
 silently orphaning them; stray ds4-server processes surface in the external
