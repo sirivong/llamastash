@@ -15,6 +15,7 @@ pub mod flag_aliases;
 pub mod headroom;
 pub mod list_devices;
 pub mod mode;
+pub mod native_knobs;
 pub mod params;
 pub mod presets;
 pub mod resolve;

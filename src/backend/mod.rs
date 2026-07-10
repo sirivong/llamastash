@@ -43,6 +43,7 @@
 //! file-less backend-registry model rides the same persisted maps as GGUF
 //! rows — reusable by any future backend.
 
+pub mod ds4;
 pub mod identity;
 pub mod lemonade;
 pub mod llama_cpp;
@@ -51,11 +52,13 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::backend::ds4::Ds4Backend;
 use crate::backend::identity::ModelIdentity;
 use crate::backend::lemonade::{LemonadeBackend, LEMONADE_BACKEND_ID};
 use crate::backend::llama_cpp::LlamaCppBackend;
 use crate::daemon::probe::ProbeOptions;
 use crate::launch::flag_aliases::{knob_specs, KnobField};
+use crate::launch::native_knobs::NativeKnobDescriptor;
 use crate::launch::params::{BackendChoice, LaunchParams};
 
 /// How a backend manages the lifecycle of the models it runs.
@@ -92,7 +95,31 @@ pub enum Readiness {
   /// status (including the conventional `503` "still loading") keeps
   /// the probe waiting until its timeout — matching today's behavior.
   HttpPoll { path: String, ready_status: u16 },
+  /// Poll `path` until it returns `ready_status` **and** the JSON body
+  /// advertises a model id in `expect_model_ids`. ds4 needs this because it
+  /// leaves its reserved port *unbound* for the entire multi-minute load, so
+  /// a status-only 200 could come from any process that grabbed the port
+  /// meanwhile — matching the advertised alias confirms the real backend
+  /// bound. Falls back to the timeout if the id never matches.
+  HttpPollModelId {
+    path: String,
+    ready_status: u16,
+    expect_model_ids: Vec<String>,
+  },
 }
+
+/// The HF-credential subset stripped from a backend child's environment.
+/// `HF_*` are llamastash's own pull tokens/config, which a launched inference
+/// server has no reason to see — stripping them keeps the credential blast
+/// radius small. This is the whole strip set ds4 needs (it reads no env
+/// config); llama.cpp's [`crate::backend::llama_cpp::LLAMA_ENV_STRIP`] carries
+/// the same four vars plus its `LLAMA_ARG_*` argv-override guards.
+pub const CREDENTIAL_ENV_STRIP: &[&str] = &[
+  "HF_TOKEN",
+  "HUGGING_FACE_HUB_TOKEN",
+  "HF_HOME",
+  "HF_ENDPOINT",
+];
 
 /// A fully-resolved instruction for starting one model on a
 /// **process-per-model** backend. Everything
@@ -284,6 +311,44 @@ pub trait Backend {
   /// Which knob IR fields this backend honors.
   fn capabilities(&self) -> &KnobCapability;
 
+  /// The backend's own tunables, declared **outside** the llama.cpp
+  /// [`KnobField`] IR (R4) — rendered by the launch picker as native cycle
+  /// /edit rows and translated to flags in [`Self::prepare_launch`] via
+  /// [`crate::launch::native_knobs::translate`]. Orthogonal to
+  /// [`Self::capabilities`]: a backend can honor no `KnobField` and still
+  /// declare a native-knob set.
+  ///
+  /// Defaults to empty: llama.cpp and Lemonade surface no native knobs, so
+  /// the picker + persistence are byte-identical for them. A backend opts in
+  /// by overriding this with a `&'static` descriptor slice (ds4 does).
+  fn native_knobs(&self) -> &'static [NativeKnobDescriptor] {
+    &[]
+  }
+
+  /// Network-affecting flag heads this backend refuses in `extras` /
+  /// native-knob values **on top of** the base loopback/credential denylist
+  /// ([`crate::launch::params::FORBIDDEN_ADVANCED_PREFIXES`]). Default empty:
+  /// llama.cpp and Lemonade add nothing. ds4 adds `--cors` / `--dist-`.
+  fn forbidden_extra_heads(&self) -> &'static [&'static str] {
+    &[]
+  }
+
+  /// Whether this backend serves a browser web UI the proxy's `/ui` surface
+  /// can reverse-proxy. Default `true` (llama.cpp's stock web UI). ds4 serves
+  /// none, so `/ui` must never auto-pin a ds4 model.
+  fn serves_web_ui(&self) -> bool {
+    true
+  }
+
+  /// The model ids a backend's `/v1/models` may advertise for one of its
+  /// launches — the adoption/readiness id contract (D-adopt / D-ready).
+  /// Empty (the default) means "match by the recorded file path/basename"
+  /// (llama.cpp's rule, applied by the orphan sweep). ds4 returns its fixed
+  /// alias set, since it never echoes the path.
+  fn adoption_model_ids(&self) -> &'static [&'static str] {
+    &[]
+  }
+
   /// The accelerator classes this backend can run models on.
   ///
   /// A *static, backend-intrinsic* floor — llama.cpp always runs CPU (GPU
@@ -330,6 +395,8 @@ pub enum Backends {
   LlamaCpp(LlamaCppBackend),
   /// Lemonade (`lemond`) managed-multiplexer — one umbrella, many models.
   Lemonade(LemonadeBackend),
+  /// ds4 (DwarfStar) — direct process-per-model for DeepSeek V4 GGUFs.
+  Ds4(Ds4Backend),
 }
 
 impl Backend for Backends {
@@ -337,6 +404,7 @@ impl Backend for Backends {
     match self {
       Backends::LlamaCpp(b) => b.id(),
       Backends::Lemonade(b) => b.id(),
+      Backends::Ds4(b) => b.id(),
     }
   }
 
@@ -344,6 +412,7 @@ impl Backend for Backends {
     match self {
       Backends::LlamaCpp(b) => b.lifecycle(),
       Backends::Lemonade(b) => b.lifecycle(),
+      Backends::Ds4(b) => b.lifecycle(),
     }
   }
 
@@ -351,6 +420,39 @@ impl Backend for Backends {
     match self {
       Backends::LlamaCpp(b) => b.capabilities(),
       Backends::Lemonade(b) => b.capabilities(),
+      Backends::Ds4(b) => b.capabilities(),
+    }
+  }
+
+  fn native_knobs(&self) -> &'static [NativeKnobDescriptor] {
+    match self {
+      Backends::LlamaCpp(b) => b.native_knobs(),
+      Backends::Lemonade(b) => b.native_knobs(),
+      Backends::Ds4(b) => b.native_knobs(),
+    }
+  }
+
+  fn forbidden_extra_heads(&self) -> &'static [&'static str] {
+    match self {
+      Backends::LlamaCpp(b) => b.forbidden_extra_heads(),
+      Backends::Lemonade(b) => b.forbidden_extra_heads(),
+      Backends::Ds4(b) => b.forbidden_extra_heads(),
+    }
+  }
+
+  fn serves_web_ui(&self) -> bool {
+    match self {
+      Backends::LlamaCpp(b) => b.serves_web_ui(),
+      Backends::Lemonade(b) => b.serves_web_ui(),
+      Backends::Ds4(b) => b.serves_web_ui(),
+    }
+  }
+
+  fn adoption_model_ids(&self) -> &'static [&'static str] {
+    match self {
+      Backends::LlamaCpp(b) => b.adoption_model_ids(),
+      Backends::Lemonade(b) => b.adoption_model_ids(),
+      Backends::Ds4(b) => b.adoption_model_ids(),
     }
   }
 
@@ -358,6 +460,7 @@ impl Backend for Backends {
     match self {
       Backends::LlamaCpp(b) => b.accelerators(),
       Backends::Lemonade(b) => b.accelerators(),
+      Backends::Ds4(b) => b.accelerators(),
     }
   }
 
@@ -365,6 +468,7 @@ impl Backend for Backends {
     match self {
       Backends::LlamaCpp(b) => b.identify(path, header_bytes),
       Backends::Lemonade(b) => b.identify(path, header_bytes),
+      Backends::Ds4(b) => b.identify(path, header_bytes),
     }
   }
 
@@ -378,6 +482,7 @@ impl Backend for Backends {
     match self {
       Backends::LlamaCpp(b) => b.prepare_launch(params, port, binary, probe),
       Backends::Lemonade(b) => b.prepare_launch(params, port, binary, probe),
+      Backends::Ds4(b) => b.prepare_launch(params, port, binary, probe),
     }
   }
 }
@@ -413,6 +518,50 @@ pub fn resolve_backend(identity: &ModelIdentity, choice: BackendChoice) -> Backe
     BackendChoice::Auto => backend_for_identity(identity),
     BackendChoice::LlamaCpp => Backends::LlamaCpp(LlamaCppBackend::new()),
     BackendChoice::Lemonade => Backends::Lemonade(LemonadeBackend::new()),
+    BackendChoice::Ds4 => Backends::Ds4(Ds4Backend::new()),
+  }
+}
+
+/// The routing signal a launch's selection consults beyond identity + the
+/// explicit choice (D-route). Kept as an explicit input so
+/// [`backend_for_identity`] stays pure and the three predicate consumers
+/// (daemon, TUI, CLI badge) can never diverge.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SelectionContext {
+  /// The file passes [`ds4::ds4_compatible`] (arch + quant contract).
+  pub ds4_compatible: bool,
+  /// ds4 is installed + enabled on this daemon.
+  pub ds4_available: bool,
+  /// The launch mode ds4 can serve (chat/completions) — `false` for
+  /// embedding/rerank, which route to llama.cpp instead.
+  pub ds4_mode_ok: bool,
+}
+
+impl SelectionContext {
+  /// Whether an `Auto` launch should prefer ds4: compatible file, ds4 up,
+  /// and a mode ds4 serves. Any `false` falls back to today's identity rule.
+  pub fn prefers_ds4(&self) -> bool {
+    self.ds4_compatible && self.ds4_available && self.ds4_mode_ok
+  }
+}
+
+/// Resolve the backend for a launch, honoring the per-model override **and**
+/// the ds4-compatibility routing signal (D-route). Precedence: an explicit
+/// [`BackendChoice`] wins verbatim; otherwise `Auto` prefers ds4 when
+/// [`SelectionContext::prefers_ds4`], else defers to [`backend_for_identity`]
+/// (a `deepseek4` GGUF still runs on llama.cpp — fallback, never a refusal).
+///
+/// This is the single compat-aware seam the live launch path, the TUI
+/// backend derivation, and the CLI row badge all call, so a row badges `ds4`
+/// exactly when a plain launch would route there.
+pub fn resolve_backend_for_launch(
+  identity: &ModelIdentity,
+  choice: BackendChoice,
+  sel: &SelectionContext,
+) -> Backends {
+  match choice {
+    BackendChoice::Auto if sel.prefers_ds4() => Backends::Ds4(Ds4Backend::new()),
+    other => resolve_backend(identity, other),
   }
 }
 
@@ -520,6 +669,19 @@ mod tests {
     for spec in knob_specs() {
       assert!(b.capabilities().supports(spec.field));
     }
+  }
+
+  #[test]
+  fn llama_and_lemonade_declare_no_native_knobs() {
+    // The native-knob channel is empty for llama.cpp and Lemonade, so the
+    // picker + persistence stay byte-identical for them. ds4 is the first
+    // backend to override `native_knobs()`.
+    assert!(Backends::LlamaCpp(LlamaCppBackend::new())
+      .native_knobs()
+      .is_empty());
+    assert!(Backends::Lemonade(LemonadeBackend::new())
+      .native_knobs()
+      .is_empty());
   }
 
   #[test]

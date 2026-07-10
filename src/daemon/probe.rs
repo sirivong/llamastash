@@ -112,6 +112,77 @@ pub async fn poll_until_ready(
   }
 }
 
+/// Like [`poll_until_ready`], but the ready condition is `ready_status`
+/// **and** the response body advertising one of `expect_ids` (ds4's fixed
+/// `/v1/models` alias set). A 200 whose body id doesn't match keeps polling:
+/// ds4 leaves its reserved port unbound during the multi-minute load, so a
+/// bare 200 could be a foreign process that grabbed the port before the real
+/// backend bound. Empty `expect_ids` degrades to a status-only check.
+pub async fn poll_until_ready_model_id(
+  port: u16,
+  opts: ProbeOptions,
+  path: &str,
+  ready_status: u16,
+  expect_ids: &[String],
+) -> ProbeOutcome {
+  let deadline = Instant::now() + opts.timeout;
+  let mut last_status: Option<u16> = None;
+  let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  loop {
+    match probe_once_body(port, opts.interval, request.as_bytes()).await {
+      Ok((status, body)) if status == ready_status => {
+        if expect_ids.is_empty() || expect_ids.iter().any(|id| body.contains(id.as_str())) {
+          return ProbeOutcome::Ready;
+        }
+        // 200 with a non-matching id — the real backend hasn't bound yet.
+        last_status = Some(status);
+      }
+      Ok((status, _)) => last_status = Some(status),
+      Err(_) => {}
+    }
+    if Instant::now() >= deadline {
+      return ProbeOutcome::Timeout { last_status };
+    }
+    tokio::time::sleep(opts.interval).await;
+  }
+}
+
+/// One probe attempt that also captures the response body (for the model-id
+/// readiness check). Returns `(status, whole-response-as-lossy-string)`,
+/// reading up to a 16 KiB cap — ds4's `/v1/models` list is well under that.
+async fn probe_once_body(
+  port: u16,
+  op_timeout: Duration,
+  request: &[u8],
+) -> std::io::Result<(u16, String)> {
+  const CAP: usize = 16 * 1024;
+  let connect = TcpStream::connect(("127.0.0.1", port));
+  let mut sock = tokio::time::timeout(op_timeout, connect)
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))??;
+  let write = sock.write_all(request);
+  tokio::time::timeout(op_timeout, write)
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "write timeout"))??;
+  let mut acc: Vec<u8> = Vec::with_capacity(2048);
+  let mut chunk = [0u8; 2048];
+  loop {
+    let n = match tokio::time::timeout(op_timeout, sock.read(&mut chunk)).await {
+      Ok(Ok(0)) => break,
+      Ok(Ok(n)) => n,
+      Ok(Err(e)) => return Err(e),
+      Err(_) => break, // read stall — use what we have (status line arrived first)
+    };
+    acc.extend_from_slice(&chunk[..n]);
+    if acc.len() >= CAP {
+      break;
+    }
+  }
+  let status = parse_status(&acc)
+    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed status line"))?;
+  Ok((status, String::from_utf8_lossy(&acc).into_owned()))
+}
+
 /// One probe attempt. Returns the HTTP status code on success;
 /// connect / read errors come back as `Err`.
 async fn probe_once(port: u16, op_timeout: Duration, request: &[u8]) -> std::io::Result<u16> {

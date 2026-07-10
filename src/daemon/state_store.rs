@@ -299,6 +299,28 @@ mod tests {
   }
 
   #[test]
+  fn non_empty_backend_knobs_round_trips_through_state_json() {
+    // The `skip_serializing_if = is_empty` field must still survive a
+    // save→load when populated (no silent data loss on daemon restart).
+    use crate::config::KnobValue;
+    let dir = temp_state_dir("backend-knobs-rt");
+    let mut s = DaemonState::default();
+    let mut params = fake_params("/m/a.gguf");
+    params
+      .backend_knobs
+      .insert("kv_disk_dir".into(), KnobValue::Set("/tmp/kv".into()));
+    params
+      .backend_knobs
+      .insert("quality".into(), KnobValue::Auto);
+    s.upsert_last_params(id("/m/a.gguf", 1), params.clone());
+    save(&dir, &s).expect("save");
+    let back = load(&dir).expect("load");
+    let restored = &back.last_params.first().unwrap().params;
+    assert_eq!(restored.backend_knobs, params.backend_knobs);
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
   fn upsert_last_params_replaces_in_place_and_promotes_to_front() {
     // Re-upserting an existing id replaces the params *and* moves
     // the entry to the front. That keeps the storage Vec order in

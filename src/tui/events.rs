@@ -414,10 +414,16 @@ fn open_focused_inline_edit(app: &mut App) {
   let Some(picker) = app.launch_picker.as_mut() else {
     return;
   };
-  if !picker.field.is_editable() {
+  if !picker.focused_is_editable() {
     return;
   }
   match picker.field {
+    // A free-text native knob seeds from its current set value (empty when
+    // unset); cycle/bool native rows are filtered out by the guard above.
+    PickerField::NativeKnob(i) => {
+      let initial = picker.native_buffer_seed(i);
+      picker.inline_edit.open(PickerField::NativeKnob(i), initial);
+    }
     PickerField::Knob(field) => {
       // Seed from the resolved effective value so the user types from
       // the current row content, not from blank.
@@ -503,11 +509,16 @@ fn commit_inline_edit(app: &mut App) -> bool {
   // the one matching the row's type so the row falls back cleanly
   // regardless of which slot the user had populated.
   if buffer.is_empty() {
-    if let PickerField::Knob(k) = field {
-      picker.set_user_u32(k, None);
-      picker.set_user_f32(k, None);
-      picker.set_user_str(k, None);
-      picker.set_user_bool(k, None);
+    match field {
+      PickerField::Knob(k) => {
+        picker.set_user_u32(k, None);
+        picker.set_user_f32(k, None);
+        picker.set_user_str(k, None);
+        picker.set_user_bool(k, None);
+      }
+      // Empty buffer clears a native row back to inherited.
+      PickerField::NativeKnob(i) => picker.set_native_text(i, ""),
+      PickerField::Preset | PickerField::Extras => {}
     }
     picker.inline_edit.close();
     return true;
@@ -596,6 +607,11 @@ fn commit_inline_edit(app: &mut App) -> bool {
         Ok(())
       }
     },
+    // A free-text native knob accepts any non-empty value verbatim.
+    PickerField::NativeKnob(i) => {
+      picker.set_native_text(i, &buffer);
+      Ok(())
+    }
     PickerField::Extras => Ok(()),
     // Preset is cycle-only — never opens an inline edit to commit.
     PickerField::Preset => Ok(()),
@@ -1892,6 +1908,7 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
     prefer_port: picker.prefer_port,
     backend: picker.model_backend,
     selection,
+    backend_knobs: picker.backend_knobs.clone(),
   });
 
   if active_instances > 0 {
@@ -2171,6 +2188,7 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
         prefer_port,
         backend,
         selection,
+        backend_knobs,
       } = *args;
       let mode_str = mode.map(|m| match m {
         crate::launch::mode::LaunchMode::Chat => "chat",
@@ -2191,6 +2209,9 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
           "backend": backend,
           // Drives daemon default-preset + last_params inheritance.
           "selection": selection,
+          // Per-backend native knobs; omitted-when-empty on the daemon side
+          // via `#[serde(default)]`. Empty for every shipping backend.
+          "backend_knobs": backend_knobs,
         }),
       )
     }

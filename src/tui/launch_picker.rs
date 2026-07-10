@@ -13,11 +13,15 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use crate::config::TypedKnobs;
+use crate::config::{KnobValue, TypedKnobs};
 use crate::launch::flag_aliases::{
   knob_display_groups, knob_row_visible, KnobField, KV_CACHE_TYPES, SPLIT_MODES,
 };
+use crate::launch::native_knobs::{NativeKnobDescriptor, NativeKnobKind};
 use crate::launch::params::{BackendChoice, LayerLabel};
+
+/// Cycle ring for a boolean native knob (`inherited → on → off → inherited`).
+const NATIVE_BOOL_RING: &[&str] = &["true", "false"];
 
 /// Pre-canned context-length presets surfaced as quick picks. Custom
 /// values flow through the same field when the user types digits.
@@ -38,6 +42,12 @@ pub enum PickerField {
   /// Cycling it rewrites every knob row below live.
   Preset,
   Knob(KnobField),
+  /// A backend-declared native knob, by index into the active backend's
+  /// [`NativeKnobDescriptor`] slice (see [`crate::launch::native_knobs`]).
+  /// Index-keyed (not the id string) so `PickerField` stays `Copy`; the
+  /// descriptor is resolved through [`LaunchPickerState::native_descriptors`].
+  /// Empty for every shipping backend, so these rows never appear today.
+  NativeKnob(usize),
   Extras,
 }
 
@@ -64,6 +74,10 @@ pub struct PresetChoice {
   pub name: String,
   pub knobs: TypedKnobs,
   pub extras: Vec<std::ffi::OsString>,
+  /// Per-backend native-knob values the preset pins (see
+  /// [`crate::launch::native_knobs`]). Seeds the picker's `backend_knobs`
+  /// when this preset is selected. Empty for every shipping backend.
+  pub backend_knobs: BTreeMap<String, KnobValue<String>>,
 }
 
 /// Lazily-built navigation order — every knob in editor **display**
@@ -107,6 +121,10 @@ impl PickerField {
       // Preset is a cycle-only row (←/→), like a boolean knob.
       PickerField::Preset => false,
       PickerField::Extras => true,
+      // The native row's editability depends on its descriptor kind, which
+      // the bare index can't see — resolved by
+      // [`LaunchPickerState::focused_is_editable`]. Conservative default.
+      PickerField::NativeKnob(_) => false,
       PickerField::Knob(k) => match k {
         KnobField::Reasoning | KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => false,
         KnobField::Ctx
@@ -197,6 +215,15 @@ pub struct LaunchPickerState {
   pub sources: BTreeMap<KnobField, LayerLabel>,
   /// Free-form argv tail forwarded to llama-server.
   pub extras: Vec<std::ffi::OsString>,
+  /// The active backend's native-knob descriptors (see
+  /// [`crate::launch::native_knobs`]). Seeded from `backend.native_knobs()`
+  /// when the picker is built — empty for every shipping backend, so the
+  /// native rows never render today. Tests inject a stub slice directly.
+  pub native_descriptors: &'static [NativeKnobDescriptor],
+  /// User-set native-knob values, keyed by descriptor id. Parallel to
+  /// `user_knobs`; seeds from last-used / preset and returns into
+  /// [`crate::launch::params::LaunchParams::backend_knobs`].
+  pub backend_knobs: BTreeMap<String, KnobValue<String>>,
   /// Modal text-input for the extras row (`is_editing()` replaces
   /// the bespoke `extras_editing` bool; `buffer()` replaces the raw
   /// string + cursor pair). Shares the `e:edit / Esc:walk-back /
@@ -238,6 +265,7 @@ pub struct LaunchPickerState {
   /// last-used params, or empty). Restored when cycling back to `auto`.
   preset_baseline_knobs: TypedKnobs,
   preset_baseline_extras: Vec<std::ffi::OsString>,
+  preset_baseline_backend_knobs: BTreeMap<String, KnobValue<String>>,
   /// Row offset clipped from the top of the rendered line list so the
   /// focused row stays visible on small viewports. Recomputed on each
   /// render using the actual area height — the `Cell` lets the
@@ -254,6 +282,8 @@ impl LaunchPickerState {
       resolved: TypedKnobs::default(),
       sources: BTreeMap::new(),
       extras: Vec::new(),
+      native_descriptors: &[],
+      backend_knobs: BTreeMap::new(),
       extras_input: crate::tui::input_field::InputField::default(),
       inline_edit: InlineEdit::default(),
       field: PickerField::Knob(KnobField::Ctx),
@@ -266,6 +296,7 @@ impl LaunchPickerState {
       preset_stop: PresetStop::LastUsed,
       preset_baseline_knobs: TypedKnobs::default(),
       preset_baseline_extras: Vec::new(),
+      preset_baseline_backend_knobs: BTreeMap::new(),
       scroll_offset: Cell::new(0),
     }
   }
@@ -287,6 +318,7 @@ impl LaunchPickerState {
   pub fn set_presets(&mut self, presets: Vec<PresetChoice>, default_stop: PresetStop) {
     self.preset_baseline_knobs = self.user_knobs.clone();
     self.preset_baseline_extras = self.extras.clone();
+    self.preset_baseline_backend_knobs = self.backend_knobs.clone();
     self.presets = presets;
     self.default_stop = match default_stop {
       PresetStop::Named(i) if i < self.presets.len() => PresetStop::Named(i),
@@ -313,6 +345,7 @@ impl LaunchPickerState {
       PresetStop::LastUsed => {
         self.user_knobs = self.preset_baseline_knobs.clone();
         self.extras = self.preset_baseline_extras.clone();
+        self.backend_knobs = self.preset_baseline_backend_knobs.clone();
       }
       PresetStop::Auto => self.apply_auto(),
       PresetStop::Named(i) => self.seed_from_preset(i),
@@ -333,12 +366,16 @@ impl LaunchPickerState {
       }
     }
     self.extras.clear();
+    // `auto` delegates llama.cpp fit-governed knobs to `--fit`; native knobs
+    // have no fit notion, so the stop simply drops them back to inherited.
+    self.backend_knobs.clear();
   }
 
   fn seed_from_preset(&mut self, i: usize) {
     if let Some(p) = self.presets.get(i) {
       self.user_knobs = p.knobs.clone();
       self.extras = p.extras.clone();
+      self.backend_knobs = p.backend_knobs.clone();
     }
   }
 
@@ -391,11 +428,40 @@ impl LaunchPickerState {
     self.sources = sources;
   }
 
+  /// All rows in render / navigation order: the static base
+  /// ([`PickerField::all`]) followed by one [`PickerField::NativeKnob`] per
+  /// active descriptor. Native rows trail the form; for shipping backends the
+  /// descriptor slice is empty, so this equals the static order exactly.
+  pub fn ordered_fields(&self) -> Vec<PickerField> {
+    let mut v: Vec<PickerField> = PickerField::all().to_vec();
+    v.extend((0..self.native_descriptors.len()).map(PickerField::NativeKnob));
+    v
+  }
+
+  /// The descriptor the focused row points at, when it's a native row.
+  pub fn focused_native(&self) -> Option<&'static NativeKnobDescriptor> {
+    match self.field {
+      PickerField::NativeKnob(i) => self.native_descriptors.get(i),
+      _ => None,
+    }
+  }
+
+  /// Whether `e:edit` opens an inline buffer on the focused row. Resolves a
+  /// native row through its descriptor kind (free-text only); delegates to
+  /// [`PickerField::is_editable`] for everything else.
+  pub fn focused_is_editable(&self) -> bool {
+    match self.focused_native() {
+      Some(d) => d.is_editable(),
+      None => self.field.is_editable(),
+    }
+  }
+
   /// Cycle the focused field's value forward (Right arrow).
   pub fn cycle_focused_value_next(&mut self) {
     match self.field {
       PickerField::Preset => self.cycle_preset(true),
       PickerField::Knob(k) => self.cycle_knob(k, true),
+      PickerField::NativeKnob(i) => self.cycle_native(i, true),
       PickerField::Extras => {}
     }
   }
@@ -405,8 +471,108 @@ impl LaunchPickerState {
     match self.field {
       PickerField::Preset => self.cycle_preset(false),
       PickerField::Knob(k) => self.cycle_knob(k, false),
+      PickerField::NativeKnob(i) => self.cycle_native(i, false),
       PickerField::Extras => {}
     }
+  }
+
+  /// Cycle a native knob through its ring (`inherited → values… → wrap`).
+  /// Cycle knobs use the descriptor's preset list; bools use on/off;
+  /// free-text rows don't cycle (they're `e`-edited). No `Auto` stop —
+  /// native knobs are not fit-governed.
+  fn cycle_native(&mut self, idx: usize, forward: bool) {
+    let Some(descriptor) = self.native_descriptors.get(idx).copied() else {
+      return;
+    };
+    let ring: &[&str] = match descriptor.kind {
+      NativeKnobKind::Cycle { presets } => presets,
+      NativeKnobKind::Bool => NATIVE_BOOL_RING,
+      // Free-text has no preset ring — edited via `e`.
+      NativeKnobKind::FreeText => return,
+    };
+    let cur = self
+      .backend_knobs
+      .get(descriptor.id)
+      .and_then(KnobValue::as_set)
+      .and_then(|v| ring.iter().copied().find(|t| *t == v))
+      .map_or(CycleState::Inherited, CycleState::Set);
+    match ring_next(cur, ring, forward, false) {
+      CycleState::Set(v) => {
+        self
+          .backend_knobs
+          .insert(descriptor.id.to_string(), KnobValue::Set(v.to_string()));
+      }
+      // Inherited (or the unreachable Auto with allow_auto=false) clears it.
+      _ => {
+        self.backend_knobs.remove(descriptor.id);
+      }
+    }
+  }
+
+  /// The display value for a native row: the set value, or the shared
+  /// `inherited` label when unset.
+  pub fn native_value_label(&self, idx: usize) -> String {
+    self
+      .native_descriptors
+      .get(idx)
+      .and_then(|d| self.backend_knobs.get(d.id))
+      .and_then(KnobValue::as_set)
+      .cloned()
+      .unwrap_or_else(|| INHERITED_LABEL.to_string())
+  }
+
+  /// Seed text for a native free-text `e`-edit: the current set value, or
+  /// empty when the row inherits.
+  pub fn native_buffer_seed(&self, idx: usize) -> String {
+    self
+      .native_descriptors
+      .get(idx)
+      .and_then(|d| self.backend_knobs.get(d.id))
+      .and_then(KnobValue::as_set)
+      .cloned()
+      .unwrap_or_default()
+  }
+
+  /// Commit a free-text native edit: a non-empty value pins `Set`, an empty
+  /// one clears the row back to inherited.
+  pub fn set_native_text(&mut self, idx: usize, value: &str) {
+    let Some(d) = self.native_descriptors.get(idx) else {
+      return;
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+      self.backend_knobs.remove(d.id);
+    } else {
+      self
+        .backend_knobs
+        .insert(d.id.to_string(), KnobValue::Set(trimmed.to_string()));
+    }
+  }
+
+  /// The model's concrete backend, resolved from `model_backend`. The single
+  /// `BackendChoice` dispatch in the picker — `knob_supported`,
+  /// `seed_native_descriptors`, and `active_backend_id` all go through it, so
+  /// adding a backend means editing one **exhaustive** match (no wildcard), a
+  /// compile error until every variant is handled.
+  fn resolved_backend(&self) -> crate::backend::Backends {
+    use crate::backend::ds4::Ds4Backend;
+    use crate::backend::lemonade::LemonadeBackend;
+    use crate::backend::llama_cpp::LlamaCppBackend;
+    use crate::backend::Backends;
+    match self.model_backend {
+      BackendChoice::Lemonade => Backends::Lemonade(LemonadeBackend::new()),
+      BackendChoice::Ds4 => Backends::Ds4(Ds4Backend::new()),
+      BackendChoice::Auto | BackendChoice::LlamaCpp => Backends::LlamaCpp(LlamaCppBackend::new()),
+    }
+  }
+
+  /// Resolve [`Self::native_descriptors`] from the model's backend. Called
+  /// once the backend is known. Empty for every shipping backend, so no
+  /// native rows render today — a backend opts in by overriding
+  /// `native_knobs()`.
+  pub fn seed_native_descriptors(&mut self) {
+    use crate::backend::Backend;
+    self.native_descriptors = self.resolved_backend().native_knobs();
   }
 
   /// Whether the model's backend honors `field`.
@@ -414,21 +580,14 @@ impl LaunchPickerState {
   /// llama.cpp honors every typed knob; Lemonade honors `ctx` only
   /// (lemond's `ctx_size` load option).
   pub fn knob_supported(&self, field: KnobField) -> bool {
-    use crate::backend::lemonade::LemonadeBackend;
-    use crate::backend::llama_cpp::LlamaCppBackend;
     use crate::backend::Backend;
-    match self.model_backend {
-      BackendChoice::Lemonade => LemonadeBackend::new().capabilities().supports(field),
-      _ => LlamaCppBackend::new().capabilities().supports(field),
-    }
+    self.resolved_backend().capabilities().supports(field)
   }
 
   /// The model's backend id for log / label use.
   pub fn active_backend_id(&self) -> &'static str {
-    match self.model_backend {
-      BackendChoice::Lemonade => "lemonade",
-      _ => "llamacpp",
-    }
+    use crate::backend::Backend;
+    self.resolved_backend().id()
   }
 
   fn cycle_knob(&mut self, field: KnobField, forward: bool) {
@@ -615,6 +774,11 @@ impl LaunchPickerState {
         self.apply_preset_stop();
       }
       PickerField::Knob(k) => self.clear_user(k),
+      PickerField::NativeKnob(i) => {
+        if let Some(d) = self.native_descriptors.get(i) {
+          self.backend_knobs.remove(d.id);
+        }
+      }
       PickerField::Extras => {
         self.extras.clear();
       }
@@ -640,6 +804,9 @@ impl LaunchPickerState {
       // Always shown — it offers `last used` ↔ `auto` even with no presets.
       PickerField::Preset => true,
       PickerField::Knob(k) => self.knob_supported(k) && knob_row_visible(k, self.multi_device()),
+      // A native row exists iff its index is within the backend's slice
+      // (empty for every shipping backend → never shown).
+      PickerField::NativeKnob(i) => i < self.native_descriptors.len(),
       PickerField::Extras => true,
     }
   }
@@ -657,7 +824,9 @@ impl LaunchPickerState {
   /// Advance the cursor one step in `forward`/back direction, skipping
   /// any hidden rows (e.g. `device` on single-GPU hosts).
   fn step_field(&mut self, forward: bool) {
-    let all = PickerField::all();
+    // Native rows trail the static base; for shipping backends the slice is
+    // empty so this is byte-identical to `PickerField::all()`.
+    let all = self.ordered_fields();
     let Some(i) = all.iter().position(|f| *f == self.field) else {
       return;
     };
@@ -1393,6 +1562,7 @@ mod tests {
         ..TypedKnobs::default()
       },
       extras: Vec::new(),
+      backend_knobs: BTreeMap::new(),
     }
   }
 
@@ -1518,5 +1688,198 @@ mod tests {
     s.set_presets(vec![choice("a", 1)], PresetStop::Named(9));
     assert_eq!(s.default_stop, PresetStop::LastUsed);
     assert_eq!(s.preset_stop, PresetStop::LastUsed);
+  }
+
+  // ---- native knobs (test-only descriptor slice) ----
+
+  /// A representative descriptor slice: one Cycle + one FreeText + one Bool.
+  /// The mechanism is proven against this — no shipping backend returns knobs.
+  const STUB_NATIVE: &[NativeKnobDescriptor] = &[
+    NativeKnobDescriptor {
+      id: "kv_bits",
+      label: "KV bits",
+      description: "",
+      kind: NativeKnobKind::Cycle {
+        presets: &["4", "8"],
+      },
+    },
+    NativeKnobDescriptor {
+      id: "adapter",
+      label: "Adapter",
+      description: "",
+      kind: NativeKnobKind::FreeText,
+    },
+    NativeKnobDescriptor {
+      id: "trust",
+      label: "Trust remote",
+      description: "",
+      kind: NativeKnobKind::Bool,
+    },
+  ];
+
+  #[test]
+  fn shipping_picker_has_no_native_rows_and_byte_identical_nav() {
+    // Default (no descriptors): nav order is exactly the static base, so the
+    // picker is byte-identical for every shipping backend.
+    let s = LaunchPickerState::for_model("m");
+    assert!(s.native_descriptors.is_empty());
+    assert_eq!(s.ordered_fields(), PickerField::all().to_vec());
+    assert!(!s.field_visible(PickerField::NativeKnob(0)));
+  }
+
+  #[test]
+  fn native_rows_trail_the_form_in_descriptor_order() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_descriptors = STUB_NATIVE;
+    let fields = s.ordered_fields();
+    let tail = &fields[fields.len() - 3..];
+    assert_eq!(
+      tail,
+      [
+        PickerField::NativeKnob(0),
+        PickerField::NativeKnob(1),
+        PickerField::NativeKnob(2),
+      ]
+    );
+    assert!(s.field_visible(PickerField::NativeKnob(2)));
+    assert!(!s.field_visible(PickerField::NativeKnob(3)), "out of range");
+  }
+
+  #[test]
+  fn cycle_native_knob_walks_inherited_to_presets_and_wraps() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_descriptors = STUB_NATIVE;
+    s.field = PickerField::NativeKnob(0); // Cycle { 4, 8 }
+    assert_eq!(s.native_value_label(0), INHERITED_LABEL);
+    s.cycle_focused_value_next();
+    assert_eq!(s.backend_knobs["kv_bits"], KnobValue::Set("4".into()));
+    assert_eq!(s.native_value_label(0), "4");
+    s.cycle_focused_value_next();
+    assert_eq!(s.backend_knobs["kv_bits"], KnobValue::Set("8".into()));
+    s.cycle_focused_value_next();
+    assert!(
+      !s.backend_knobs.contains_key("kv_bits"),
+      "wraps to inherited"
+    );
+  }
+
+  #[test]
+  fn cycle_native_bool_toggles_inherited_on_off() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_descriptors = STUB_NATIVE;
+    s.field = PickerField::NativeKnob(2); // Bool
+    s.cycle_focused_value_next();
+    assert_eq!(s.backend_knobs["trust"], KnobValue::Set("true".into()));
+    s.cycle_focused_value_next();
+    assert_eq!(s.backend_knobs["trust"], KnobValue::Set("false".into()));
+    s.cycle_focused_value_next();
+    assert!(!s.backend_knobs.contains_key("trust"), "wraps to inherited");
+  }
+
+  #[test]
+  fn cycle_native_backward_walks_the_ring_in_reverse() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_descriptors = STUB_NATIVE;
+    // Cycle knob ←: inherited → last preset (8) → 4 → inherited.
+    s.field = PickerField::NativeKnob(0);
+    s.cycle_focused_value_prev();
+    assert_eq!(s.backend_knobs["kv_bits"], KnobValue::Set("8".into()));
+    s.cycle_focused_value_prev();
+    assert_eq!(s.backend_knobs["kv_bits"], KnobValue::Set("4".into()));
+    s.cycle_focused_value_prev();
+    assert!(
+      !s.backend_knobs.contains_key("kv_bits"),
+      "wraps to inherited"
+    );
+    // Bool ←: inherited → off → on → inherited.
+    s.field = PickerField::NativeKnob(2);
+    s.cycle_focused_value_prev();
+    assert_eq!(s.backend_knobs["trust"], KnobValue::Set("false".into()));
+    s.cycle_focused_value_prev();
+    assert_eq!(s.backend_knobs["trust"], KnobValue::Set("true".into()));
+  }
+
+  #[test]
+  fn seed_native_descriptors_is_empty_for_every_shipping_backend() {
+    // Each BackendChoice resolves to a backend that declares no native knobs,
+    // so the picker stays byte-identical. (A future backend with knobs must
+    // extend the exhaustive `resolved_backend` match — a compile error until
+    // it does.)
+    for choice in [
+      BackendChoice::Auto,
+      BackendChoice::LlamaCpp,
+      BackendChoice::Lemonade,
+    ] {
+      let mut s = LaunchPickerState::for_model("m");
+      s.model_backend = choice;
+      s.seed_native_descriptors();
+      assert!(
+        s.native_descriptors.is_empty(),
+        "{choice:?} must surface no native knobs"
+      );
+    }
+  }
+
+  #[test]
+  fn native_freetext_edits_and_resets() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_descriptors = STUB_NATIVE;
+    s.field = PickerField::NativeKnob(1); // FreeText
+    assert!(s.focused_is_editable(), "free-text rows open `e`-edit");
+    assert_eq!(s.native_buffer_seed(1), "", "empty when unset");
+    s.set_native_text(1, "./lora");
+    assert_eq!(s.backend_knobs["adapter"], KnobValue::Set("./lora".into()));
+    assert_eq!(s.native_buffer_seed(1), "./lora");
+    // Backspace / empty-commit clears.
+    s.reset_focused_row();
+    assert!(!s.backend_knobs.contains_key("adapter"));
+    s.set_native_text(1, "x");
+    s.set_native_text(1, "   "); // whitespace → clear
+    assert!(!s.backend_knobs.contains_key("adapter"));
+  }
+
+  #[test]
+  fn native_cycle_and_bool_rows_are_not_editable() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_descriptors = STUB_NATIVE;
+    s.field = PickerField::NativeKnob(0); // Cycle
+    assert!(!s.focused_is_editable());
+    s.field = PickerField::NativeKnob(2); // Bool
+    assert!(!s.focused_is_editable());
+  }
+
+  #[test]
+  fn preset_cycle_seeds_and_restores_native_knobs() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_descriptors = STUB_NATIVE;
+    // A native value set before presets are seeded becomes the `last used`
+    // baseline.
+    s.backend_knobs
+      .insert("kv_bits".into(), KnobValue::Set("4".into()));
+    let mut preset_bk = BTreeMap::new();
+    preset_bk.insert("kv_bits".to_string(), KnobValue::Set("8".into()));
+    // Open on `last used` (unset default) so the ring is
+    // last used → auto → fast.
+    s.set_presets(
+      vec![PresetChoice {
+        name: "fast".into(),
+        knobs: TypedKnobs::default(),
+        extras: Vec::new(),
+        backend_knobs: preset_bk,
+      }],
+      PresetStop::LastUsed,
+    );
+    // Opens on `last used` → baseline native value restored.
+    assert_eq!(s.backend_knobs["kv_bits"], KnobValue::Set("4".into()));
+    // Ring: last used → auto → fast. `auto` drops native knobs.
+    s.field = PickerField::Preset;
+    s.cycle_focused_value_next();
+    assert!(s.backend_knobs.is_empty(), "auto clears native knobs");
+    // → named preset seeds its native value.
+    s.cycle_focused_value_next();
+    assert_eq!(s.backend_knobs["kv_bits"], KnobValue::Set("8".into()));
+    // → wraps back to `last used`, restoring the baseline.
+    s.cycle_focused_value_next();
+    assert_eq!(s.backend_knobs["kv_bits"], KnobValue::Set("4".into()));
   }
 }

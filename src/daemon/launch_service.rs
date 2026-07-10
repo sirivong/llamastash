@@ -71,6 +71,13 @@ pub(crate) struct StartParams {
   /// doesn't model. Appended after the resolved knobs.
   #[serde(default)]
   pub(crate) extras: Vec<String>,
+  /// Per-backend native-knob values, keyed by descriptor id (see
+  /// [`crate::launch::native_knobs`]). Passed through to the backend's
+  /// `prepare_launch`; not layered by the typed-knob resolver. Empty for
+  /// llama.cpp / Lemonade (`#[serde(default)]` keeps existing clients'
+  /// payloads byte-stable). ds4 is the first consumer.
+  #[serde(default)]
+  pub(crate) backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
   /// Optional path to a multimodal projector (mmproj) file. When
   /// `None`, the daemon auto-detects by scanning the parent
   /// directory of the model for a `mmproj-<stem>.gguf` companion.
@@ -341,6 +348,11 @@ pub(crate) async fn compose_and_spawn(
   } else {
     Vec::new()
   };
+  // Native knobs pass through verbatim (not layered by the typed-knob
+  // resolver). Empty for llama.cpp / Lemonade; ds4 is the first consumer.
+  // Cross-backend inheritance from last_params is gated on the resolved
+  // backend tag in Unit 5 (D-contamination).
+  launch_params.backend_knobs = parsed.backend_knobs.clone();
   // Resolve the multimodal projector: an explicit `mmproj_path` wins;
   // otherwise auto-detect a companion next to the model — unless the
   // caller is already managing the projector through `extras`

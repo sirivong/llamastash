@@ -864,6 +864,12 @@ pub struct PresetBody {
   pub knobs: TypedKnobs,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub extras: Option<Vec<String>>,
+  /// Per-backend native knobs (see [`crate::launch::native_knobs`]), keyed by
+  /// descriptor id. Parallel to `knobs`; empty for llama.cpp / Lemonade, so
+  /// `skip_serializing_if` keeps a preset without native knobs byte-stable in
+  /// `config.yaml`.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub backend_knobs: BTreeMap<String, KnobValue<String>>,
 }
 
 /// How a knob *no layer supplied a value for* is seeded at launch
@@ -1143,6 +1149,7 @@ mod tests {
         ..TypedKnobs::default()
       },
       extras: None,
+      backend_knobs: Default::default(),
     };
     let value = serde_json::to_value(&body).unwrap();
     let obj = value.as_object().unwrap();
@@ -1161,6 +1168,31 @@ mod tests {
     );
     assert!(obj.get("mode").is_none(), "None siblings are skipped");
     assert!(obj.get("extras").is_none());
+    assert!(
+      obj.get("backend_knobs").is_none(),
+      "empty backend_knobs is skipped → byte-stable preset shape"
+    );
+  }
+
+  #[test]
+  fn preset_body_carries_backend_knobs_round_trip() {
+    // A preset with native knobs round-trips through YAML; the bare value
+    // is `Set`, the `auto` token is `Auto`.
+    let body: PresetBody = yaml_serde::from_str(
+      "ctx: 8192\nbackend_knobs:\n  kv_disk_dir: \"/tmp/kv\"\n  quality: auto\n",
+    )
+    .unwrap();
+    assert_eq!(body.knobs.ctx, Some(KnobValue::Set(8192)));
+    assert_eq!(
+      body.backend_knobs.get("kv_disk_dir"),
+      Some(&KnobValue::Set("/tmp/kv".to_string()))
+    );
+    assert_eq!(body.backend_knobs.get("quality"), Some(&KnobValue::Auto));
+    // Re-serialise and read back: equal.
+    let yaml = yaml_serde::to_string(&body).unwrap();
+    assert!(yaml.contains("backend_knobs"));
+    let back: PresetBody = yaml_serde::from_str(&yaml).unwrap();
+    assert_eq!(back, body);
   }
 
   #[test]

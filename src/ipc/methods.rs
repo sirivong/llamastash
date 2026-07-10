@@ -871,7 +871,7 @@ fn preset_row(p: &NamedPreset, is_default: bool) -> Value {
 }
 
 fn launch_params_row(p: &LaunchParams) -> Value {
-  json!({
+  let mut row = json!({
     "model_path": p.model_path,
     "mode": p.mode.label(),
     "ctx": p.ctx,
@@ -880,7 +880,15 @@ fn launch_params_row(p: &LaunchParams) -> Value {
     "jinja": p.jinja,
     "knobs": &p.knobs,
     "extras": p.extras.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>(),
-  })
+  });
+  // Native knobs are additive and omitted when empty, so the row stays
+  // byte-stable for llama.cpp / Lemonade (neither declares native knobs).
+  if !p.backend_knobs.is_empty() {
+    if let Ok(v) = serde_json::to_value(&p.backend_knobs) {
+      row["backend_knobs"] = v;
+    }
+  }
+  row
 }
 
 #[derive(Deserialize)]
@@ -964,6 +972,31 @@ mod tests {
 
   fn ctx() -> MethodContext {
     MethodContext::new(ShutdownToken::new())
+  }
+
+  #[test]
+  fn launch_params_row_omits_empty_backend_knobs_and_emits_when_set() {
+    use crate::config::KnobValue;
+    use crate::launch::mode::LaunchMode;
+    use std::path::PathBuf;
+    // Empty → the key is absent (byte-stable for llama.cpp / Lemonade).
+    let lp = LaunchParams::new(PathBuf::from("/m/a.gguf"), LaunchMode::Chat);
+    let row = launch_params_row(&lp);
+    assert!(
+      row.get("backend_knobs").is_none(),
+      "empty backend_knobs must not appear: {row}"
+    );
+    // Set → the key carries the map, with the same shape the TUI parses back.
+    let mut lp2 = LaunchParams::new(PathBuf::from("/m/a.gguf"), LaunchMode::Chat);
+    lp2
+      .backend_knobs
+      .insert("kv_disk_dir".into(), KnobValue::Set("/tmp/kv".into()));
+    let row2 = launch_params_row(&lp2);
+    assert_eq!(
+      row2["backend_knobs"]["kv_disk_dir"],
+      serde_json::json!("/tmp/kv"),
+      "set backend_knobs round-trips into the row"
+    );
   }
 
   #[tokio::test]

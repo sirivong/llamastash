@@ -105,6 +105,7 @@ pub fn preset_body_from_launch_params(params: &LaunchParams) -> PresetBody {
     mode: (params.mode != LaunchMode::Chat).then_some(params.mode),
     knobs,
     extras: (!extras.is_empty()).then_some(extras),
+    backend_knobs: params.backend_knobs.clone(),
   }
 }
 
@@ -136,6 +137,7 @@ pub fn materialize_preset(name: &str, body: &PresetBody, model_path: PathBuf) ->
     .into_iter()
     .map(OsString::from)
     .collect();
+  params.backend_knobs = body.backend_knobs.clone();
   NamedPreset {
     name: name.to_string(),
     params,
@@ -381,6 +383,7 @@ mod tests {
         ..TypedKnobs::default()
       },
       extras: None,
+      backend_knobs: Default::default(),
     }
   }
 
@@ -395,6 +398,7 @@ mod tests {
         ..TypedKnobs::default()
       },
       extras: Some(vec!["--rope-freq-base".into(), "10000".into()]),
+      backend_knobs: Default::default(),
     };
     let np = materialize_preset("p", &body, PathBuf::from("/m/a.gguf"));
     // ctx/reasoning landed on the LaunchParams siblings, out of the knobs.
@@ -423,6 +427,7 @@ mod tests {
         ..TypedKnobs::default()
       },
       extras: None,
+      backend_knobs: Default::default(),
     };
     let np = materialize_preset("p", &body, PathBuf::from("/m/a.gguf"));
     assert!(!np.params.reasoning);
@@ -442,6 +447,7 @@ mod tests {
         ..TypedKnobs::default()
       },
       extras: None,
+      backend_knobs: Default::default(),
     };
     let np = materialize_preset("p", &body, PathBuf::from("/m/a.gguf"));
     assert_eq!(np.params.ctx, None, "Auto ctx never pins the -c sibling");

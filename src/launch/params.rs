@@ -35,11 +35,26 @@ use crate::launch::mode::LaunchMode;
 pub const FORBIDDEN_ADVANCED_PREFIXES: &[&str] =
   &["--host", "--listen", "--bind", "--api-key", "--ssl-"];
 
-fn is_forbidden_head(head: &str) -> bool {
+/// Whether `head` hits the loopback/credential denylist. Shared with the
+/// native-knob translation entry point ([`crate::launch::native_knobs`]) so a
+/// backend's free-text knob value can't smuggle `--host`/`--api-key` past the
+/// same guard `compose` applies to extras.
+pub(crate) fn is_forbidden_head(head: &str) -> bool {
+  head_hits_prefixes(head, FORBIDDEN_ADVANCED_PREFIXES)
+}
+
+/// [`is_forbidden_head`] extended with a backend's own network-affecting
+/// heads (ds4 adds `--cors` / `--dist-`). A prefix ending in `-` matches by
+/// `starts_with`; everything else matches exactly — same rule as the base set.
+pub(crate) fn is_forbidden_head_ext(head: &str, extra: &[&str]) -> bool {
+  is_forbidden_head(head) || head_hits_prefixes(head, extra)
+}
+
+fn head_hits_prefixes(head: &str, prefixes: &[&str]) -> bool {
   let lower = head.to_ascii_lowercase();
-  FORBIDDEN_ADVANCED_PREFIXES
+  prefixes
     .iter()
-    .any(|p| lower == *p || (p.ends_with('-') && lower.starts_with(p)))
+    .any(|p| lower == *p || (p.ends_with('-') && lower.starts_with(&p.to_ascii_lowercase())))
 }
 
 /// Flag heads whose adjacent value is a secret and must be hidden
@@ -70,12 +85,20 @@ fn is_secret_head(head: &str) -> bool {
 /// `redact_for_display` does the peek-and-redact for space-form
 /// because compose echoes the *full* extras tail back to the user.
 pub fn forbidden_in_extras(extras: &[OsString]) -> Vec<String> {
+  forbidden_in_extras_ext(extras, &[])
+}
+
+/// [`forbidden_in_extras`] extended with a backend's own network-affecting
+/// heads (ds4 adds `--cors` / `--dist-`), so a ds4 launch that spells one of
+/// those in `--` extras is refused with a clear error rather than silently
+/// stripped at spawn.
+pub fn forbidden_in_extras_ext(extras: &[OsString], extra_forbidden: &[&str]) -> Vec<String> {
   extras
     .iter()
     .filter_map(|s| {
       let lossy = s.to_string_lossy();
       let head = lossy.split('=').next().unwrap_or(&lossy);
-      if !is_forbidden_head(head) {
+      if !is_forbidden_head_ext(head, extra_forbidden) {
         return None;
       }
       if is_secret_head(head) && lossy.contains('=') {
@@ -143,6 +166,11 @@ pub enum BackendChoice {
   LlamaCpp,
   /// Force the Lemonade (`lemond`) managed-multiplexer backend.
   Lemonade,
+  /// Force the ds4 (DwarfStar) direct backend. Wire value `"ds4"` matches
+  /// the backend id + the `start --backend ds4` flag. On a
+  /// predicate-rejected or non-deepseek4 file, ds4-server surfaces its own
+  /// fast header-validation error (the override is honored verbatim).
+  Ds4,
 }
 
 impl BackendChoice {
@@ -152,6 +180,7 @@ impl BackendChoice {
       BackendChoice::Auto => "auto",
       BackendChoice::LlamaCpp => "llamacpp",
       BackendChoice::Lemonade => "lemonade",
+      BackendChoice::Ds4 => "ds4",
     }
   }
 }
@@ -234,6 +263,15 @@ pub struct LaunchParams {
   /// pre-Phase-2b `state.json` rows loading as `Auto`.
   #[serde(default)]
   pub backend: BackendChoice,
+  /// Per-backend native-knob values, keyed by descriptor id (see
+  /// [`crate::launch::native_knobs`]). Parallel to `knobs` (the llama.cpp
+  /// IR): a backend whose tunables live outside the IR stores them here and
+  /// translates them to argv in its `prepare_launch` via
+  /// [`crate::launch::native_knobs::translate`] — ds4 is the first consumer.
+  /// Empty for llama.cpp / Lemonade, so `skip_serializing_if` keeps the
+  /// persisted shape byte-stable when no native knob is set.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub backend_knobs: BTreeMap<String, KnobValue<String>>,
 }
 
 /// Serde default for [`LaunchParams::jinja`] — factory `true`, mirroring
@@ -258,6 +296,7 @@ impl LaunchParams {
       extras: Vec::new(),
       mmproj_path: None,
       backend: BackendChoice::default(),
+      backend_knobs: BTreeMap::new(),
     }
   }
 }
@@ -1556,6 +1595,41 @@ mod tests {
     let json = serde_json::to_string(&p).unwrap();
     let back: LaunchParams = serde_json::from_str(&json).unwrap();
     assert_eq!(back, p);
+  }
+
+  #[test]
+  fn empty_backend_knobs_is_omitted_from_serialized_shape() {
+    // `skip_serializing_if` keeps the persisted shape byte-stable for
+    // llama.cpp / Lemonade (neither declares native knobs): no
+    // `backend_knobs` key.
+    let p = base_params();
+    assert!(p.backend_knobs.is_empty());
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(
+      !json.contains("backend_knobs"),
+      "empty backend_knobs must not appear in the wire shape, got {json}"
+    );
+  }
+
+  #[test]
+  fn backend_knobs_round_trip_through_state_json() {
+    let mut p = base_params();
+    p.backend_knobs.insert(
+      "kv_disk_dir".to_string(),
+      KnobValue::Set("/tmp/kv".to_string()),
+    );
+    p.backend_knobs
+      .insert("quality".to_string(), KnobValue::Auto);
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(json.contains("backend_knobs"));
+    let back: LaunchParams = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, p);
+    // Auto rides the bare `auto` token; Set rides the bare scalar.
+    assert_eq!(
+      back.backend_knobs["kv_disk_dir"],
+      KnobValue::Set("/tmp/kv".to_string())
+    );
+    assert_eq!(back.backend_knobs["quality"], KnobValue::Auto);
   }
 
   // ---- Device selector tests ----

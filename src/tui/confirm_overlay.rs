@@ -202,6 +202,7 @@ mod tests {
         prefer_port: None,
         backend: Default::default(),
         selection: "explicit",
+        backend_knobs: Default::default(),
       }),
     };
     assert_eq!(dup.severity(), ConfirmSeverity::Neutral);

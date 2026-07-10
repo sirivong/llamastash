@@ -119,6 +119,7 @@ mod tests {
         ..TypedKnobs::default()
       },
       extras: None,
+      backend_knobs: Default::default(),
     }
   }
 

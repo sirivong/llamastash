@@ -562,20 +562,40 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
   model.transition(ManagedState::Loading).await;
   let probe_model = model.clone();
   let probe_opts = input.plan.probe;
-  let (ready_path, ready_status) = match &input.plan.readiness {
-    Readiness::HttpPoll { path, ready_status } => (path.clone(), *ready_status),
+  let (ready_path, ready_status, expect_model_ids) = match &input.plan.readiness {
+    Readiness::HttpPoll { path, ready_status } => (path.clone(), *ready_status, None),
+    Readiness::HttpPollModelId {
+      path,
+      ready_status,
+      expect_model_ids,
+    } => (path.clone(), *ready_status, Some(expect_model_ids.clone())),
   };
   // Strict-fit ctx-clamp gate: the caller populates this only for
   // fit-governed launches; `None` leaves the readiness path unchanged.
   let fit_gate = input.fit_gate;
   spawn_supervised("probe", async move {
-    let outcome = probe::poll_until_ready(
-      probe_model.inner.port,
-      probe_opts,
-      &ready_path,
-      ready_status,
-    )
-    .await;
+    let outcome = match &expect_model_ids {
+      // ds4: 200 on `/v1/models` plus a body advertising a ds4 alias.
+      Some(ids) => {
+        probe::poll_until_ready_model_id(
+          probe_model.inner.port,
+          probe_opts,
+          &ready_path,
+          ready_status,
+          ids,
+        )
+        .await
+      }
+      None => {
+        probe::poll_until_ready(
+          probe_model.inner.port,
+          probe_opts,
+          &ready_path,
+          ready_status,
+        )
+        .await
+      }
+    };
     match outcome {
       ProbeOutcome::Ready => {
         // For fit-governed launches, read what `--fit` resolved before
