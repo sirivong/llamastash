@@ -71,11 +71,31 @@ impl ModelCatalog {
   /// Serialise the catalog into the JSON shape `list_models` returns.
   /// Pulled out of the dispatcher so it can be unit-tested with
   /// hand-built fixtures.
-  pub async fn to_list_response(&self) -> Value {
+  pub async fn to_list_response(&self, ds4_available: bool) -> Value {
     let snap = self.snapshot().await;
-    let rows: Vec<Value> = snap.iter().map(model_row).collect();
+    let rows: Vec<Value> = snap
+      .iter()
+      .map(|m| model_row(m, ds4_badge_for(m, ds4_available)))
+      .collect();
     json!({ "models": rows })
   }
+}
+
+/// Whether the `backend` badge for `m` should read `ds4` (R14 honest badge):
+/// ds4 is available, the arch is `deepseek4` (a cheap pre-check that spares a
+/// header read for every other model), and the file passes the full ds4
+/// quant-contract predicate. This is the *same* [`ds4_compatible`] the daemon
+/// routes on, so a row badges `ds4` exactly when a plain launch would.
+fn ds4_badge_for(m: &DiscoveredModel, ds4_available: bool) -> bool {
+  if !ds4_available {
+    return false;
+  }
+  if m.metadata.as_ref().and_then(|md| md.arch.as_deref()) != Some("deepseek4") {
+    return false;
+  }
+  crate::gguf::read_path(&m.path, crate::gguf::HeaderReadOptions::default())
+    .map(|r| crate::backend::ds4::ds4_compatible(&r.header))
+    .unwrap_or(false)
 }
 
 /// JSON projection of a single [`DiscoveredModel`] for the
@@ -86,15 +106,16 @@ impl ModelCatalog {
 /// is still emitted for backwards compatibility with any caller
 /// that pinned against the original name; a future v2 release
 /// will drop it.
-fn model_row(m: &DiscoveredModel) -> Value {
+fn model_row(m: &DiscoveredModel, ds4_badge: bool) -> Value {
   json!({
     "path": m.path,
     "parent": m.parent,
     "source": m.source.label(),
-    // Backend that serves this row (R14 badge / R13 routing). Additive —
-    // GGUF rows report "llamacpp"; a backend-registry source reports its
-    // own backend id.
-    "backend": m.source.backend_id(),
+    // Backend that serves this row (R14 badge / R13 routing, R13-amended for
+    // ds4). GGUF rows report "llamacpp"; a backend-registry source reports its
+    // own backend id; a ds4-compatible GGUF reports "ds4" when ds4 is
+    // available (the honest badge — it routes there on a plain launch).
+    "backend": if ds4_badge { "ds4" } else { m.source.backend_id() },
     "split_siblings": m.split_siblings,
     "metadata": m.metadata.as_ref().map(|md| {
       json!({
@@ -170,9 +191,12 @@ mod tests {
     // Disk (GGUF) rows report the direct llama.cpp backend — the R14 badge /
     // R13 routing tag. GGUF JSON is otherwise unchanged (additive field). A
     // backend-registry source adds its own tag.
-    let gguf = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath));
+    let gguf = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath), false);
     assert_eq!(gguf["backend"], "llamacpp");
     assert_eq!(gguf["path"], "/m/a.gguf");
+    // With the ds4 badge on, the same row reports ds4 (R14 honest badge).
+    let ds4 = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath), true);
+    assert_eq!(ds4["backend"], "ds4");
   }
 
   #[tokio::test]
@@ -244,7 +268,7 @@ mod tests {
     }
     cat.upsert(m).await;
 
-    let v = cat.to_list_response().await;
+    let v = cat.to_list_response(false).await;
     let models = v.get("models").and_then(Value::as_array).expect("array");
     assert_eq!(models.len(), 1);
     let row = &models[0];
@@ -275,7 +299,7 @@ mod tests {
       multimodal: None,
     };
     cat.upsert(m).await;
-    let v = cat.to_list_response().await;
+    let v = cat.to_list_response(false).await;
     let row = &v["models"][0];
     assert!(row["metadata"].is_null());
     assert_eq!(row["parse_error"], json!("BadMagic"));
@@ -297,7 +321,7 @@ mod tests {
     });
     cat.upsert(vis).await;
 
-    let v = cat.to_list_response().await;
+    let v = cat.to_list_response(false).await;
     let rows = v["models"].as_array().unwrap();
     let plain = rows.iter().find(|r| r["path"] == "/m/plain.gguf").unwrap();
     let vision = rows.iter().find(|r| r["path"] == "/m/vision.gguf").unwrap();

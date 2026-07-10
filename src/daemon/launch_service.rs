@@ -142,6 +142,10 @@ pub(crate) struct StartedLaunch {
   pub(crate) port: u16,
   pub(crate) model: ManagedModel,
   pub(crate) log_path: PathBuf,
+  /// Non-fatal advisories surfaced to the caller (CLI human output / TUI
+  /// toast): capability-dropped knobs, the deepseek4 KV-blind admission note,
+  /// and the `ssd_streaming` admission-bypass note. Empty on a clean launch.
+  pub(crate) warnings: Vec<String>,
 }
 
 /// The one launch-composition pipeline, for callers that already have a
@@ -179,29 +183,60 @@ pub(crate) async fn compose_and_spawn(
   // managed-multiplexer dispatch below select Lemonade rather than crashing on
   // the missing GGUF. Every other path is a local GGUF: one header read yields
   // both the canonical id and the arch.
-  let (id, arch, native_ctx, identity): (ModelId, Option<String>, Option<u32>, ModelIdentity) =
-    match crate::backend::lemonade::registry_name_from_path(&parsed.model_path) {
-      Some(name) => {
-        let backend_id = crate::backend::identity::BackendModelId {
-          backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
-          name: name.to_string(),
-        };
-        // A synthetic ModelId keeps the file-keyed plumbing (log path, running
-        // snapshot retention) working; the sentinel header hash marks it as
-        // not-a-GGUF. Arch + native_ctx are `None` — lemond owns the recipe,
-        // not us, so the strict-fit ctx gate never applies to a Lemonade row.
-        let synthetic = ModelId {
-          path: parsed.model_path.clone(),
-          header_blake3: [0u8; 32],
-        };
-        (synthetic, None, None, ModelIdentity::Backend(backend_id))
+  let (id, arch, native_ctx, ds4_compatible, identity): (
+    ModelId,
+    Option<String>,
+    Option<u32>,
+    bool,
+    ModelIdentity,
+  ) = match crate::backend::lemonade::registry_name_from_path(&parsed.model_path) {
+    Some(name) => {
+      let backend_id = crate::backend::identity::BackendModelId {
+        backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
+        name: name.to_string(),
+      };
+      // A synthetic ModelId keeps the file-keyed plumbing (log path, running
+      // snapshot retention) working; the sentinel header hash marks it as
+      // not-a-GGUF. Arch + native_ctx are `None` — lemond owns the recipe,
+      // not us, so the strict-fit ctx gate never applies to a Lemonade row.
+      let synthetic = ModelId {
+        path: parsed.model_path.clone(),
+        header_blake3: [0u8; 32],
+      };
+      (
+        synthetic,
+        None,
+        None,
+        false,
+        ModelIdentity::Backend(backend_id),
+      )
+    }
+    None => {
+      let (id, arch, native_ctx, ds4_compatible) = resolve_model_id_and_arch(&parsed.model_path)?;
+      let identity: ModelIdentity = id.clone().into();
+      (id, arch, native_ctx, ds4_compatible, identity)
+    }
+  };
+
+  // Split-PRO guard (D-guard): each half of ds4's distributed Q4 GGUF pair is
+  // unloadable *alone* by either engine, and attempting it wastes a 100 GB+
+  // load. Refuse pre-spawn on an auto-routed launch (an explicit `--backend`
+  // passes through so the engine can surface its own error). This is the one
+  // remaining pre-spawn refusal on the ds4 path.
+  if parsed.backend.unwrap_or_default() == crate::launch::params::BackendChoice::Auto {
+    if let Some(name) = parsed.model_path.file_name().and_then(|n| n.to_str()) {
+      if crate::backend::ds4::is_ds4_split_half(name) {
+        return Err(ErrorObject::new(
+          ErrorCode::InvalidParams,
+          format!(
+            "`{name}` is one half of ds4's distributed/split PRO GGUF — unloadable on its own. \
+             ds4 distributed mode is unsupported; use a single-file DeepSeek-V4 GGUF, or pass \
+             `--backend ds4` to attempt it anyway (ds4-server will surface its own error)."
+          ),
+        ));
       }
-      None => {
-        let (id, arch, native_ctx) = resolve_model_id_and_arch(&parsed.model_path)?;
-        let identity: ModelIdentity = id.clone().into();
-        (id, arch, native_ctx, identity)
-      }
-    };
+    }
+  }
 
   // Mode resolution: explicit override > catalog hint > default to chat.
   // The CLI surface refuses to default silently when discovery says
@@ -544,18 +579,70 @@ pub(crate) async fn compose_and_spawn(
   };
 
   // Translate the resolved knob IR into a launch plan via the backend.
-  // Selection honors the per-model override then the identity rule
-  // (`Auto` → GGUF binds llama.cpp). The orchestrator owns the branch on
-  // plan shape: the process-per-model arm feeds the supervisor; the
-  // managed-multiplexer arm ensures the shared umbrella + delegates.
-  let inference_backend = crate::backend::resolve_backend(&identity, launch_params.backend);
+  // Selection honors the per-model override, then the ds4-compatibility
+  // routing signal (D-route: a compatible GGUF prefers ds4 when it's
+  // available and the mode fits), then the identity rule (`Auto` → GGUF binds
+  // llama.cpp — a `deepseek4` GGUF still runs there as fallback). The
+  // orchestrator owns the branch on plan shape below.
+  let sel_ctx = crate::backend::SelectionContext {
+    ds4_compatible,
+    ds4_available: ctx.ds4_available(),
+    // ds4-server serves chat/completions, not embeddings/rerank — a mode
+    // mismatch routes to llama.cpp (a routing input, not an error).
+    ds4_mode_ok: mode == LaunchMode::Chat,
+  };
+  let inference_backend =
+    crate::backend::resolve_backend_for_launch(&identity, launch_params.backend, &sel_ctx);
 
-  // A managed-multiplexer backend (Lemonade) supervises its *own* umbrella
-  // executable on its *own* loopback port — not the per-model `llama-server`
-  // binary or the reserved launch-pool port. Resolve the `lemond` binary
-  // (config path → PATH) and use the configured umbrella port so the umbrella
-  // discovery probes and the routing target all agree. The reserved pool port
-  // is released by `start_delegated_lemonade` once the umbrella owns its port.
+  // Backend-specific extras denylist, checked once the backend is known: ds4
+  // adds `--cors` / `--dist-` on top of the base loopback/auth heads already
+  // refused above. Release the port before returning so a retry can reuse it.
+  let extra_heads = crate::backend::Backend::forbidden_extra_heads(&inference_backend);
+  if !extra_heads.is_empty() {
+    let backend_banned =
+      crate::launch::params::forbidden_in_extras_ext(&launch_params.extras, extra_heads);
+    if !backend_banned.is_empty() {
+      ctx.supervisors.release_reserved_port(port).await;
+      return Err(ErrorObject::new(
+        ErrorCode::InvalidParams,
+        format!(
+          "extras flags refused for the {} backend (network / loopback contract): {}",
+          crate::backend::Backend::id(&inference_backend),
+          backend_banned.join(", ")
+        ),
+      ));
+    }
+  }
+
+  // Non-fatal advisories accumulated across composition, surfaced on the
+  // `StartedLaunch` (CLI human output / TUI toast).
+  let mut warnings: Vec<String> = Vec::new();
+  // Dropped-knob surfacing (R6): typed knobs the user set that the resolved
+  // backend can't honor are silently dropped from argv — tell the user which.
+  // ds4 honors only `Ctx`, so a `--flash-attn` on a ds4-routed model warns.
+  {
+    let caps = crate::backend::Backend::capabilities(&inference_backend);
+    let dropped: Vec<&str> = crate::launch::flag_aliases::knob_specs()
+      .iter()
+      .filter(|spec| !caps.supports(spec.field) && field_is_set(&launch_params.knobs, spec.field))
+      .map(|spec| spec.canonical)
+      .collect();
+    if !dropped.is_empty() {
+      let msg = format!(
+        "{} does not support these knobs — dropped from the launch: {}",
+        crate::backend::Backend::id(&inference_backend),
+        dropped.join(", ")
+      );
+      log::warn!("{msg}");
+      warnings.push(msg);
+    }
+  }
+
+  // Per-backend binary pick for the spawn. A managed-multiplexer backend
+  // (Lemonade) supervises its own umbrella executable on its own loopback
+  // port; ds4 spawns `ds4-server` (not `llama-server`) on the reserved pool
+  // port; llama.cpp uses the device-owning binary chosen above. Byte-identical
+  // to the prior llama.cpp / Lemonade paths — the ds4 arm is purely additive.
   let (plan_binary, plan_port) =
     if inference_backend.lifecycle() == crate::backend::Lifecycle::ManagedMultiplexer {
       match crate::backend::lemonade::resolve_lemond_binary(&ctx.lemonade) {
@@ -566,6 +653,19 @@ pub(crate) async fn compose_and_spawn(
             ErrorCode::InvalidParams,
             "lemonade backend selected but no `lemond` binary found; set `lemonade.binary` \
              or put `lemond` on PATH (see docs/lemonade-setup.md)"
+              .to_string(),
+          ));
+        }
+      }
+    } else if inference_backend.id() == crate::backend::ds4::DS4_BACKEND_ID {
+      match crate::backend::ds4::resolve_ds4_binary(ctx.ds4.binary.as_deref()) {
+        Some(bin) => (bin, port),
+        None => {
+          ctx.supervisors.release_reserved_port(port).await;
+          return Err(ErrorObject::new(
+            ErrorCode::InvalidParams,
+            "ds4 backend selected but no `ds4-server` binary found; set `ds4.binary` \
+             or put `ds4-server` on PATH (see docs/usage.md)"
               .to_string(),
           ));
         }
@@ -609,6 +709,17 @@ pub(crate) async fn compose_and_spawn(
   // yet (the `port` reservation still gates the pool). Only the
   // process-spawn path reaches here — Lemonade's umbrella returned
   // above.
+  // ds4's `ssd_streaming` native knob (D-admission): on-disk bytes ≠ memory
+  // demand when weights stream from disk, so the hard OOM refusal is skipped
+  // for that launch (logged + surfaced). Keys on the native knob only — an
+  // extras-spelled `--ssd-streaming` still hits the gate (documented).
+  let ssd_streaming = matches!(
+    launch_params.backend_knobs.get("ssd_streaming"),
+    Some(crate::config::KnobValue::Set(v)) if v == "true"
+  );
+  // deepseek4 KV geometry is unknown to the demand model on either backend, so
+  // the admission estimate omits the KV term — surface that once per launch.
+  let is_deepseek4 = arch.as_deref() == Some("deepseek4");
   let mut admitted = false;
   if identity.as_gguf().is_some() {
     if let Some(host_slot) = ctx.host_metrics.as_ref() {
@@ -643,17 +754,40 @@ pub(crate) async fn compose_and_spawn(
         .flatten();
         if let Some(demand) = demand {
           if let Err(refusal) = ctx.admission.try_admit(u64::from(port), demand, free) {
-            ctx.supervisors.release_reserved_port(port).await;
-            return Err(ErrorObject::with_data(
-              ErrorCode::ResourceExhausted,
-              format_admission_refusal(&refusal),
-              serde_json::json!({ "cause": "launch_refused" }),
-            ));
+            if ssd_streaming {
+              // Bypass the OOM refusal: streaming weights don't need full
+              // residency. Not admitted (no ledger reservation held); spawn
+              // proceeds under the user's explicit acceptance of the risk.
+              let msg = format!(
+                "ssd_streaming is set — skipped the memory admission gate ({})",
+                format_admission_refusal(&refusal)
+              );
+              log::warn!("{msg}");
+              warnings.push(msg);
+            } else {
+              ctx.supervisors.release_reserved_port(port).await;
+              return Err(ErrorObject::with_data(
+                ErrorCode::ResourceExhausted,
+                format_admission_refusal(&refusal),
+                serde_json::json!({ "cause": "launch_refused" }),
+              ));
+            }
+          } else {
+            admitted = true;
           }
-          admitted = true;
         }
       }
     }
+  }
+  // KV-blind admission note (D-admission): the demand model omits the KV term
+  // for deepseek4, so surface it on every launch of that arch that proceeds.
+  if is_deepseek4 {
+    let msg =
+      "KV cache demand is not modeled for the deepseek4 architecture — the admission estimate \
+       omits it; watch memory headroom on launch."
+        .to_string();
+    log::warn!("{msg}");
+    warnings.push(msg);
   }
 
   // Strict-fit ctx-clamp gate: only meaningful when ctx is
@@ -784,7 +918,21 @@ pub(crate) async fn compose_and_spawn(
     port,
     model,
     log_path,
+    warnings,
   })
+}
+
+/// Whether `field` holds a concrete (`Set`) value in `knobs` — the view the
+/// dropped-knob warning needs (an `Auto` / unset knob emits nothing, so it is
+/// not "dropped" in any user-visible sense).
+fn field_is_set(
+  knobs: &crate::config::TypedKnobs,
+  field: crate::launch::flag_aliases::KnobField,
+) -> bool {
+  knobs.slot(field).as_u32().is_some()
+    || knobs.slot(field).as_f32().is_some()
+    || knobs.slot(field).as_bool().is_some()
+    || knobs.slot(field).as_str().is_some()
 }
 
 /// Start a model on a managed-multiplexer backend (Lemonade): ensure the
@@ -919,6 +1067,8 @@ async fn start_delegated_lemonade(
     port: serving_port,
     model: umbrella,
     log_path,
+    // Lemonade's delegated path carries no ds4/deepseek4 advisories.
+    warnings: Vec::new(),
   })
 }
 

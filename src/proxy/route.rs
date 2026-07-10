@@ -379,6 +379,7 @@ pub(crate) fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
     has_reasoning_hint,
     tokenizer_kind,
     total_parameters,
+    backend: None,
   }
 }
 

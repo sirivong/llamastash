@@ -579,7 +579,7 @@ backend).
 **Verification:** unit tests green; `Backends::Ds4` compiles through every
 dispatch arm; no behavior change anywhere (nothing selects ds4 yet).
 
-- [ ] **Unit 3: Config, enablement, binary resolution, launch_service branch**
+- [x] **Unit 3: Config, enablement, binary resolution, launch_service branch**
 
 **Goal:** `ds4.binary`/`ds4.enabled` config + `--ds4`/env enablement mirror
 the Lemonade plumbing; the process-per-model spawn path can pick a
@@ -646,7 +646,7 @@ This is the riskiest seam in the plan.
 --json | jq .backends`) shows the ds4 row flip installed/uninstalled as the
 binary appears/disappears.
 
-- [ ] **Unit 4: Selection, routing, and launch-path guards**
+- [x] **Unit 4: Selection, routing, and launch-path guards**
 
 **Goal:** ds4-compatible GGUFs auto-route to ds4 when it's available and the
 mode fits, and to llama.cpp otherwise — no refusal path; the split-PRO guard

@@ -442,6 +442,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: Some("qwen2".into()),
       total_parameters: Some(80_000_000_000),
+      backend: None,
     }
   }
 

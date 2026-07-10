@@ -268,6 +268,12 @@ pub struct App {
   pub options: AppOptions,
   pub focus: Focus,
   pub models: Vec<DiscoveredModel>,
+  /// Canonical paths the daemon's `list_models` badged `backend: "ds4"` —
+  /// ds4-compatible files that route to ds4 (the daemon already applied the
+  /// availability + quant-contract predicate). Drives the launch picker's
+  /// `model_backend` so the ds4 native-knob rows render for exactly the rows
+  /// a plain launch would send to ds4. Refreshed with `models`.
+  pub ds4_badge_paths: std::collections::HashSet<PathBuf>,
   pub favorites: Vec<PathBuf>,
   pub managed: Vec<ManagedRow>,
   /// External (unmanaged) `llama-server` processes the daemon's
@@ -519,6 +525,7 @@ impl App {
       options,
       focus: Focus::List,
       models: Vec::new(),
+      ds4_badge_paths: std::collections::HashSet::new(),
       favorites: Vec::new(),
       managed: Vec::new(),
       external: Vec::new(),
@@ -774,12 +781,19 @@ impl App {
       None => return,
     };
     let mut next: Vec<DiscoveredModel> = Vec::with_capacity(arr.len());
+    let mut ds4_paths = std::collections::HashSet::new();
     for row in arr {
       if let Some(m) = parse_list_models_row(row) {
+        // Capture the daemon's honest ds4 badge so the picker can render the
+        // ds4 native-knob rows for exactly the rows that route to ds4.
+        if row.get("backend").and_then(Value::as_str) == Some("ds4") {
+          ds4_paths.insert(m.path.clone());
+        }
         next.push(m);
       }
     }
     self.models = next;
+    self.ds4_badge_paths = ds4_paths;
     self.clamp_cursor();
   }
 
@@ -1452,15 +1466,24 @@ impl App {
       }
     }
     state.active_instances = active_count;
-    // Scope the backend chooser to the focused model's own backend (from its
-    // catalog source) so the picker can't force a cross-backend launch — e.g.
-    // a local GGUF onto Lemonade, which has no matching registry entry.
-    state.model_backend = path
-      .as_ref()
-      .and_then(|p| self.models.iter().find(|m| &m.path == p))
-      .filter(|m| m.source.backend_id() == crate::backend::lemonade::LEMONADE_BACKEND_ID)
-      .map(|_| crate::launch::params::BackendChoice::Lemonade)
-      .unwrap_or(crate::launch::params::BackendChoice::LlamaCpp);
+    // Scope the backend chooser to the focused model's own backend so the
+    // picker can't force a cross-backend launch. A ds4-badged path (the
+    // daemon's honest routing signal) derives ds4; a Lemonade-registry source
+    // derives Lemonade; everything else is the direct llama.cpp backend.
+    state.model_backend = match path.as_ref() {
+      Some(p) if self.ds4_badge_paths.contains(p) => crate::launch::params::BackendChoice::Ds4,
+      Some(p)
+        if self
+          .models
+          .iter()
+          .find(|m| &m.path == p)
+          .map(|m| m.source.backend_id() == crate::backend::lemonade::LEMONADE_BACKEND_ID)
+          .unwrap_or(false) =>
+      {
+        crate::launch::params::BackendChoice::Lemonade
+      }
+      _ => crate::launch::params::BackendChoice::LlamaCpp,
+    };
     // Surface the model's backend native knobs (empty for every shipping
     // backend, so no native rows render today).
     state.seed_native_descriptors();

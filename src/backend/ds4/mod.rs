@@ -110,6 +110,41 @@ pub fn ds4_compatible(header: &GgufHeader) -> bool {
   saw_expert
 }
 
+/// Whether `filename` names one **half** of ds4's PRO distributed/split GGUF
+/// pair (D-guard) — files that are unloadable *alone* by either engine:
+/// `DeepSeek-V4-Pro-Q4K-Layers00-30.gguf` (a bare layer-range shard) and
+/// `DeepSeek-V4-Pro-Q4K-Layers-31-output.gguf` (the output half).
+///
+/// Deliberately precise, **not** a bare `-Layers` substring: the single-file
+/// Flash `…-Layers37-42Q4KExperts-…-imatrix-fixed.gguf` carries a layer range
+/// *followed by quant descriptors* and is a fully launchable model — it must
+/// not be refused. Pass the file name (or stem); matching is case-insensitive.
+pub fn is_ds4_split_half(filename: &str) -> bool {
+  // Strip a trailing `.gguf` so both the stem and the full name work.
+  let s = filename
+    .to_ascii_lowercase()
+    .trim_end_matches(".gguf")
+    .to_string();
+  // Output half: `…-layers-31-output`.
+  if s.contains("layers") && s.ends_with("-output") {
+    return true;
+  }
+  // Layer-range half: the name ends with `layers<digits>-<digits>` and nothing
+  // else. The single-file Flash has quant text after the range, so its `split_once`
+  // right half is not all-digits and it is not matched.
+  if let Some(idx) = s.rfind("layers") {
+    let tail = &s[idx + "layers".len()..];
+    let tail = tail.strip_prefix('-').unwrap_or(tail);
+    if let Some((a, b)) = tail.split_once('-') {
+      let all_digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
+      if all_digits(a) && all_digits(b) {
+        return true;
+      }
+    }
+  }
+  false
+}
+
 /// Routed-expert tensor marker: `ffn_gate_exps` / `ffn_up_exps` /
 /// `ffn_down_exps` all carry the `_exps` component. The shared expert
 /// (`ffn_*_shexp`) and the router gate (`ffn_gate_inp`) do **not**, so they
@@ -594,6 +629,29 @@ mod tests {
       }
       _ => panic!("ds4 readiness must be HttpPollModelId"),
     }
+  }
+
+  #[test]
+  fn split_half_guard_is_precise() {
+    // The two genuinely-unlaunchable PRO split halves.
+    assert!(is_ds4_split_half("DeepSeek-V4-Pro-Q4K-Layers00-30.gguf"));
+    assert!(is_ds4_split_half(
+      "DeepSeek-V4-Pro-Q4K-Layers-31-output.gguf"
+    ));
+    // The single-file Flash with a layer range in its name is launchable —
+    // MUST NOT be refused.
+    assert!(!is_ds4_split_half(
+      "DeepSeek-V4-Flash-Layers37-42Q4KExperts-OtherExpertLayersIQ2XXSGateUp-Q2KDown-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-fixed.gguf"
+    ));
+    // The standard single-file Flash/PRO quants are not halves.
+    assert!(!is_ds4_split_half(
+      "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf"
+    ));
+    assert!(!is_ds4_split_half(
+      "DeepSeek-V4-Pro-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-Instruct.gguf"
+    ));
+    // An unrelated model with no layer split.
+    assert!(!is_ds4_split_half("qwen2.5-7b-instruct-q4_k_m.gguf"));
   }
 
   #[test]

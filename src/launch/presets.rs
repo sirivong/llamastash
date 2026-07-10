@@ -362,6 +362,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     }
   }
 

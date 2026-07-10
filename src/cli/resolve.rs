@@ -132,11 +132,16 @@ fn parse_catalog_row(row: Value) -> CatalogRow {
     .get("model_id")
     .and_then(Value::as_str)
     .map(str::to_string);
+  let backend = row
+    .get("backend")
+    .and_then(Value::as_str)
+    .map(str::to_string);
   CatalogRow {
     path,
     model_id,
     parent,
     source,
+    backend,
     arch: metadata
       .and_then(|m| m.get("arch"))
       .and_then(Value::as_str)
@@ -616,6 +621,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     }
   }
 

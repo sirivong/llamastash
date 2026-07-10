@@ -175,6 +175,11 @@ async fn drive_launch_as_leader(
       };
     }
   };
+  // No human watches an auto-start; log any advisories (dropped knobs,
+  // deepseek4 KV-blind note, ssd_streaming bypass) to the daemon log.
+  for w in &started.warnings {
+    log::warn!("proxy auto-start: {w}");
+  }
 
   // Poll the supervisor state machine. 100 ms cadence per the Key
   // Decision; no client-facing timeout — only `Error{cause}` and
@@ -261,6 +266,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     }
   }
 

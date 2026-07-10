@@ -105,6 +105,13 @@ pub struct MethodContext {
   /// the right port, and `status` reads it for the `installed` signal.
   /// Defaults to disabled, so catalog-only tests never touch `lemond`.
   pub lemonade: LemonadeConfig,
+  /// ds4 (DwarfStar) backend config. `start_model` reads `binary` to resolve
+  /// `ds4-server`; selection + `status` read `ds4_available()` for routing +
+  /// the `installed` signal.
+  pub ds4: crate::config::Ds4Config,
+  /// Whether `--ds4`/`LLAMASTASH_DS4` force-enabled ds4 (folds into
+  /// [`Self::ds4_available`] alongside the config `enabled` tri-state).
+  pub ds4_force: bool,
   /// Pre-spawn memory admission ledger. Shared across every launch
   /// entry point so check-and-reserve is atomic against concurrent
   /// launches; settled (released) when each child reaches Ready / Error
@@ -230,6 +237,8 @@ impl MethodContext {
       proxy_status: None,
       ipc_url: None,
       lemonade: LemonadeConfig::default(),
+      ds4: crate::config::Ds4Config::default(),
+      ds4_force: false,
       admission: Arc::new(crate::launch::admission::Ledger::default()),
     }
   }
@@ -309,5 +318,22 @@ impl MethodContext {
   pub fn with_lemonade(mut self, lemonade: LemonadeConfig) -> Self {
     self.lemonade = lemonade;
     self
+  }
+
+  /// Builder helper: attach the ds4 backend config + force flag so the
+  /// selection seam, `start_model`, and `status` can resolve availability.
+  pub fn with_ds4(mut self, ds4: crate::config::Ds4Config, force: bool) -> Self {
+    self.ds4 = ds4;
+    self.ds4_force = force;
+    self
+  }
+
+  /// Whether ds4 is **available** on this daemon: the user intends it enabled
+  /// (default-on unless `ds4.enabled: false`, `--ds4`/env override) **and**
+  /// the `ds4-server` binary resolves. The single availability predicate the
+  /// selection seam, the split-file guard, and `status.backends` all consult.
+  pub fn ds4_available(&self) -> bool {
+    self.ds4.intends_enabled(self.ds4_force)
+      && crate::backend::ds4::resolve_ds4_binary(self.ds4.binary.as_deref()).is_some()
   }
 }

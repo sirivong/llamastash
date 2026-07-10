@@ -341,6 +341,7 @@ fn direct_catalog_row(path: PathBuf, mode: CliLaunchMode) -> CatalogRow {
     has_reasoning_hint: false,
     tokenizer_kind: None,
     total_parameters: None,
+    backend: None,
   }
 }
 
@@ -567,6 +568,13 @@ fn emit_response(preset: Option<&str>, row: &CatalogRow, resp: &Value, json: boo
     "{head} {arrow} launch_id={lid_token} port={port_token} pid={pid_token}",
     arrow = colors::dim("→"),
   );
+  // Non-fatal advisories (dropped knobs, deepseek4 KV-blind note,
+  // ssd_streaming bypass). Human output only — `--json` shape is untouched.
+  if let Some(ws) = resp.get("warnings").and_then(Value::as_array) {
+    for w in ws.iter().filter_map(Value::as_str) {
+      println!("  {}", colors::warning(w));
+    }
+  }
 }
 
 #[cfg(test)]
@@ -594,6 +602,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     }
   }
 
@@ -825,6 +834,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     };
     let args = StartArgs {
       model: Some(path.display().to_string()),

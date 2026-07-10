@@ -308,6 +308,13 @@ pub enum DaemonAction {
     /// set it up manually (see `docs/lemonade-setup.md`).
     #[arg(long)]
     lemonade: bool,
+    /// Force-enable the ds4 (DwarfStar) direct backend for DeepSeek V4 GGUFs,
+    /// overriding `ds4.enabled: false`. ds4 is otherwise **on by default**
+    /// whenever `ds4-server` is found (on `PATH` or via `ds4.binary`). OR-ed
+    /// with `LLAMASTASH_DS4=1`. llamastash never installs `ds4-server`; build
+    /// it and point `ds4.binary` at it (see `docs/usage.md`).
+    #[arg(long)]
+    ds4: bool,
     /// Start the daemon even if an *indicated* backend can't initialize —
     /// the `llama-server` binary isn't found, or the Lemonade umbrella port
     /// is already taken / `lemond` is missing. Without this, `daemon start`
@@ -420,6 +427,7 @@ pub enum BackendArg {
   #[value(name = "llamacpp")]
   LlamaCpp,
   Lemonade,
+  Ds4,
 }
 
 impl BackendArg {
@@ -427,6 +435,7 @@ impl BackendArg {
   pub fn wire(self) -> &'static str {
     match self {
       BackendArg::Auto => "auto",
+      BackendArg::Ds4 => "ds4",
       BackendArg::LlamaCpp => "llamacpp",
       BackendArg::Lemonade => "lemonade",
     }
@@ -1688,6 +1697,7 @@ mod tests {
         proxy_host,
         insecure_no_auth,
         lemonade,
+        ds4,
         force,
       })) => {
         assert!(!foreground);
@@ -1698,6 +1708,7 @@ mod tests {
         assert!(proxy_host.is_none());
         assert!(!insecure_no_auth);
         assert!(!lemonade);
+        assert!(!ds4);
         assert!(!force);
       }
       other => panic!("expected daemon start, got {other:?}"),

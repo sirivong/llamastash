@@ -53,6 +53,12 @@ pub struct CatalogRow {
   /// `general.parameter_count` — the raw count behind
   /// `parameter_label` (`"7B"` is derived from `7e9`).
   pub total_parameters: Option<u64>,
+  /// Backend that serves this row, as the daemon resolved it (`list_models`
+  /// `backend` field): `"llamacpp"` / `"lemonade"` / `"ds4"`. The honest R14
+  /// badge — `"ds4"` only when the file is ds4-compatible *and* ds4 is
+  /// available. `None` on rows the daemon didn't tag (falls back to a
+  /// source-derived badge in `list_json`).
+  pub backend: Option<String>,
 }
 
 impl CatalogRow {
@@ -80,6 +86,7 @@ impl CatalogRow {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     }
   }
 
@@ -180,6 +187,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     }
   }
 

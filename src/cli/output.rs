@@ -154,10 +154,14 @@ pub fn list_json(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) -> 
         "path": r.path,
         "parent": r.parent,
         "source": r.source,
-        // Backend that serves this row (R14 badge): derived from the
-        // source label — a Lemonade-registry row is served by lemonade,
-        // every local-file source by the direct llama.cpp backend.
-        "backend": backend_for_source(&r.source),
+        // Backend that serves this row (R14 badge). Prefer the daemon's
+        // resolved tag (honest for ds4: "ds4" only when compatible AND
+        // available); fall back to a source-derived badge for rows the
+        // daemon didn't tag (older daemon / pre-launch synthetic rows).
+        "backend": r
+          .backend
+          .clone()
+          .unwrap_or_else(|| backend_for_source(&r.source).to_string()),
         "arch": r.arch,
         "quant": r.quant,
         "native_ctx": r.native_ctx,
@@ -700,6 +704,7 @@ mod tests {
       has_reasoning_hint: false,
       tokenizer_kind: None,
       total_parameters: None,
+      backend: None,
     }
   }
 

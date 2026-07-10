@@ -324,7 +324,22 @@ async fn backends_status(ctx: &MethodContext) -> Value {
   let lemonade_binary =
     crate::backend::lemonade::resolve_lemond_binary(&ctx.lemonade).map(|b| b.display().to_string());
   set_backend_binary(&mut lemonade_row, lemonade_binary);
-  json!([llama_row, lemonade_row])
+
+  // ds4 (DwarfStar): `installed` = the `ds4-server` binary resolves;
+  // `enabled` = intent (default-on unless `ds4.enabled: false`) AND installed.
+  let ds4_backend = crate::backend::ds4::Ds4Backend::new();
+  let ds4_binary = crate::backend::ds4::resolve_ds4_binary(ctx.ds4.binary.as_deref());
+  let mut ds4_row = backend_row(
+    ds4_backend.id(),
+    ds4_backend.lifecycle().label(),
+    ds4_binary.is_some(),
+    ds4_backend.accelerators().labels(),
+  );
+  if let Some(obj) = ds4_row.as_object_mut() {
+    obj.insert("enabled".into(), json!(ctx.ds4_available()));
+  }
+  set_backend_binary(&mut ds4_row, ds4_binary.map(|b| b.display().to_string()));
+  json!([llama_row, lemonade_row, ds4_row])
 }
 
 /// Attach a backend row's resolved `binary` path; absent when no binary

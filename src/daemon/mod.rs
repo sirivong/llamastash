@@ -46,7 +46,7 @@ use self::{
   shutdown::{install_signal_handlers, ShutdownToken},
   state_store::{load as load_state, RunningSnapshot},
 };
-use crate::config::loader::{LemonadeConfig, PortRange, ProxyConfig};
+use crate::config::loader::{Ds4Config, LemonadeConfig, PortRange, ProxyConfig};
 use crate::daemon::context::{LaunchEnv, MethodContext, PersistedState};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
@@ -118,6 +118,15 @@ pub struct DaemonOptions {
   /// is false (the default) the daemon never runs Lemonade discovery,
   /// supervises the umbrella, or routes to it.
   pub lemonade: LemonadeConfig,
+  /// ds4 (DwarfStar) backend config (`ds4.binary` + the `enabled` tri-state).
+  /// Sourced from the `[ds4]` section. **Default-on when the binary
+  /// resolves** unless `ds4.enabled: false`; the `--ds4` flag /
+  /// `LLAMASTASH_DS4` env force it on (captured in [`Self::ds4_force`]).
+  pub ds4: Ds4Config,
+  /// Whether `--ds4` / `LLAMASTASH_DS4` force-enabled ds4 for this run. Kept
+  /// separate from the config so the detached re-exec can re-append `--ds4`
+  /// to the child argv (env/flag don't survive detach; config does).
+  pub ds4_force: bool,
   /// Control-plane HTTP listener port. Phase A of the Windows+HTTP-IPC
   /// plan: the bearer-token-authed JSON-RPC server binds here. `0`
   /// means "let the kernel pick" (used by tests for collision
@@ -184,6 +193,8 @@ impl DaemonOptions {
       // off can flip `enabled` after construction.
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
+      ds4: Ds4Config::default(),
+      ds4_force: false,
       // Port `0` makes every test pick an ephemeral free slot — no
       // cross-test contention on the
       // [`control_plane::DEFAULT_CONTROL_PORT`] the production CLI
@@ -222,6 +233,8 @@ impl DaemonOptions {
       propagated_cli_args: Vec::new(),
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
+      ds4: Ds4Config::default(),
+      ds4_force: false,
       control_plane_port: control_plane::DEFAULT_CONTROL_PORT,
       force: false,
       presets: std::collections::BTreeMap::new(),
@@ -400,7 +413,8 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     .with_presets(preset_store)
     .with_external(external_combined)
     .with_proxy_status(std::sync::Arc::clone(&proxy_status_cell))
-    .with_lemonade(opts.lemonade.clone());
+    .with_lemonade(opts.lemonade.clone())
+    .with_ds4(opts.ds4.clone(), opts.ds4_force);
   if let Some(binary) = opts.binary.clone() {
     if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
       log::warn!(
@@ -900,6 +914,12 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   if opts.lemonade.enabled {
     cmd.arg("--lemonade");
   }
+  // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config
+  // `enabled: false` and the env/flag don't survive detach. The default-on
+  // path needs nothing (the child re-reads `[ds4]` from config).
+  if opts.ds4_force {
+    cmd.arg("--ds4");
+  }
   // Carry `--force` through so the foreground child skips the same backend
   // precheck the parent already waived; without it the child re-runs the gate
   // and exits, defeating the whole point of `--force`.
@@ -1024,6 +1044,12 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   // The env var alone isn't reliable across a detached re-exec.
   if opts.lemonade.enabled {
     cmd.arg("--lemonade");
+  }
+  // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config
+  // `enabled: false` and the env/flag don't survive detach. The default-on
+  // path needs nothing (the child re-reads `[ds4]` from config).
+  if opts.ds4_force {
+    cmd.arg("--ds4");
   }
   // Carry `--force` through so the foreground child skips the same backend
   // precheck the parent already waived.

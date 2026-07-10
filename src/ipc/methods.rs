@@ -96,7 +96,7 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
       Response::ok(id, json!({"slept_ms": ms}))
     }
     "list_models" => {
-      let body = ctx.catalog.to_list_response().await;
+      let body = ctx.catalog.to_list_response(ctx.ds4_available()).await;
       Response::ok(id, body)
     }
     "status" => Response::ok(id, crate::ipc::status::status_response(ctx).await),
@@ -582,17 +582,24 @@ async fn start_model_handler(
   let started =
     compose_and_spawn(ctx, parsed, crate::daemon::supervisor::LaunchOrigin::Manual).await?;
   let pid = started.model.pid().await;
-  Ok(json!({
+  let mut resp = json!({
     "launch_id": started.launch_id,
     "model_id": started.model_id,
     "port": started.port,
     "pid": pid,
     "log_path": started.log_path,
-  }))
+  });
+  // Non-fatal advisories (dropped knobs, deepseek4 KV-blind note, ssd_streaming
+  // bypass). Omitted when empty so the response stays byte-stable for launches
+  // that raise none (every llama.cpp / Lemonade launch today).
+  if !started.warnings.is_empty() {
+    resp["warnings"] = json!(started.warnings);
+  }
+  Ok(resp)
 }
 
 pub(crate) fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorObject> {
-  let (id, _, _) = resolve_model_id_and_arch(path)?;
+  let (id, _, _, _) = resolve_model_id_and_arch(path)?;
   Ok(id)
 }
 
@@ -603,7 +610,7 @@ pub(crate) fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorO
 /// the `defaults_table` lookup falls back to the `*` row.
 pub(crate) fn resolve_model_id_and_arch(
   path: &std::path::Path,
-) -> Result<(ModelId, Option<String>, Option<u32>), ErrorObject> {
+) -> Result<(ModelId, Option<String>, Option<u32>, bool), ErrorObject> {
   let header = read_gguf_header(path, HeaderReadOptions::default()).map_err(|e| {
     ErrorObject::new(
       ErrorCode::InvalidParams,
@@ -618,7 +625,10 @@ pub(crate) fn resolve_model_id_and_arch(
   let native_ctx = summary
     .native_ctx
     .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
-  Ok((id, summary.arch, native_ctx))
+  // ds4-compatibility (arch + per-tensor quant contract) computed from the
+  // same header read — the routing signal the selection seam consults.
+  let ds4_compatible = crate::backend::ds4::ds4_compatible(&header.header);
+  Ok((id, summary.arch, native_ctx, ds4_compatible))
 }
 
 /// Project the daemon's catalog into the lean rows preset-key
@@ -662,7 +672,7 @@ async fn model_key_arch_rows(
       crate::util::paths::path_basename(model_path),
       resolve_model_id_and_arch(model_path)
         .ok()
-        .and_then(|(_, a, _)| a),
+        .and_then(|(_, a, _, _)| a),
     ),
   };
   (key, arch, rows)

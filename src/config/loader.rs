@@ -114,6 +114,13 @@ pub struct Config {
   /// three wins — see `cli::daemon::compose_daemon_options`). llamastash
   /// never installs `lemond`; the user sets it up and points us at it.
   pub lemonade: LemonadeConfig,
+  /// ds4 (DwarfStar) direct backend for DeepSeek V4 GGUFs. **Default-on when
+  /// the binary is found:** if `ds4-server` is on `PATH` (or `ds4.binary`
+  /// points at it) the backend is enabled unless `ds4.enabled: false`. The
+  /// `--ds4` daemon flag / `LLAMASTASH_DS4=1` force-enable regardless. Zero
+  /// footprint when the binary is absent. llamastash never installs
+  /// `ds4-server`; the user builds it and points us at it.
+  pub ds4: Ds4Config,
   /// How a knob no layer supplied a value for is seeded at launch
   /// `auto` (factory) delegates layer-less knobs to `--fit`;
   /// `inherited` leaves them unset (pre-Auto behavior). Env override:
@@ -379,6 +386,31 @@ impl Default for LemonadeConfig {
       binary: None,
       port: Self::default_port(),
     }
+  }
+}
+
+/// ds4 (DwarfStar) direct backend config. **Default-on, gated by binary
+/// detection** (D-enable): unlike Lemonade's opt-in `bool`, `enabled` is an
+/// `Option<bool>` — `None` (unset) means "on when `ds4-server` resolves",
+/// `Some(false)` forces off, `Some(true)` forces on. The `--ds4` flag /
+/// `LLAMASTASH_DS4=1` force on regardless. Availability always additionally
+/// requires the binary to resolve, so the footprint is zero when it is absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct Ds4Config {
+  #[serde(default)]
+  pub enabled: Option<bool>,
+  #[serde(default)]
+  pub binary: Option<PathBuf>,
+}
+
+impl Ds4Config {
+  /// Whether the user *intends* ds4 enabled, given the force flag
+  /// (`--ds4` / `LLAMASTASH_DS4`). Actual availability still requires the
+  /// binary to resolve — this only encodes intent (default-on unless
+  /// explicitly `enabled: false`, which the force flag overrides).
+  pub fn intends_enabled(&self, force: bool) -> bool {
+    force || self.enabled != Some(false)
   }
 }
 
@@ -905,6 +937,7 @@ impl Default for Config {
       arch_defaults: BTreeMap::new(),
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
+      ds4: Ds4Config::default(),
       default_launch_mode: DefaultLaunchMode::default(),
       fit_ctx_floor: DEFAULT_FIT_CTX_FLOOR,
       strict_fit: false,
