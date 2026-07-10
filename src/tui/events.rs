@@ -2009,6 +2009,11 @@ pub enum RefreshTick {
     method: &'static str,
     message: String,
   },
+  /// A non-fatal advisory from a successful writer call (a `start_model`
+  /// dropped-knob / KV-blind / ssd-streaming warning) surfaced as a toast.
+  WriterInfo {
+    message: String,
+  },
 }
 
 pub fn spawn_refresher(socket: PathBuf, tx: mpsc::Sender<Event>) {
@@ -2105,13 +2110,36 @@ pub fn spawn_writer(
         }
       };
       let (method, params) = encode_writer_cmd(cmd);
-      if let Err(e) = client.call(method, Some(params)).await {
-        let message = format!("{e}");
-        log::warn!("writer call {method} failed: {message}");
-        if let Some(fb) = &feedback {
-          let _ = fb
-            .send(Event::Refresh(RefreshTick::WriterError { method, message }))
-            .await;
+      match client.call(method, Some(params)).await {
+        Err(e) => {
+          let message = format!("{e}");
+          log::warn!("writer call {method} failed: {message}");
+          if let Some(fb) = &feedback {
+            let _ = fb
+              .send(Event::Refresh(RefreshTick::WriterError { method, message }))
+              .await;
+          }
+        }
+        // Surface a successful `start_model`'s advisories (dropped knobs,
+        // deepseek4 KV-blind, ssd_streaming bypass) as a toast — the TUI leg
+        // of R6 / D-admission. Other methods carry no warnings.
+        Ok(resp) => {
+          if method == "start_model" {
+            if let Some(ws) = resp.get("warnings").and_then(|v| v.as_array()) {
+              let joined = ws
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+              if !joined.is_empty() {
+                if let Some(fb) = &feedback {
+                  let _ = fb
+                    .send(Event::Refresh(RefreshTick::WriterInfo { message: joined }))
+                    .await;
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -2537,6 +2565,9 @@ fn apply_refresh(app: &mut App, tick: RefreshTick) {
     }
     RefreshTick::WriterError { method, message } => {
       app.show_error_toast(writer_error_toast(method, &message));
+    }
+    RefreshTick::WriterInfo { message } => {
+      app.show_toast(message);
     }
   }
 }

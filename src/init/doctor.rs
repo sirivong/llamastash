@@ -65,6 +65,11 @@ pub enum FindingId {
   SnapshotStale,
   ConfigModeDrift,
   RemoteSnapshotUnreachable,
+  /// Info-tier: ds4-compatible DeepSeek-V4 GGUFs are present but `ds4-server`
+  /// is unavailable. The models still *run* (llama.cpp fallback), so this is
+  /// "install the purpose-built engine", not an error. Additive id — readers
+  /// refuse only versions above their max, so `schema_version` stays 2.
+  Ds4Unavailable,
 }
 
 impl FindingId {
@@ -78,6 +83,7 @@ impl FindingId {
       Self::SnapshotStale => "snapshot_stale",
       Self::ConfigModeDrift => "config_mode_drift",
       Self::RemoteSnapshotUnreachable => "remote_snapshot_unreachable",
+      Self::Ds4Unavailable => "ds4_unavailable",
     }
   }
 
@@ -97,6 +103,10 @@ impl FindingId {
         "the remote snapshot fetch keeps failing — check network / egress; the recommender falls back to the bundled snapshot until it recovers"
       }
       Self::ConfigModeDrift => "llamastash init --only config",
+      Self::Ds4Unavailable => {
+        "build ds4-server (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and set \
+         `ds4.binary` to the built path (or put `ds4-server` on PATH); see docs/usage.md#ds4-backend"
+      }
     }
   }
 }
@@ -650,6 +660,13 @@ pub async fn run(args: DoctorArgs, _cli: &Cli, _config: &Config) -> CliResult {
     }
   }
 
+  // ds4 advisory (D-doctor): info-tier when ds4-compatible DeepSeek-V4 GGUFs
+  // are present but ds4-server is unavailable. Skipped entirely when ds4 is
+  // available (no scan cost for those users). Additive id — schema stays 2.
+  if let Some(finding) = ds4_advisory(_config).await {
+    report.findings.push(finding);
+  }
+
   if args.json {
     println!(
       "{}",
@@ -659,6 +676,54 @@ pub async fn run(args: DoctorArgs, _cli: &Cli, _config: &Config) -> CliResult {
     render_human(&report);
   }
   Ok(())
+}
+
+/// Build the ds4 advisory when it applies: ds4 is unavailable (config +
+/// binary) **and** at least one discovered GGUF passes the ds4-compatibility
+/// predicate. Returns `None` (no scan) when ds4 is available. The scan is the
+/// same one the daemon runs at startup; it stops at the first match.
+async fn ds4_advisory(config: &Config) -> Option<Finding> {
+  use crate::discovery::known_caches::{default_set, RootResolution};
+  use crate::discovery::scanner::{scan, ScanOptions};
+  use crate::gguf::header::{read_path, HeaderReadOptions};
+
+  let ds4_available = config.ds4.intends_enabled(false)
+    && crate::backend::ds4::resolve_ds4_binary(config.ds4.binary.as_deref()).is_some();
+  if ds4_available {
+    return None;
+  }
+  let roots = default_set(RootResolution {
+    user_paths: &config.model_paths,
+    disable: &config.disable_default_cache_paths,
+    no_scan: config.disable_scan,
+    home: crate::util::paths::home_dir().as_deref(),
+  });
+  let mut rx = scan(roots, ScanOptions::default());
+  while let Some(m) = rx.recv().await {
+    // Arch pre-check spares a header read for every non-deepseek4 model.
+    if m.metadata.as_ref().and_then(|md| md.arch.as_deref()) != Some("deepseek4") {
+      continue;
+    }
+    let is_ds4 = read_path(&m.path, HeaderReadOptions::default())
+      .map(|r| crate::backend::ds4::ds4_compatible(&r.header))
+      .unwrap_or(false);
+    if is_ds4 {
+      let name = m
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("a DeepSeek-V4 GGUF");
+      return Some(Finding::new(
+        FindingId::Ds4Unavailable,
+        Severity::Info,
+        format!(
+          "ds4-compatible model present ({name}) but `ds4-server` is unavailable — it runs on \
+           llama.cpp; install ds4 for the purpose-built engine (disk KV cache, SSD streaming)"
+        ),
+      ));
+    }
+  }
+  None
 }
 
 fn render_human(report: &DoctorReport) {
@@ -774,6 +839,48 @@ mod tests {
     let report = build_report(None, &cpu_hw());
     assert!(report.findings.is_empty());
     assert!(report.baseline.snapshot_bundle_date.is_none());
+  }
+
+  /// Build a config that scans only `dir` (default caches suppressed) with ds4
+  /// unavailable — the isolated setup the ds4 advisory test needs.
+  fn ds4_scan_config(dir: &std::path::Path) -> Config {
+    Config {
+      model_paths: vec![dir.to_path_buf()],
+      disable_scan: true, // `default_set` then returns only `user_paths`
+      ..Config::default()
+    }
+  }
+
+  #[tokio::test]
+  async fn ds4_advisory_fires_for_compatible_model_when_ds4_unavailable() {
+    use crate::gguf::test_fixtures::FixtureBuilder;
+    let dir = crate::test_support::unique_temp_dir("doctor-ds4", "compat");
+    let bytes = FixtureBuilder::new()
+      .with_arch("deepseek4")
+      .with_tensor("blk.0.ffn_gate_exps.weight", &[512, 512], 16) // IQ2_XXS
+      .with_tensor("token_embd.weight", &[512, 512], 1) // F16
+      .build();
+    std::fs::write(dir.join("deepseek-v4-flash.gguf"), bytes).unwrap();
+
+    let config = ds4_scan_config(&dir);
+    let finding = ds4_advisory(&config).await.expect("advisory fires");
+    assert_eq!(finding.id, "ds4_unavailable");
+    assert_eq!(finding.severity, Severity::Info);
+    assert!(finding.safe_to_log);
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test]
+  async fn ds4_advisory_absent_for_non_ds4_models() {
+    use crate::gguf::test_fixtures::build_minimal_gguf;
+    let dir = crate::test_support::unique_temp_dir("doctor-ds4", "plain");
+    std::fs::write(dir.join("qwen.gguf"), build_minimal_gguf("qwen2")).unwrap();
+    let config = ds4_scan_config(&dir);
+    assert!(
+      ds4_advisory(&config).await.is_none(),
+      "no advisory when no ds4-compatible model is present"
+    );
+    std::fs::remove_dir_all(&dir).ok();
   }
 
   #[test]
@@ -898,6 +1005,7 @@ mod tests {
       FindingId::SnapshotStale,
       FindingId::ConfigModeDrift,
       FindingId::RemoteSnapshotUnreachable,
+      FindingId::Ds4Unavailable,
     ];
     for id in ids {
       assert!(!id.fix_hint().is_empty(), "{id:?} must have a fix_hint");

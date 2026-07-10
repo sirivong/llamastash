@@ -880,7 +880,7 @@ ds4 fixture running shows the intentional page, never a raw 404 cascade.
 
 ### Phase D — surfaces and docs
 
-- [ ] **Unit 8: Doctor advisory and TUI polish**
+- [x] **Unit 8: Doctor advisory and TUI polish**
 
 **Goal:** The doctor advisory, the in-product alias disclosure, the
 preset-drop toast, and the native-knob picker experience land; badge parity

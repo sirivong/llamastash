@@ -39,12 +39,12 @@ use crate::init::fetch::{FetchClient, FetchError};
 /// size. 1 GiB matches the brainstorm spec.
 pub const DISK_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Max bytes per per-file download. 64 GiB accommodates frontier
-/// single-file GGUFs (e.g. 27B Q8_0 ≈ 29 GB, 70B Q4_K_M ≈ 43 GB when
-/// not sharded). Enforced via hf-hub's `Api::metadata` HEAD before
-/// each download; the cap is a safety net against runaway metadata,
-/// not a model-size policy.
-pub const PER_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Max bytes per per-file download. 512 GiB accommodates the largest
+/// single-file GGUFs the tool pulls — ds4's DeepSeek-V4 Flash/PRO files run
+/// 81 GB to ~465 GB as *single* files (the old 64 GiB cap refused every one
+/// of them). Enforced via hf-hub's `Api::metadata` HEAD before each download;
+/// the cap is a safety net against runaway metadata, not a model-size policy.
+pub const PER_FILE_MAX_BYTES: u64 = 512 * 1024 * 1024 * 1024;
 
 /// Maximum download attempts per file. On each transient failure
 /// (connection error, timeout, or mid-transfer body-read stall) the

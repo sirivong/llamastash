@@ -314,7 +314,9 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
         let inline_editing = picker_ref
           .map(|p| p.inline_edit.is_open() || p.extras_input.is_editing())
           .unwrap_or(false);
-        let focused_editable = picker_ref.map(|p| p.field.is_editable()).unwrap_or(false);
+        // `focused_is_editable` (not `field.is_editable`) so a backend's
+        // free-text native-knob row also advertises the `e:edit` chip.
+        let focused_editable = picker_ref.map(|p| p.focused_is_editable()).unwrap_or(false);
         if inline_editing {
           push(
             &mut chips,
@@ -607,6 +609,22 @@ fn wrap_path_chunks(s: &str, width: usize, max_lines: usize) -> Vec<String> {
   out
 }
 
+/// The ds4 `/v1/models` alias a running model advertises, derived from its
+/// filename (`…Pro…` → `deepseek-v4-pro`, else `deepseek-v4-flash`). Matches
+/// ds4-server's fixed alias so the in-product disclosure is accurate.
+fn ds4_serves_as(path: &std::path::Path) -> &'static str {
+  let name = path
+    .file_name()
+    .and_then(|n| n.to_str())
+    .unwrap_or_default()
+    .to_ascii_lowercase();
+  if name.contains("-pro") || name.contains("v4-pro") {
+    "deepseek-v4-pro"
+  } else {
+    "deepseek-v4-flash"
+  }
+}
+
 /// Render line 2 of the header: `:port  state  RAM  CPU` for a
 /// running model, `not launched` when the focused model has no
 /// supervisor row, blank when nothing is focused.
@@ -616,7 +634,7 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
       let (rss, cpu) = stats_pair(m);
       let label_style = palette.label_style();
       let value_style = palette.text_style();
-      Line::from(vec![
+      let mut spans = vec![
         // `ID:L9` prefix surfaces the launch id alongside the port so
         // it's visible without diving into the Settings tab. The
         // label tone matches `RAM` / `CPU` so the trio reads as one
@@ -646,7 +664,19 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
         ),
         Span::styled(cpu, value_style),
         Span::styled(" CPU", label_style),
-      ])
+      ];
+      // D-alias in-product disclosure: a running ds4 model advertises a fixed
+      // alias in every response `model` field (≠ the request name); surface it
+      // so the mismatch is explicable. Only on ds4-backed running rows.
+      if app.ds4_badge_paths.contains(&m.path) {
+        spans.push(Span::styled(
+          crate::tui::glyphs::active().middot_sep(),
+          palette.muted_style(),
+        ));
+        spans.push(Span::styled("serves as ", label_style));
+        spans.push(Span::styled(ds4_serves_as(&m.path), value_style));
+      }
+      Line::from(spans)
     }
     None => match app.focused_path() {
       Some(_) => Line::from(Span::styled("not launched", palette.muted_style())),
