@@ -1,7 +1,7 @@
 ---
 title: "feat: Default preset as a server-side resolver layer"
 type: feat
-status: active
+status: completed
 date: 2026-06-30
 origin: "Session brainstorm 2026-06-30 (follow-up to PR #49 extras-inheritance review)"
 ---
