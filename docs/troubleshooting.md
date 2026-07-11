@@ -192,11 +192,11 @@ Once the underlying launch issue is fixed, the fallback path stops firing. To tu
 
 **This is the design.** Those two files are one split PRO model that ds4 runs only in distributed mode, which LlamaStash does not support — each half is unloadable on its own by either engine. Use a **single-file** DeepSeek-V4 GGUF instead (the `…-Pro-IQ2XXS-…-Instruct` and Flash quants are single-file). `--backend ds4` bypasses the guard if you want ds4-server to surface its own error.
 
-## ds4 response says a different model name
+## ds4 `/v1/models` lists two models when one is running
 
-**Symptom:** every response from a ds4-backed model — including streamed chunks — has `"model": "deepseek-v4-flash"` (or `"deepseek-v4-pro"`) instead of the name you requested.
+**Symptom:** `curl http://127.0.0.1:<port>/v1/models` against a ds4 backend returns **two** entries — `deepseek-v4-flash` and `deepseek-v4-pro` — even though only one model is loaded.
 
-**This is expected.** ds4-server reports a fixed alias on `/v1/models` and echoes it in every response body; LlamaStash forwards it verbatim rather than rewriting streamed bodies. The TUI right pane shows a "serves as deepseek-v4-*" line on the running model so the mapping is visible. Clients that assert on the response `model` field must expect the alias.
+**This is ds4-server behavior, not a LlamaStash bug.** ds4-server advertises a fixed two-entry menu on `/v1/models` regardless of which GGUF is resident; it is not a report of what is loaded. `/v1/chat/completions` serves the one loaded model and **echoes back the `model` name you sent** (no fixed-alias rewrite). You normally never see any of this through LlamaStash: the proxy publishes your *own* catalog by file name on its `/v1/models`, and forwards your request model to the backend, which echoes it — so you request and get back the same name. The two aliases only surface if you curl ds4-server's port directly.
 
 ## ds4 embeddings / rerank request fails
 

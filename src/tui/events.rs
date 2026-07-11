@@ -1956,14 +1956,36 @@ fn dispatch_launch(
   }
 }
 
+/// Base `…/v1` URL a *copy-paste curl* should point at for the running model
+/// `m`.
+///
+/// Prefers the **port-stable proxy** when it's listening: one origin that
+/// survives relaunches (the direct backend port is ephemeral), speaks `/v1/`
+/// for every backend (it translates to lemonade's `/api/v1/` internally), and
+/// routes by the model id — so the pasted command keeps working. Falls back to
+/// the model's direct backend port only when the proxy is off/unbound. The
+/// `u` (URL) yank deliberately keeps the raw backend port instead; only `c`
+/// (curl) routes through the proxy.
+fn curl_base_url(app: &App, m: &crate::tui::app::ManagedRow) -> String {
+  let proxy = app
+    .daemon_info
+    .proxy
+    .as_ref()
+    .filter(|p| p.status == "listening")
+    .and_then(|p| p.listen.as_deref());
+  match proxy {
+    Some(listen) => format!("http://{listen}/v1"),
+    None => format!("http://127.0.0.1:{}/v1", m.port),
+  }
+}
+
 fn build_yank_text(app: &App, action: Action) -> Option<String> {
   match action {
     Action::YankPath => app.focused_path().map(|p| p.display().to_string()),
     Action::YankUrl => {
-      // Prefer the running URL when the model is launched; fall back
-      // to the model path so `y` always yanks *something useful* —
-      // a not-yet-running row still has a path the user often wants
-      // to paste into a script or doc.
+      // The raw backend endpoint. Fall back to the model path so `y` always
+      // yanks *something useful* — a not-yet-running row still has a path the
+      // user often wants to paste into a script or doc.
       if let Some(m) = app.focused_managed() {
         Some(format!("http://127.0.0.1:{}/v1", m.port))
       } else {
@@ -1972,7 +1994,7 @@ fn build_yank_text(app: &App, action: Action) -> Option<String> {
     }
     Action::YankCurl => {
       let m = app.focused_managed()?;
-      let url = format!("http://127.0.0.1:{}/v1", m.port);
+      let url = curl_base_url(app, m);
       let model_name = served_model_name(&m.path);
       Some(format!(
         "curl -s -H 'Content-Type: application/json' -d '{{\"model\":\"{}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hello\"}}]}}' {}/chat/completions",
@@ -4096,6 +4118,40 @@ mod tests {
     app.go_top();
     let text = super::build_yank_text(&app, Action::YankUrl).expect("url");
     assert_eq!(text, "http://127.0.0.1:41100/v1");
+  }
+
+  #[test]
+  fn curl_yank_prefers_proxy_port_while_url_keeps_backend_port() {
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events("/m/qwen.gguf", "/m")];
+    app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
+    app.go_top();
+
+    // No proxy → curl falls back to the raw backend port.
+    let curl_direct = super::build_yank_text(&app, Action::YankCurl).expect("curl");
+    assert!(
+      curl_direct.contains("http://127.0.0.1:41100/v1/chat/completions"),
+      "curl fallback must hit the backend port: {curl_direct}"
+    );
+
+    // Proxy listening → curl targets the port-stable proxy; url is unchanged.
+    app.daemon_info.proxy = Some(crate::tui::app::ProxyInfo {
+      enabled: true,
+      listen: Some("127.0.0.1:11435".to_string()),
+      status: "listening".to_string(),
+      bind_error: None,
+      auth: None,
+    });
+    let curl_proxied = super::build_yank_text(&app, Action::YankCurl).expect("curl");
+    assert!(
+      curl_proxied.contains("http://127.0.0.1:11435/v1/chat/completions"),
+      "curl must route through the proxy when it's listening: {curl_proxied}"
+    );
+    let url = super::build_yank_text(&app, Action::YankUrl).expect("url");
+    assert_eq!(
+      url, "http://127.0.0.1:41100/v1",
+      "url yank keeps the raw backend port"
+    );
   }
 
   #[test]
