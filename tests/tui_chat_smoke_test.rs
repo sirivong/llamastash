@@ -75,7 +75,33 @@ fn allocate_port_range() -> PortRange {
   }
 }
 
-async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
+/// Holds the daemon task + socket and, on drop, cleanly shuts the daemon down
+/// so its `setsid`-detached `fake_llama_server` child doesn't outlive the test
+/// as an init-owned orphan — the leak these smoke tests historically caused
+/// (see the `allocate_port_range` note). Uses the shared sync-shutdown helper,
+/// mirroring cli_integration_test's `DaemonHandle`.
+struct ChatDaemon {
+  socket: PathBuf,
+  join: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for ChatDaemon {
+  fn drop(&mut self) {
+    if let Some(join) = self.join.take() {
+      let _ = llamastash::test_support::sync_shutdown_daemon(&self.socket);
+      // Let `run_foreground` finish `stop_all_managed` + remove runtime.json,
+      // bounded to match the 5 s per-launch SIGTERM grace.
+      let runtime = llamastash::daemon::runtime_file::path(&self.socket);
+      let deadline = std::time::Instant::now() + Duration::from_secs(5);
+      while runtime.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+      }
+      join.abort();
+    }
+  }
+}
+
+async fn drive_to_ready_port() -> (u16, ChatDaemon) {
   let state = unique_temp("chat");
   let model_dir = unique_temp("chat-models");
   let model_path = model_dir.join("m.gguf");
@@ -143,7 +169,13 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
       panic!("{detail}");
     }
   }
-  (port, daemon, socket)
+  (
+    port,
+    ChatDaemon {
+      socket,
+      join: Some(daemon),
+    },
+  )
 }
 
 // All five tests in this file are `#[cfg_attr(windows, ignore)]`.
@@ -167,7 +199,7 @@ async fn drive_to_ready_port() -> (u16, tokio::task::JoinHandle<()>, PathBuf) {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_stream_drains_deltas_and_signals_finished() {
-  let (port, _daemon, _socket) = drive_to_ready_port().await;
+  let (port, _daemon) = drive_to_ready_port().await;
   let mut rx = spawn_chat_stream_for_test(port, "m", "hello?");
 
   let mut collected = String::new();
@@ -196,7 +228,7 @@ async fn chat_stream_drains_deltas_and_signals_finished() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embed_returns_dim_and_preview() {
-  let (port, _daemon, _socket) = drive_to_ready_port().await;
+  let (port, _daemon) = drive_to_ready_port().await;
   let result = embed(port, "m", "hello").await.expect("embed call");
   assert_eq!(result.dim, 3, "fake server returns a 3-d embedding");
   assert!(result.preview.len() <= 8);
@@ -209,7 +241,7 @@ async fn embed_returns_dim_and_preview() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_stream_surfaces_http_4xx_as_error_message() {
-  let (port, _daemon, _socket) = drive_to_ready_port().await;
+  let (port, _daemon) = drive_to_ready_port().await;
   // The chat tab posts a JSON body containing the user's prompt; the
   // fake server treats the marker string as a request to return 400.
   let mut rx = spawn_chat_stream_for_test(port, "m", "__TEST_INJECT_FAIL_400__");
@@ -237,7 +269,7 @@ async fn chat_stream_surfaces_http_4xx_as_error_message() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_stream_skips_malformed_sse_frame_and_emits_delta() {
-  let (port, _daemon, _socket) = drive_to_ready_port().await;
+  let (port, _daemon) = drive_to_ready_port().await;
   let mut rx = spawn_chat_stream_for_test(port, "m", "__TEST_INJECT_MALFORMED_SSE__");
   let mut saw_delta = false;
   let mut saw_finished = false;
@@ -268,7 +300,7 @@ async fn chat_stream_skips_malformed_sse_frame_and_emits_delta() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rerank_returns_sorted_scores() {
-  let (port, _daemon, _socket) = drive_to_ready_port().await;
+  let (port, _daemon) = drive_to_ready_port().await;
   let ranked = rerank(port, "m", "query", &["doc one".into(), "doc two".into()])
     .await
     .expect("rerank call");
