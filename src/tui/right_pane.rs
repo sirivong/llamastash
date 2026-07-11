@@ -65,18 +65,23 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
   frame.render_widget(outer, area);
 
   // Inner stack: blank pad, name (bold), path (muted, wraps to as
-  // many lines as needed up to 3), blank gap, stats
-  // (`:port  state  RAM  CPU`), separator, tab content. Wrapping the
-  // path means narrow panes still surface the full filesystem
-  // location instead of a left-truncated stub. Capped at 3 lines so
-  // a pathological path can't push the tab body off-screen.
+  // many lines as needed up to 3), ds4 badge (only for ds4 rows, else
+  // zero-height), a blank gap, stats (`:port  state  RAM  CPU`),
+  // separator, tab content. Wrapping the path means narrow panes still
+  // surface the full filesystem location instead of a left-truncated
+  // stub. Capped at 3 lines so a pathological path can't push the tab
+  // body off-screen. The gap is its own always-present row so there is
+  // exactly one blank line before the stats whether or not the badge shows.
   let path_lines = focused_path_line_count(app, inner.width);
+  let badge = focused_backend_badge(app, palette);
+  let badge_lines = if badge.is_some() { 1 } else { 0 };
   let layout = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
       Constraint::Length(1),
       Constraint::Length(1),
       Constraint::Length(path_lines),
+      Constraint::Length(badge_lines),
       Constraint::Length(1),
       Constraint::Length(1),
       Constraint::Length(1),
@@ -86,10 +91,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
 
   render_header_name(frame, layout[1], app, palette);
   render_header_path(frame, layout[2], app, palette);
-  render_header_badge(frame, layout[3], app, palette);
-  render_header_stats(frame, layout[4], app, palette);
-  render_separator(frame, layout[5], palette);
-  let body_area = layout[6];
+  if let Some(badge) = &badge {
+    render_header_badge(frame, layout[3], badge, palette);
+  }
+  // layout[4] is the always-blank gap row.
+  render_header_stats(frame, layout[5], app, palette);
+  render_separator(frame, layout[6], palette);
+  let body_area = layout[7];
 
   match app.right_tab {
     RightTab::Logs => logs::render(frame, body_area, &app.logs_state, palette),
@@ -552,42 +560,20 @@ fn render_header_path(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
   frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Render the backend badge row that sits directly under the path, in the
-/// header's gap slot. A filled `ds4` chip when the focused model is ds4 — for
-/// a *running* row that means the launch actually resolved to ds4 (its honest
-/// `status` `backend`), for a *selected* (not-running) row the `list_models`
-/// routing prediction. Blank (the plain gap) otherwise.
-fn render_header_badge(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-  let Some(path) = focused_path(app) else {
-    return;
-  };
-  // A *running* row keys the badge on the launch's real backend; a selected
-  // (not-running) row on the `list_models` routing prediction.
-  let running = app.right_pane_focus();
-  let is_ds4 = match running {
-    Some(m) => m.is_ds4(),
-    None => app.ds4_badge_paths.contains(&path),
-  };
-  if !is_ds4 {
-    return;
-  }
+/// Render a resolved [`BackendBadge`] in the header row that sits directly
+/// under the path (the former blank gap slot): the accent-filled chip followed
+/// by the backend's trailing spans. The disclosure rides this row rather than
+/// the stats line so a long value (ds4's `deepseek-v4-*` alias) isn't clipped
+/// by the port/state/RAM/CPU run. Backend-agnostic — see [`focused_backend_badge`].
+fn render_header_badge(frame: &mut Frame<'_>, area: Rect, badge: &BackendBadge, palette: &Palette) {
   let mut spans = vec![Span::styled(
-    " ds4 ",
+    badge.chip,
     Style::default()
       .fg(palette.on_accent)
       .bg(palette.accent)
       .add_modifier(Modifier::BOLD),
   )];
-  // D-alias disclosure: a running ds4 model echoes a fixed alias in every
-  // response's `model` field (≠ the request name); surface it beside the badge
-  // so the mismatch is explicable. It sits here rather than on the stats line
-  // so the full `deepseek-v4-*` value isn't clipped by the port/state/RAM/CPU
-  // run. A running row passed the `is_ds4` gate above, so its alias is real;
-  // a selected-but-not-running row shows only the prediction badge.
-  if let Some(m) = running {
-    spans.push(Span::styled("  serves as ", palette.label_style()));
-    spans.push(Span::styled(ds4_serves_as(&m.path), palette.text_style()));
-  }
+  spans.extend(badge.trailing.iter().cloned());
   frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -598,6 +584,52 @@ fn focused_path(app: &App) -> Option<std::path::PathBuf> {
     .right_pane_focus()
     .map(|m| m.path.clone())
     .or_else(|| app.focused_path())
+}
+
+/// A backend identity badge for the header row: a colored chip plus optional
+/// trailing spans. Any backend that warrants header identification returns one
+/// via [`focused_backend_badge`]; llama.cpp / Lemonade return `None` today.
+/// Keeping this backend-agnostic lets a future backend add a chip (and its own
+/// disclosure) without touching the layout.
+struct BackendBadge {
+  /// Chip text rendered with the accent background (e.g. `" ds4 "`).
+  chip: &'static str,
+  /// Styled spans rendered after the chip (e.g. ds4's `serves as <alias>`).
+  trailing: Vec<Span<'static>>,
+}
+
+/// Resolve the header badge for the focused model, or `None` when the backend
+/// warrants no chip. Drives both the badge render and the header layout (the
+/// badge row collapses to zero height when this is `None`, so its slot doesn't
+/// double the header gap). Add future backends as their own arms.
+fn focused_backend_badge(app: &App, palette: &Palette) -> Option<BackendBadge> {
+  let path = focused_path(app)?;
+  let running = app.right_pane_focus();
+  // ds4: a *running* row keys on the launch's real backend, a *selected* row
+  // on the `list_models` routing prediction.
+  let is_ds4 = match running {
+    Some(m) => m.is_ds4(),
+    None => app.ds4_badge_paths.contains(&path),
+  };
+  if is_ds4 {
+    // D-alias disclosure — a running ds4 model echoes a fixed alias in every
+    // response's `model` field (≠ the request name); surface it beside the chip
+    // so the mismatch is explicable. Only a running launch has a real alias; a
+    // selected-but-not-running row shows the prediction chip alone.
+    let trailing = running
+      .map(|m| {
+        vec![
+          Span::styled("  serves as ", palette.label_style()),
+          Span::styled(ds4_serves_as(&m.path), palette.text_style()),
+        ]
+      })
+      .unwrap_or_default();
+    return Some(BackendBadge {
+      chip: " ds4 ",
+      trailing,
+    });
+  }
+  None
 }
 
 /// Number of vertical rows the focused path needs at `inner_width`,
@@ -650,16 +682,28 @@ fn wrap_path_chunks(s: &str, width: usize, max_lines: usize) -> Vec<String> {
 }
 
 /// The ds4 `/v1/models` alias a running model advertises, derived from its
-/// filename (a `pro` token → `deepseek-v4-pro`, else `deepseek-v4-flash`).
-/// A best-effort mirror of ds4-server's fixed alias for the in-product
-/// disclosure; a non-standard filename may read as flash.
+/// filename (a `flash` / `pro` variant token → `deepseek-v4-flash` /
+/// `deepseek-v4-pro`). A best-effort mirror of ds4-server's fixed alias for
+/// the in-product disclosure; a non-standard filename reads as flash.
 fn ds4_serves_as(path: &std::path::Path) -> &'static str {
   let name = path
     .file_name()
     .and_then(|n| n.to_str())
     .unwrap_or_default()
     .to_ascii_lowercase();
-  if name.contains("pro") {
+  // Match the variant as a delimited token, not a bare substring: real
+  // DeepSeek-V4 filenames carry an `AProjQ8` (attention-projection quant)
+  // segment whose "pro" false-matches `contains("pro")` and mislabels *every*
+  // file — Flash included — as pro. Split on non-alphanumeric and compare whole
+  // segments. Flash wins on a tie / neither: it's the common single-file build.
+  let has_token = |tok: &str| {
+    name
+      .split(|c: char| !c.is_ascii_alphanumeric())
+      .any(|seg| seg == tok)
+  };
+  if has_token("flash") {
+    "deepseek-v4-flash"
+  } else if has_token("pro") {
     "deepseek-v4-pro"
   } else {
     "deepseek-v4-flash"
@@ -807,14 +851,18 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
-    // The badge sits in the header gap row (under the path) via
-    // `render_header_badge`, so it stays visible regardless of name/path
-    // length. The model name itself never contains "ds4".
+    // The badge sits in the header row under the path, resolved via
+    // `focused_backend_badge` and painted by `render_header_badge`. A model
+    // with no backend badge (llama.cpp) resolves to `None` → empty row. The
+    // model name itself never contains "ds4".
     let render_badge = |app: &App| -> String {
       let palette = app.palette();
+      let Some(badge) = focused_backend_badge(app, palette) else {
+        return String::new();
+      };
       let mut term = Terminal::new(TestBackend::new(60, 1)).unwrap();
       term
-        .draw(|f| render_header_badge(f, Rect::new(0, 0, 60, 1), app, palette))
+        .draw(|f| render_header_badge(f, Rect::new(0, 0, 60, 1), &badge, palette))
         .unwrap();
       let buf = term.backend().buffer().clone();
       let mut joined = String::new();
@@ -846,6 +894,34 @@ mod tests {
     assert!(
       !llama_row.contains("ds4") && !llama_row.contains("serves as"),
       "running llama.cpp row must not badge ds4 or disclose an alias"
+    );
+  }
+
+  #[test]
+  fn ds4_serves_as_matches_variant_token_not_aproj_substring() {
+    use std::path::Path;
+    // Real DeepSeek-V4 filenames carry an `AProjQ8` segment — its "pro"
+    // must NOT flip a Flash file to the pro alias (the `contains("pro")` bug).
+    assert_eq!(
+      ds4_serves_as(Path::new(
+        "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf"
+      )),
+      "deepseek-v4-flash"
+    );
+    assert_eq!(
+      ds4_serves_as(Path::new(
+        "DeepSeek-V4-Pro-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-Instruct.gguf"
+      )),
+      "deepseek-v4-pro"
+    );
+    assert_eq!(
+      ds4_serves_as(Path::new("DeepSeek-V4-Pro-Q4K-Layers00-30.gguf")),
+      "deepseek-v4-pro"
+    );
+    // Neither token present → default flash.
+    assert_eq!(
+      ds4_serves_as(Path::new("deepseek-v4-mystery.gguf")),
+      "deepseek-v4-flash"
     );
   }
 
