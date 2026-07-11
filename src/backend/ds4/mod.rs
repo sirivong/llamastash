@@ -40,7 +40,10 @@ use crate::launch::params::LaunchParams;
 /// `list`/`show` badge, and adoption dispatch.
 pub const DS4_BACKEND_ID: &str = "ds4";
 
-/// Executable name searched on `PATH` when `ds4.binary` is unset.
+/// Executable name searched on `PATH` when `ds4.binary` is unset. The PATH
+/// search (and this const) are compiled out under `test-fixtures` so tests
+/// never auto-discover a host `ds4-server`.
+#[cfg(not(feature = "test-fixtures"))]
 const DS4_SERVER_BIN: &str = "ds4-server";
 
 /// The fixed model aliases ds4-server advertises on `GET /v1/models`. Used
@@ -223,19 +226,30 @@ pub fn resolve_ds4_binary(configured: Option<&Path>) -> Option<PathBuf> {
   if let Some(explicit) = configured {
     return explicit.is_file().then(|| canonical(explicit));
   }
-  let exe = if cfg!(windows) {
-    format!("{DS4_SERVER_BIN}.exe")
-  } else {
-    DS4_SERVER_BIN.to_string()
-  };
-  let path = std::env::var_os("PATH")?;
-  for dir in std::env::split_paths(&path) {
-    let candidate = dir.join(&exe);
-    if candidate.is_file() {
-      return Some(canonical(&candidate));
-    }
+  // Never auto-discover a host `ds4-server` on `PATH` under the test-fixtures
+  // build — same reason as `resolve_lemond_binary`: a real daemon subprocess
+  // (with ds4 default-on) must not pick up + leak the developer's system
+  // binary. Tests point at an explicit fake `ds4.binary`.
+  #[cfg(feature = "test-fixtures")]
+  {
+    None
   }
-  None
+  #[cfg(not(feature = "test-fixtures"))]
+  {
+    let exe = if cfg!(windows) {
+      format!("{DS4_SERVER_BIN}.exe")
+    } else {
+      DS4_SERVER_BIN.to_string()
+    };
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+      let candidate = dir.join(&exe);
+      if candidate.is_file() {
+        return Some(canonical(&candidate));
+      }
+    }
+    None
+  }
 }
 
 /// The ds4 backend: direct, process-per-model, DeepSeek-V4-only.

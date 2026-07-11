@@ -153,21 +153,33 @@ pub fn resolve_lemond_binary(cfg: &crate::config::loader::LemonadeConfig) -> Opt
   if let Some(explicit) = &cfg.binary {
     return explicit.is_file().then(|| canonical(explicit));
   }
-  let names: &[&str] = if cfg!(windows) {
-    &["lemond.exe", "lemonade.exe"]
-  } else {
-    &["lemond", "lemonade"]
-  };
-  let path = std::env::var_os("PATH")?;
-  for dir in std::env::split_paths(&path) {
-    for name in names {
-      let candidate = dir.join(name);
-      if candidate.is_file() {
-        return Some(canonical(&candidate));
+  // Never auto-discover a host `lemond`/`lemonade` on `PATH` under the
+  // test-fixtures build: integration tests spawn the real daemon subprocess,
+  // which (with Lemonade default-on) would otherwise pick up — and leak — the
+  // developer's system `lemond`. Tests point at an explicit fake
+  // `lemonade.binary` instead.
+  #[cfg(feature = "test-fixtures")]
+  {
+    None
+  }
+  #[cfg(not(feature = "test-fixtures"))]
+  {
+    let names: &[&str] = if cfg!(windows) {
+      &["lemond.exe", "lemonade.exe"]
+    } else {
+      &["lemond", "lemonade"]
+    };
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+      for name in names {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+          return Some(canonical(&candidate));
+        }
       }
     }
+    None
   }
-  None
 }
 
 /// What the umbrella's loopback `port` looks like to a bind attempt.
