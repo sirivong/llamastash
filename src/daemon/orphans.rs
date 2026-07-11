@@ -519,6 +519,26 @@ mod tests {
   }
 
   #[test]
+  fn paths_equal_matches_same_file_and_rejects_different() {
+    // The ds4 adoption argv `-m` cross-check: two spellings of the same file
+    // match; a different basename does not (per-file PID-reuse discrimination).
+    let dir = crate::test_support::unique_temp_dir("orphans-paths", "eq");
+    let a = dir.join("m.gguf");
+    std::fs::write(&a, b"x").unwrap();
+    assert!(paths_equal(&a, &a));
+    // A `./`-prefixed spelling canonicalizes to the same file.
+    let dotted = dir.join(".").join("m.gguf");
+    assert!(paths_equal(&dotted, &a), "canonicalization collapses ./");
+    // A different file in the same dir must not match.
+    let b = dir.join("other.gguf");
+    std::fs::write(&b, b"y").unwrap();
+    assert!(!paths_equal(&a, &b));
+    // A non-existent path falls back to a direct compare (unequal).
+    assert!(!paths_equal(&dir.join("gone.gguf"), &a));
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
   fn extract_model_path_handles_dash_m_and_long_forms() {
     let dash_m: Vec<String> = vec![
       "llama-server".into(),

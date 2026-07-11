@@ -221,9 +221,12 @@ pub(crate) async fn compose_and_spawn(
   // Split-PRO guard (D-guard): each half of ds4's distributed Q4 GGUF pair is
   // unloadable *alone* by either engine, and attempting it wastes a 100 GB+
   // load. Refuse pre-spawn on an auto-routed launch (an explicit `--backend`
-  // passes through so the engine can surface its own error). This is the one
-  // remaining pre-spawn refusal on the ds4 path.
-  if parsed.backend.unwrap_or_default() == crate::launch::params::BackendChoice::Auto {
+  // passes through so the engine can surface its own error). Gated on the
+  // `deepseek4` arch so an *unrelated* GGUF that merely matches the
+  // `…-Layers00-30` filename pattern is never wrongly refused.
+  if parsed.backend.unwrap_or_default() == crate::launch::params::BackendChoice::Auto
+    && arch.as_deref() == Some("deepseek4")
+  {
     if let Some(name) = parsed.model_path.file_name().and_then(|n| n.to_str()) {
       if crate::backend::ds4::is_ds4_split_half(name) {
         return Err(ErrorObject::new(

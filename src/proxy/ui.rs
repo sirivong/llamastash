@@ -184,13 +184,11 @@ async fn collect_running(state: &Arc<ProxyState>) -> Vec<RunningEntry> {
           .unwrap_or_else(|| crate::util::paths::model_display_name(&m.path))
       })
       .unwrap_or_else(|| crate::util::paths::model_display_name(&id.path));
-    // ds4-backed models serve no web UI (D-ui). Derive from the catalog row
-    // via the same badge the daemon routes on; a model missing from the
-    // catalog defaults to "serves a UI" (llama.cpp).
-    let serves_ui = by_path
-      .get(&path_key)
-      .map(|m| !crate::discovery::catalog::ds4_badge_for(m, state.ctx.ds4_available()))
-      .unwrap_or(true);
+    // ds4-backed models serve no web UI (D-ui). Uses the running model's
+    // *actual* resolved backend (last_params tag, falling back to the static
+    // compat badge) so a ds4-compatible file force-run on llama.cpp still
+    // serves its UI.
+    let serves_ui = !route::running_model_is_ds4(state, &id).await;
     out.push(RunningEntry {
       launch_id: launch_id.as_str().to_string(),
       model_id: id,

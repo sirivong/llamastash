@@ -322,6 +322,31 @@ async fn decide_lemonade(
 /// `cli::resolve::parse_catalog_row` (which goes through the JSON
 /// wire); kept here so the proxy doesn't pay a serialize/deserialize
 /// round-trip on the hot path.
+/// Whether a **running** model (keyed by its [`ModelId`]) is actually
+/// ds4-backed. Prefers the `resolved_backend` tag stamped on `last_params` —
+/// the launch's *real* backend, honoring an explicit `--backend llamacpp`
+/// override on a ds4-compatible file — and falls back to the static ds4 compat
+/// badge only for a model with no tag yet (an adopted row, or the brief window
+/// before the recorder stamps). Used by `/ui` (UI-less exclusion) and the
+/// embeddings/rerank guard so both act on the true backend, not a prediction.
+pub(crate) async fn running_model_is_ds4(state: &Arc<ProxyState>, id: &ModelId) -> bool {
+  let ds_snap = state.ctx.state.snapshot().await;
+  if let Some(tag) = ds_snap
+    .last_params
+    .iter()
+    .find(|e| e.id.as_gguf().map(|g| g.path == id.path).unwrap_or(false))
+    .map(|e| e.resolved_backend.as_str())
+  {
+    return tag == crate::backend::ds4::DS4_BACKEND_ID;
+  }
+  let cat = state.ctx.catalog.snapshot().await;
+  cat
+    .iter()
+    .find(|m| m.path == id.path)
+    .map(|m| crate::discovery::catalog::ds4_badge_for(m, state.ctx.ds4_available()))
+    .unwrap_or(false)
+}
+
 pub(crate) fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
   let path = m.path.to_string_lossy().into_owned();
   let parent = m.parent.to_string_lossy().into_owned();

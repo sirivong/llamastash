@@ -60,9 +60,14 @@ pub struct LastParamsEntry {
   /// The backend id this launch *resolved* to (`llamacpp` / `lemonade` /
   /// `ds4`) — the cross-backend contamination guard (D-contamination). The
   /// persisted `params.backend` choice stays `auto` for an auto-routed
-  /// launch, so it can't serve as the tag. `#[serde(default)]` reads a
-  /// pre-tag row as `llamacpp` (its only possible backend then).
-  #[serde(default = "default_resolved_backend")]
+  /// launch, so it can't serve as the tag. `default`/`skip_serializing_if`
+  /// keep a llama.cpp row byte-stable: the field is omitted when it holds the
+  /// `llamacpp` default and reads back as `llamacpp`, so a pre-ds4 `state.json`
+  /// re-serializes identically (matching the `backend_knobs` pattern).
+  #[serde(
+    default = "default_resolved_backend",
+    skip_serializing_if = "is_default_backend"
+  )]
   pub resolved_backend: String,
 }
 
@@ -70,6 +75,12 @@ pub struct LastParamsEntry {
 /// only backend that could have written a pre-tag `state.json` row.
 fn default_resolved_backend() -> String {
   "llamacpp".to_string()
+}
+
+/// Whether `s` is the `llamacpp` default — omitted from the serialized shape
+/// for byte-stability, so only a non-default (`ds4` / `lemonade`) tag persists.
+fn is_default_backend(s: &str) -> bool {
+  s == "llamacpp"
 }
 
 /// One entry in `presets` — a model's named-preset list.
@@ -353,6 +364,30 @@ mod tests {
     let legacy: LastParamsEntry = serde_json::from_value(v).expect("legacy row parses");
     assert_eq!(legacy.resolved_backend, "llamacpp");
     fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn llamacpp_resolved_backend_is_omitted_from_serialized_shape() {
+    // Byte-stability: a llama.cpp row omits `resolved_backend` (defaults back
+    // to llamacpp on load), so a pre-ds4 state.json re-serializes identically.
+    // A non-default tag (ds4) still serializes.
+    let llama = LastParamsEntry {
+      id: id("/m/a.gguf", 1),
+      params: fake_params("/m/a.gguf"),
+      resolved_backend: "llamacpp".to_string(),
+    };
+    let v = serde_json::to_value(&llama).unwrap();
+    assert!(
+      v.as_object().unwrap().get("resolved_backend").is_none(),
+      "llamacpp tag must be omitted for byte-stability: {v}"
+    );
+    let ds4 = LastParamsEntry {
+      id: id("/m/b.gguf", 2),
+      params: fake_params("/m/b.gguf"),
+      resolved_backend: "ds4".to_string(),
+    };
+    let v4 = serde_json::to_value(&ds4).unwrap();
+    assert_eq!(v4["resolved_backend"], "ds4", "non-default tag persists");
   }
 
   #[test]

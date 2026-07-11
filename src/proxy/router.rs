@@ -179,7 +179,7 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
       served_model_key, ..
     } = &decision
     {
-      if ds4_backs_model(&state, served_model_key).await {
+      if route::running_model_is_ds4(&state, served_model_key).await {
         return error_response(
           StatusCode::BAD_REQUEST,
           "unsupported_endpoint",
@@ -701,22 +701,6 @@ fn unauthorized_body() -> Vec<u8> {
 /// message)` triple. Centralised so the 404 / `model_not_running`
 /// arms all emit the same
 /// `{"error":{"type":..., "message":...}}` envelope.
-/// Whether the resolved running model is ds4-backed — via the same honest
-/// badge the daemon routes on. Used to answer embeddings/rerank against a ds4
-/// model with a clear error rather than ds4-server's bare 404.
-async fn ds4_backs_model(state: &Arc<ProxyState>, id: &crate::gguf::identity::ModelId) -> bool {
-  if !state.ctx.ds4_available() {
-    return false;
-  }
-  let cat = state.ctx.catalog.snapshot().await;
-  let by_path = route::index_catalog_by_path(&cat);
-  let key = id.path.to_string_lossy().into_owned();
-  by_path
-    .get(&key)
-    .map(|m| crate::discovery::catalog::ds4_badge_for(m, true))
-    .unwrap_or(false)
-}
-
 pub(crate) fn error_response(status: StatusCode, r#type: &str, message: &str) -> ProxyResponse {
   let body = ErrorResponse {
     error: ErrorObject::new(r#type, message),
