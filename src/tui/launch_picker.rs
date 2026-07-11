@@ -23,9 +23,13 @@ use crate::launch::params::{BackendChoice, LayerLabel};
 /// Cycle ring for a boolean native knob (`inherited → on → off → inherited`).
 const NATIVE_BOOL_RING: &[&str] = &["true", "false"];
 
-/// Pre-canned context-length presets surfaced as quick picks. Custom
-/// values flow through the same field when the user types digits.
-pub const CTX_PRESETS: &[u32] = &[2048, 4096, 8192, 16384, 32768, 65536, 131072];
+/// Pre-canned context-length presets surfaced as quick picks, doubling up to
+/// the launcher ceiling (`MAX_CTX_TOKENS` = 1 Mi). The cycle is gated per model
+/// to the trained window (see `LaunchPickerState::ctx_presets`); custom
+/// values still flow through the same field when the user types digits.
+pub const CTX_PRESETS: &[u32] = &[
+  2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576,
+];
 
 /// Value-column label for a knob the user hasn't set — it inherits from
 /// the resolver chain (last used / arch default / model default / server
@@ -204,6 +208,10 @@ impl InlineEdit {
 pub struct LaunchPickerState {
   /// Display name of the focused model (rendered in the title).
   pub model_name: String,
+  /// The model's native (trained) context length, when known. Gates the ctx
+  /// quick-pick cycle so it never offers a window larger than the model
+  /// supports; `None` leaves the full preset ladder available.
+  pub native_ctx: Option<u32>,
   /// User-supplied typed knobs (only fields the user explicitly set;
   /// every other field stays `None` and inherits from the resolved
   /// chain on render). Includes `ctx` and `reasoning`.
@@ -278,6 +286,7 @@ impl LaunchPickerState {
   pub fn for_model(model_name: impl Into<String>) -> Self {
     Self {
       model_name: model_name.into(),
+      native_ctx: None,
       user_knobs: TypedKnobs::default(),
       resolved: TypedKnobs::default(),
       sources: BTreeMap::new(),
@@ -429,12 +438,21 @@ impl LaunchPickerState {
   }
 
   /// All rows in render / navigation order: the static base
-  /// ([`PickerField::all`]) followed by one [`PickerField::NativeKnob`] per
-  /// active descriptor. Native rows trail the form; for shipping backends the
-  /// descriptor slice is empty, so this equals the static order exactly.
+  /// ([`PickerField::all`] = `[Preset, knob groups…, Extras]`) with one
+  /// [`PickerField::NativeKnob`] per active descriptor spliced in **just
+  /// before** the trailing `Extras` row, so the free-text extras row always
+  /// stays last. For shipping backends the descriptor slice is empty, so this
+  /// equals the static order exactly.
   pub fn ordered_fields(&self) -> Vec<PickerField> {
+    let natives: Vec<PickerField> = (0..self.native_descriptors.len())
+      .map(PickerField::NativeKnob)
+      .collect();
     let mut v: Vec<PickerField> = PickerField::all().to_vec();
-    v.extend((0..self.native_descriptors.len()).map(PickerField::NativeKnob));
+    let extras_at = v
+      .iter()
+      .position(|f| matches!(f, PickerField::Extras))
+      .unwrap_or(v.len());
+    v.splice(extras_at..extras_at, natives);
     v
   }
 
@@ -590,9 +608,23 @@ impl LaunchPickerState {
     self.resolved_backend().id()
   }
 
+  /// The ctx quick-pick ladder gated to the model's native window: every
+  /// [`CTX_PRESETS`] entry `≤ native_ctx` (all of them when the native window
+  /// is unknown). Keeps the cycle from offering a context larger than the
+  /// model trained on; a user who wants more can still type a custom value.
+  fn ctx_presets(&self) -> Vec<u32> {
+    match self.native_ctx {
+      Some(max) => CTX_PRESETS.iter().copied().filter(|&c| c <= max).collect(),
+      None => CTX_PRESETS.to_vec(),
+    }
+  }
+
   fn cycle_knob(&mut self, field: KnobField, forward: bool) {
     match field {
-      KnobField::Ctx => self.cycle_u32(field, CTX_PRESETS, forward),
+      KnobField::Ctx => {
+        let presets = self.ctx_presets();
+        self.cycle_u32(field, &presets, forward);
+      }
       KnobField::Reasoning => self.cycle_bool(field, forward),
       KnobField::NGpuLayers => self.cycle_u32(field, &[0, 16, 32, 64, 99], forward),
       KnobField::NCpuMoe => self.cycle_u32(field, &[0, 4, 8, 16, 32, 64], forward),
@@ -1139,6 +1171,44 @@ mod tests {
     }
     s.cycle_focused_value_next();
     assert_eq!(s.user_knobs.ctx, None, "wraps back to inherited");
+  }
+
+  #[test]
+  fn ctx_presets_gate_to_native_window() {
+    let mut s = LaunchPickerState::for_model("m");
+    // Unknown native window → the full ladder (all quick-picks up to 1 Mi).
+    assert_eq!(s.ctx_presets(), CTX_PRESETS.to_vec());
+    // 128k model → capped at 131072; no 256k / 512k / 1M offered.
+    s.native_ctx = Some(131072);
+    assert_eq!(*s.ctx_presets().last().unwrap(), 131072);
+    assert!(!s.ctx_presets().contains(&262144));
+    // 256k model → reaches the new 262144 preset but not 524288.
+    s.native_ctx = Some(262144);
+    assert_eq!(*s.ctx_presets().last().unwrap(), 262144);
+    assert!(!s.ctx_presets().contains(&524288));
+    // 1M model → the whole ladder, 1 Mi included.
+    s.native_ctx = Some(1048576);
+    assert_eq!(s.ctx_presets(), CTX_PRESETS.to_vec());
+    assert!(s.ctx_presets().contains(&1048576));
+    // A window below the smallest preset yields no quick-picks (type-only).
+    s.native_ctx = Some(1024);
+    assert!(s.ctx_presets().is_empty());
+  }
+
+  #[test]
+  fn cycle_ctx_caps_at_native_window() {
+    // A 128k model must never cycle past 131072 into the 256k+ presets.
+    let mut s = LaunchPickerState::for_model("m");
+    s.native_ctx = Some(131072);
+    s.field = PickerField::Knob(KnobField::Ctx);
+    let gated = s.ctx_presets();
+    s.cycle_focused_value_next(); // Inherited → Auto
+    for preset in &gated {
+      s.cycle_focused_value_next();
+      assert_eq!(s.user_knobs.ctx, Some(KnobValue::Set(*preset)));
+    }
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_knobs.ctx, None, "wraps at the native cap, no 256k+");
   }
 
   #[test]
@@ -1728,17 +1798,19 @@ mod tests {
   }
 
   #[test]
-  fn native_rows_trail_the_form_in_descriptor_order() {
+  fn native_rows_precede_extras_in_descriptor_order() {
     let mut s = LaunchPickerState::for_model("m");
     s.native_descriptors = STUB_NATIVE;
     let fields = s.ordered_fields();
-    let tail = &fields[fields.len() - 3..];
+    // Native rows sit in descriptor order just ahead of the trailing Extras.
+    let tail = &fields[fields.len() - 4..];
     assert_eq!(
       tail,
       [
         PickerField::NativeKnob(0),
         PickerField::NativeKnob(1),
         PickerField::NativeKnob(2),
+        PickerField::Extras,
       ]
     );
     assert!(s.field_visible(PickerField::NativeKnob(2)));

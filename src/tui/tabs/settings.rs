@@ -15,7 +15,7 @@ use ratatui::Frame;
 use crate::config::{KnobValue, KnobValueOpt};
 use crate::launch::flag_aliases::{knob_display_groups, KnobField};
 use crate::theme::Palette;
-use crate::tui::app::App;
+use crate::tui::app::{App, ManagedRow};
 use crate::tui::keybindings::{Action, Focus};
 use crate::tui::launch_picker::{LaunchPickerState, PickerField, INHERITED_LABEL};
 
@@ -118,7 +118,26 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   // window read from `/props`; no chip, since a live value has no
   // inheritance layer to name.
   let resolved_ctx = managed.map(|m| m.resolved_ctx.or(m.knobs.ctx.set_value().copied()));
+  // A running ds4 model ignores the llama.cpp typed knobs — render its own
+  // native rows (ctx + the six ds4 tunables) from the recorded params instead
+  // of the empty llama.cpp groups. Editable launches keep the picker path.
+  let ds4_readonly = managed.is_some_and(|m| app.ds4_badge_paths.contains(&m.path));
+  if ds4_readonly {
+    let m = managed.expect("ds4_readonly implies a managed row");
+    push_ds4_readonly_rows(
+      &mut lines,
+      m,
+      resolved_ctx.flatten(),
+      app,
+      palette,
+      show_source,
+    );
+  }
   for group in knob_display_groups() {
+    // The ds4 read-only view rendered its rows above; skip the llama.cpp groups.
+    if ds4_readonly {
+      break;
+    }
     // Skip the whole group — header included — when it has no visible row
     // (the Multi-GPU placement group on single-GPU / CPU-only hosts).
     let group_visible = match picker_view {
@@ -200,9 +219,54 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     }
   }
 
-  // Extras row.
+  // Per-backend native-knob rows, then the extras row — extras always last.
   match picker_view {
     Some(pv) => {
+      // Native knobs render under their own group header (matching the
+      // llama.cpp knob groups above), above extras. Empty for every shipping
+      // backend, so this renders nothing today; ds4 surfaces six rows here.
+      let any_native =
+        (0..pv.native_descriptors.len()).any(|i| pv.field_visible(PickerField::NativeKnob(i)));
+      if any_native {
+        lines.push(group_header(
+          &format!("{} native", pv.active_backend_id()),
+          palette,
+        ));
+      }
+      for (i, descriptor) in pv.native_descriptors.iter().enumerate() {
+        let field = PickerField::NativeKnob(i);
+        if !pv.field_visible(field) {
+          continue;
+        }
+        let focused = pv.field == field;
+        if focused {
+          focused_line = Some(lines.len() as u16);
+        }
+        if pv.inline_edit.is_open() && pv.inline_edit.field == Some(field) {
+          lines.push(inline_edit_row(
+            descriptor.label,
+            pv.inline_edit.input.buffer(),
+            focused,
+            palette,
+          ));
+          if let Some(err) = &pv.inline_edit.error {
+            lines.push(inline_warning_row(err, palette));
+          }
+        } else {
+          lines.push(crate::tui::fmt::kv_row_focused(
+            descriptor.label,
+            pv.native_value_label(i),
+            None,
+            focused,
+            // Cycle / bool rows take ←/→; free-text rows are `e`-edited.
+            !descriptor.is_editable(),
+            palette,
+            show_source,
+          ));
+        }
+      }
+
+      // Extras row — always the last field.
       let extras_focused = pv.field == PickerField::Extras;
       if extras_focused {
         focused_line = Some(lines.len() as u16);
@@ -241,42 +305,6 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
           &format!("forbidden: {redacted}"),
           palette,
         ));
-      }
-
-      // Per-backend native knob rows — trail the form, below extras. Empty for
-      // every shipping backend (none declare native knobs), so this loop
-      // renders nothing today; a future backend surfaces its rows here.
-      for (i, descriptor) in pv.native_descriptors.iter().enumerate() {
-        let field = PickerField::NativeKnob(i);
-        if !pv.field_visible(field) {
-          continue;
-        }
-        let focused = pv.field == field;
-        if focused {
-          focused_line = Some(lines.len() as u16);
-        }
-        if pv.inline_edit.is_open() && pv.inline_edit.field == Some(field) {
-          lines.push(inline_edit_row(
-            descriptor.label,
-            pv.inline_edit.input.buffer(),
-            focused,
-            palette,
-          ));
-          if let Some(err) = &pv.inline_edit.error {
-            lines.push(inline_warning_row(err, palette));
-          }
-        } else {
-          lines.push(crate::tui::fmt::kv_row_focused(
-            descriptor.label,
-            pv.native_value_label(i),
-            None,
-            focused,
-            // Cycle / bool rows take ←/→; free-text rows are `e`-edited.
-            !descriptor.is_editable(),
-            palette,
-            show_source,
-          ));
-        }
       }
     }
     None => {
@@ -354,6 +382,57 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   };
 
   frame.render_widget(Paragraph::new(clipped).scroll((scroll, 0)), area);
+}
+
+/// Read-only ds4 running rows: the resolved ctx, then the six ds4 native
+/// knobs read from the recorded `last_params` (value or `inherited`). ds4
+/// ignores the llama.cpp typed knobs, so the running view shows these — the
+/// same set the launch picker offers — instead of a wall of `inherited`.
+fn push_ds4_readonly_rows(
+  lines: &mut Vec<Line<'static>>,
+  m: &ManagedRow,
+  resolved_ctx: Option<u32>,
+  app: &App,
+  palette: &Palette,
+  show_source: bool,
+) {
+  lines.push(group_header("Context", palette));
+  let ctx_value = resolved_ctx
+    .map(|v| {
+      if m.ctx_clamped {
+        format!("{v} · clamped to floor")
+      } else {
+        v.to_string()
+      }
+    })
+    .unwrap_or_else(|| format_persisted_knob_value(&m.knobs, KnobField::Ctx));
+  lines.push(crate::tui::fmt::kv_row_focused(
+    "ctx",
+    ctx_value,
+    None,
+    false,
+    false,
+    palette,
+    show_source,
+  ));
+  lines.push(group_header("ds4 native", palette));
+  let backend_knobs = app.last_params.get(&m.path).map(|p| &p.backend_knobs);
+  for d in crate::backend::ds4::DS4_NATIVE_KNOBS {
+    let value = backend_knobs
+      .and_then(|bk| bk.get(d.id))
+      .and_then(KnobValue::as_set)
+      .cloned()
+      .unwrap_or_else(|| INHERITED_LABEL.to_string());
+    lines.push(crate::tui::fmt::kv_row_focused(
+      d.label,
+      value,
+      None,
+      false,
+      false,
+      palette,
+      show_source,
+    ));
+  }
 }
 
 /// Minimal scroll with margin: keep the focused row visible with
@@ -621,6 +700,96 @@ mod tests {
     }
     assert!(joined.contains("16384"), "{joined}");
     assert!(joined.contains("on"), "{joined}");
+  }
+
+  #[test]
+  fn ds4_picker_groups_native_knobs_under_header_with_extras_last() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    let mut app = App::new(AppOptions::default());
+    let mut picker = LaunchPickerState::for_model("DeepSeek-V4-Flash");
+    picker.model_backend = crate::launch::params::BackendChoice::Ds4;
+    picker.native_descriptors = crate::backend::ds4::DS4_NATIVE_KNOBS;
+    app.launch_picker = Some(picker);
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(60, 40)).unwrap();
+    term
+      .draw(|f| render(f, Rect::new(0, 0, 60, 40), &app, palette))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+    let rows: Vec<String> = (0..buf.area.height)
+      .map(|y| {
+        (0..buf.area.width)
+          .map(|x| buf.cell((x, y)).unwrap().symbol())
+          .collect()
+      })
+      .collect();
+    let row_of = |needle: &str| rows.iter().position(|r| r.contains(needle));
+    // The native knobs carry their own separator group header, like the
+    // llama.cpp groups, and the free-text extras row is last of all.
+    let header = row_of("ds4 native").expect("ds4 native group header");
+    let ssd = row_of("SSD streaming").expect("a ds4 native knob row");
+    let extras = row_of("extras").expect("extras row");
+    assert!(header < ssd, "group header precedes its knobs");
+    assert!(ssd < extras, "extras comes after the ds4 native knobs");
+  }
+
+  #[test]
+  fn ds4_running_view_shows_native_knobs_not_llamacpp() {
+    use crate::tui::app::{LastParamsRow, ManagedRow};
+    use ratatui::text::Line;
+    let mut app = App::new(AppOptions::default());
+    let path = PathBuf::from("/m/DeepSeek-V4-Flash.gguf");
+    // The daemon's honest signal: this path routes to ds4.
+    app.ds4_badge_paths.insert(path.clone());
+    let mut backend_knobs = std::collections::BTreeMap::new();
+    backend_knobs.insert("ssd_streaming".into(), KnobValue::Set("true".into()));
+    backend_knobs.insert("power".into(), KnobValue::Set("80".into()));
+    app.last_params.insert(
+      path.clone(),
+      LastParamsRow {
+        ctx: None,
+        reasoning: false,
+        knobs: Default::default(),
+        backend_knobs,
+        extras: vec![],
+        port: Some(41100),
+      },
+    );
+    let m = ManagedRow {
+      launch_id: "L1".into(),
+      path,
+      port: 41100,
+      ..Default::default()
+    };
+    let palette = app.palette();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    push_ds4_readonly_rows(&mut lines, &m, Some(32768), &app, palette, true);
+    let text: String = lines
+      .iter()
+      .flat_map(|l| l.spans.iter())
+      .map(|s| s.content.as_ref())
+      .collect::<Vec<_>>()
+      .join(" ");
+    // The six ds4 native knobs render with their recorded values…
+    assert!(text.contains("ds4 native"), "{text}");
+    assert!(
+      text.contains("SSD streaming") && text.contains("true"),
+      "{text}"
+    );
+    assert!(
+      text.contains("GPU power %") && text.contains("80"),
+      "{text}"
+    );
+    assert!(
+      text.contains("CPU threads") && text.contains("inherited"),
+      "{text}"
+    );
+    // …the resolved ctx shows, but no llama.cpp typed knob leaks into it.
+    assert!(text.contains("32768"), "{text}");
+    assert!(!text.contains("n_gpu_layers"), "{text}");
+    assert!(!text.contains("flash_attn"), "{text}");
   }
 
   #[test]

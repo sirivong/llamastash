@@ -1442,6 +1442,14 @@ impl App {
       .unwrap_or(0);
     let mut state = LaunchPickerState::for_model(name);
     if let Some(p) = &path {
+      // Gate the ctx quick-picks to the focused model's trained window.
+      state.native_ctx = self
+        .models
+        .iter()
+        .find(|m| &m.path == p)
+        .and_then(|m| m.metadata.as_ref())
+        .and_then(|md| md.native_ctx)
+        .and_then(|c| u32::try_from(c).ok());
       if let Some(last) = self.last_params.get(p) {
         state.prefer_port = last.port;
         // returning user inherits the typed-knob deltas they

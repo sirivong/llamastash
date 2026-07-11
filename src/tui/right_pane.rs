@@ -86,6 +86,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette, f
 
   render_header_name(frame, layout[1], app, palette);
   render_header_path(frame, layout[2], app, palette);
+  render_header_badge(frame, layout[3], app, palette);
   render_header_stats(frame, layout[4], app, palette);
   render_separator(frame, layout[5], palette);
   let body_area = layout[6];
@@ -551,6 +552,27 @@ fn render_header_path(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
   frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Render the backend badge row that sits directly under the path, in the
+/// header's gap slot. A filled `ds4` chip when the focused model routes to
+/// ds4 (the daemon's honest `ds4_badge_paths` signal) — visible on the
+/// focused row whether selected or running; blank (the plain gap) otherwise.
+fn render_header_badge(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
+  let Some(path) = focused_path(app) else {
+    return;
+  };
+  if !app.ds4_badge_paths.contains(&path) {
+    return;
+  }
+  let badge = Span::styled(
+    " ds4 ",
+    Style::default()
+      .fg(palette.on_accent)
+      .bg(palette.accent)
+      .add_modifier(Modifier::BOLD),
+  );
+  frame.render_widget(Paragraph::new(Line::from(badge)), area);
+}
+
 /// Resolve the path the right pane is currently focused on — running
 /// launch first, falling back to the list-pane selection.
 fn focused_path(app: &App) -> Option<std::path::PathBuf> {
@@ -768,6 +790,42 @@ mod tests {
     let stats = format_per_model_stats(&m);
     assert!(stats.contains("— RAM"));
     assert!(stats.contains("— CPU"));
+  }
+
+  #[test]
+  fn ds4_badge_renders_in_header_gap_for_ds4_model() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    // The badge sits in the header gap row (under the path) via
+    // `render_header_badge`, so it stays visible regardless of name/path
+    // length. The model name itself never contains "ds4".
+    let render_badge = |app: &App| -> String {
+      let palette = app.palette();
+      let mut term = Terminal::new(TestBackend::new(60, 1)).unwrap();
+      term
+        .draw(|f| render_header_badge(f, Rect::new(0, 0, 60, 1), app, palette))
+        .unwrap();
+      let buf = term.backend().buffer().clone();
+      let mut joined = String::new();
+      for x in 0..buf.area.width {
+        joined.push_str(buf.cell((x, 0)).unwrap().symbol());
+      }
+      joined
+    };
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.managed = vec![ready_managed("qwen", None, None)];
+    app.list_cursor = 2;
+    // ds4-routed → the badge chip renders.
+    app.ds4_badge_paths.insert(PathBuf::from("/m/qwen.gguf"));
+    assert!(render_badge(&app).contains("ds4"), "badge missing");
+    // Not ds4-routed → the gap stays blank.
+    app.ds4_badge_paths.clear();
+    assert!(
+      !render_badge(&app).contains("ds4"),
+      "badge should be absent"
+    );
   }
 
   fn app_with_focus(focus: crate::tui::keybindings::Focus, tab: RightTab) -> App {

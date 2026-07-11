@@ -674,6 +674,44 @@ pub(crate) async fn compose_and_spawn(
     }
   }
 
+  // ds4 auto-streaming (D-admission): ds4 holds the full model plus a
+  // cached-expert/KV working set the deepseek4 demand model can't see (~1.25×
+  // weights in practice). When that won't fit, a non-streaming launch OOM-kills
+  // mid-load — ds4-server marks itself the first OOM victim (oom_score_adj=1000).
+  // So on a host where residency won't fit, auto-enable `ssd_streaming` before
+  // `prepare_launch` composes argv, letting the launch succeed from a bounded
+  // disk cache. Skipped when the user set the knob either way (explicit wins).
+  let mut ssd_streaming_auto = false;
+  if inference_backend.id() == crate::backend::ds4::DS4_BACKEND_ID
+    && !matches!(
+      launch_params.backend_knobs.get("ssd_streaming"),
+      Some(crate::config::KnobValue::Set(_))
+    )
+  {
+    if let Some(host_slot) = ctx.host_metrics.as_ref() {
+      let snapshot = host_slot.read().await.clone();
+      if crate::launch::admission::is_sampled(&snapshot) {
+        let free = crate::launch::admission::effective_free_bytes(&snapshot);
+        if ds4_should_auto_stream(total_weight_bytes, free) {
+          launch_params.backend_knobs.insert(
+            "ssd_streaming".to_string(),
+            crate::config::KnobValue::Set("true".to_string()),
+          );
+          ssd_streaming_auto = true;
+          let gib = crate::init::detection::fmt_gib;
+          let msg = format!(
+            "ds4 needs ~{} resident but only {} is free — enabled SSD streaming to launch \
+             from disk (slower). Set `ssd_streaming: false` to force full residency.",
+            gib(ds4_resident_estimate(total_weight_bytes)),
+            gib(free)
+          );
+          log::warn!("{msg}");
+          warnings.push(msg);
+        }
+      }
+    }
+  }
+
   // Per-backend binary pick for the spawn. A managed-multiplexer backend
   // (Lemonade) supervises its own umbrella executable on its own loopback
   // port; ds4 spawns `ds4-server` (not `llama-server`) on the reserved pool
@@ -793,13 +831,16 @@ pub(crate) async fn compose_and_spawn(
             if ssd_streaming {
               // Bypass the OOM refusal: streaming weights don't need full
               // residency. Not admitted (no ledger reservation held); spawn
-              // proceeds under the user's explicit acceptance of the risk.
-              let msg = format!(
-                "ssd_streaming is set — skipped the memory admission gate ({})",
-                format_admission_refusal(&refusal)
-              );
-              log::warn!("{msg}");
-              warnings.push(msg);
+              // proceeds. Skip the note when streaming was auto-enabled just
+              // above — that path already explained why, in memory terms.
+              if !ssd_streaming_auto {
+                let msg = format!(
+                  "ssd_streaming is set — skipped the memory admission gate ({})",
+                  format_admission_refusal(&refusal)
+                );
+                log::warn!("{msg}");
+                warnings.push(msg);
+              }
             } else {
               ctx.supervisors.release_reserved_port(port).await;
               return Err(ErrorObject::with_data(
@@ -1156,6 +1197,22 @@ async fn lemonade_load_options(
   }
 }
 
+/// ds4's resident working set estimate: ~1.25× raw weights, covering the
+/// cached-expert pool + KV + runtime the deepseek4 demand model can't see.
+/// Its own auto budget targets ~99 GiB for an 80 GiB Flash quant, which this
+/// tracks. Saturating so a pathological weight total can't overflow.
+fn ds4_resident_estimate(weights_total: u64) -> u64 {
+  weights_total.saturating_add(weights_total / 4)
+}
+
+/// Whether a ds4 launch should auto-enable SSD streaming: its resident
+/// estimate exceeds the effective free memory, so a full-residency spawn
+/// would OOM-kill mid-load (ds4-server marks itself the first OOM victim).
+/// Pure so the memory decision is unit-testable without a live host sampler.
+fn ds4_should_auto_stream(weights_total: u64, free: u64) -> bool {
+  ds4_resident_estimate(weights_total) > free
+}
+
 /// Human-readable admission refusal: the effective free (post-headroom),
 /// what other launches hold, this launch's projected demand, and the
 /// remediation menu — so the number is self-explaining and actionable.
@@ -1381,6 +1438,21 @@ mod tests {
   use crate::daemon::context::LaunchEnv;
   use crate::daemon::probe::ProbeOptions;
   use crate::daemon::registry::SupervisorRegistry;
+
+  #[test]
+  fn ds4_auto_stream_triggers_only_when_residency_exceeds_free() {
+    let gib = |g: u64| g * 1024 * 1024 * 1024;
+    // 80 GiB Flash weights → ~100 GiB resident estimate.
+    assert_eq!(ds4_resident_estimate(gib(80)), gib(100));
+    // Won't fit: 100 GiB resident > 95 GiB free → stream (the Strix Halo case).
+    assert!(ds4_should_auto_stream(gib(80), gib(95)));
+    // Fits with headroom: 100 GiB resident < 200 GiB free → full residency.
+    assert!(!ds4_should_auto_stream(gib(80), gib(200)));
+    // Exact boundary is not a shortfall (estimate == free → no stream).
+    assert!(!ds4_should_auto_stream(gib(80), gib(100)));
+    // A pathological weight total saturates instead of overflowing.
+    assert!(ds4_should_auto_stream(u64::MAX, gib(100)));
+  }
 
   #[test]
   fn extras_manage_mmproj_detects_explicit_projector_flags() {
