@@ -125,6 +125,11 @@ impl ManagedRow {
   pub fn is_ds4(&self) -> bool {
     self.backend.as_deref() == Some(crate::backend::ds4::DS4_BACKEND_ID)
   }
+
+  /// Whether this running launch actually dispatched to the Lemonade umbrella.
+  pub fn is_lemonade(&self) -> bool {
+    self.backend.as_deref() == Some(crate::backend::lemonade::LEMONADE_BACKEND_ID)
+  }
 }
 
 /// Persisted "last successful launch params" for one model, fetched

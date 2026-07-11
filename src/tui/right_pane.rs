@@ -629,6 +629,23 @@ fn focused_backend_badge(app: &App, palette: &Palette) -> Option<BackendBadge> {
       trailing,
     });
   }
+  // Lemonade: a running row keys on the launch's real backend; a selected row
+  // on the model's Lemonade-registry source (a Lemonade model always runs on
+  // the umbrella, a GGUF never does). No alias remapping → chip only.
+  let is_lemonade = match running {
+    Some(m) => m.is_lemonade(),
+    None => app
+      .models
+      .iter()
+      .find(|m| m.path == path)
+      .is_some_and(|m| m.source.backend_id() == crate::backend::lemonade::LEMONADE_BACKEND_ID),
+  };
+  if is_lemonade {
+    return Some(BackendBadge {
+      chip: " lemonade ",
+      trailing: Vec::new(),
+    });
+  }
   None
 }
 
@@ -895,6 +912,39 @@ mod tests {
       !llama_row.contains("ds4") && !llama_row.contains("serves as"),
       "running llama.cpp row must not badge ds4 or disclose an alias"
     );
+  }
+
+  #[test]
+  fn lemonade_badge_renders_chip_without_alias_disclosure() {
+    // Running row keys on the launch's real backend (mirrors the ds4 setup).
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.managed = vec![ready_managed("npu-model", None, None)];
+    app.list_cursor = 2;
+    app.managed[0].backend = Some("lemonade".into());
+    let palette = app.palette();
+    let badge = focused_backend_badge(&app, palette).expect("running lemonade → badge");
+    assert_eq!(badge.chip.trim(), "lemonade");
+    assert!(
+      badge.trailing.is_empty(),
+      "lemonade has no alias remap, so no disclosure"
+    );
+
+    // A selected (not-running) Lemonade-registry model badges from its source.
+    let mut sel_app = App::new(AppOptions::default());
+    let mut m = fake_model();
+    m.source = crate::discovery::ModelSource::Lemonade;
+    let model_path = m.path.clone();
+    sel_app.models = vec![m];
+    // Land the cursor on the model row (past any section headers).
+    sel_app.list_cursor = sel_app
+      .rendered_rows()
+      .iter()
+      .position(|r| r.path() == Some(model_path.as_path()))
+      .expect("model row present");
+    let sel_palette = sel_app.palette();
+    let sel_badge = focused_backend_badge(&sel_app, sel_palette).expect("lemonade source → badge");
+    assert_eq!(sel_badge.chip.trim(), "lemonade");
   }
 
   #[test]
