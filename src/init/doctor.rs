@@ -735,10 +735,17 @@ async fn ds4_advisory(config: &Config) -> Option<Finding> {
         .to_string(),
     ));
   }
+  // Discovery resolves model paths from CLI + env + config; doctor is
+  // config-only, so fold in `LLAMASTASH_MODEL_PATHS` / `LLAMASTASH_NO_SCAN`
+  // here too — otherwise a user who supplies model paths *only* via the env
+  // override gets no `ds4_unavailable` advisory even with a compatible model
+  // present.
+  let mut user_paths = config.model_paths.clone();
+  user_paths.extend(crate::cli::daemon::env_model_paths());
   let roots = default_set(RootResolution {
-    user_paths: &config.model_paths,
+    user_paths: &user_paths,
     disable: &config.disable_default_cache_paths,
-    no_scan: config.disable_scan,
+    no_scan: config.disable_scan || crate::cli::daemon::env_no_scan(),
     home: crate::util::paths::home_dir().as_deref(),
   });
   let mut rx = scan(roots, ScanOptions::default());
@@ -922,6 +929,58 @@ mod tests {
     assert!(
       ds4_advisory(&config).await.is_none(),
       "no advisory when no ds4-compatible model is present"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  /// Doctor is config-only, but discovery also honors `LLAMASTASH_MODEL_PATHS`
+  /// / `LLAMASTASH_NO_SCAN`. A user who supplies model paths *only* via the env
+  /// override must still get the `ds4_unavailable` advisory — regression for
+  /// the advisory silently under-scanning when `config.model_paths` is empty.
+  // Sync (not `#[tokio::test]`) so the env-lock guard is held across a plain
+  // `block_on` rather than an `.await` — else clippy's `await_holding_lock`
+  // fires. The env vars must stay set for the whole scan.
+  #[test]
+  fn ds4_advisory_scans_env_model_paths_when_config_has_none() {
+    use crate::gguf::test_fixtures::FixtureBuilder;
+    // Serialize against other `LLAMASTASH_MODEL_PATHS` / `LLAMASTASH_NO_SCAN`
+    // tests — process-global env vars race across parallel test threads.
+    let _env = crate::cli::test_lock::serialize();
+    let dir = crate::test_support::unique_temp_dir("doctor-ds4", "envpath");
+    let bytes = FixtureBuilder::new()
+      .with_arch("deepseek4")
+      .with_tensor("blk.0.ffn_gate_exps.weight", &[512, 512], 16) // IQ2_XXS
+      .with_tensor("token_embd.weight", &[512, 512], 1) // F16
+      .build();
+    std::fs::write(dir.join("deepseek-v4-flash.gguf"), bytes).unwrap();
+
+    // Paths come ONLY from the env override; the config carries none. NO_SCAN
+    // keeps `default_set` to the env path so the test never touches real caches.
+    let prev_paths = std::env::var_os("LLAMASTASH_MODEL_PATHS");
+    let prev_noscan = std::env::var_os("LLAMASTASH_NO_SCAN");
+    std::env::set_var("LLAMASTASH_MODEL_PATHS", &dir);
+    std::env::set_var("LLAMASTASH_NO_SCAN", "1");
+
+    let finding = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap()
+      .block_on(ds4_advisory(&Config::default()));
+
+    match prev_paths {
+      Some(v) => std::env::set_var("LLAMASTASH_MODEL_PATHS", v),
+      None => std::env::remove_var("LLAMASTASH_MODEL_PATHS"),
+    }
+    match prev_noscan {
+      Some(v) => std::env::set_var("LLAMASTASH_NO_SCAN", v),
+      None => std::env::remove_var("LLAMASTASH_NO_SCAN"),
+    }
+
+    assert_eq!(
+      finding
+        .expect("advisory fires from env-supplied model path")
+        .id,
+      "ds4_unavailable"
     );
     std::fs::remove_dir_all(&dir).ok();
   }

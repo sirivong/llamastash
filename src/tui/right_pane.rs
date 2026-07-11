@@ -561,21 +561,34 @@ fn render_header_badge(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
   let Some(path) = focused_path(app) else {
     return;
   };
-  let is_ds4 = match app.right_pane_focus() {
+  // A *running* row keys the badge on the launch's real backend; a selected
+  // (not-running) row on the `list_models` routing prediction.
+  let running = app.right_pane_focus();
+  let is_ds4 = match running {
     Some(m) => m.is_ds4(),
     None => app.ds4_badge_paths.contains(&path),
   };
   if !is_ds4 {
     return;
   }
-  let badge = Span::styled(
+  let mut spans = vec![Span::styled(
     " ds4 ",
     Style::default()
       .fg(palette.on_accent)
       .bg(palette.accent)
       .add_modifier(Modifier::BOLD),
-  );
-  frame.render_widget(Paragraph::new(Line::from(badge)), area);
+  )];
+  // D-alias disclosure: a running ds4 model echoes a fixed alias in every
+  // response's `model` field (≠ the request name); surface it beside the badge
+  // so the mismatch is explicable. It sits here rather than on the stats line
+  // so the full `deepseek-v4-*` value isn't clipped by the port/state/RAM/CPU
+  // run. A running row passed the `is_ds4` gate above, so its alias is real;
+  // a selected-but-not-running row shows only the prediction badge.
+  if let Some(m) = running {
+    spans.push(Span::styled("  serves as ", palette.label_style()));
+    spans.push(Span::styled(ds4_serves_as(&m.path), palette.text_style()));
+  }
+  frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Resolve the path the right pane is currently focused on — running
@@ -662,7 +675,7 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
       let (rss, cpu) = stats_pair(m);
       let label_style = palette.label_style();
       let value_style = palette.text_style();
-      let mut spans = vec![
+      let spans = vec![
         // `ID:L9` prefix surfaces the launch id alongside the port so
         // it's visible without diving into the Settings tab. The
         // label tone matches `RAM` / `CPU` so the trio reads as one
@@ -693,19 +706,8 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
         Span::styled(cpu, value_style),
         Span::styled(" CPU", label_style),
       ];
-      // D-alias in-product disclosure: a running ds4 model advertises a fixed
-      // alias in every response `model` field (≠ the request name); surface it
-      // so the mismatch is explicable. Keyed on the launch's *actual* backend
-      // so a compatible file launched with `--backend llamacpp` doesn't get a
-      // false disclosure.
-      if m.is_ds4() {
-        spans.push(Span::styled(
-          crate::tui::glyphs::active().middot_sep(),
-          palette.muted_style(),
-        ));
-        spans.push(Span::styled("serves as ", label_style));
-        spans.push(Span::styled(ds4_serves_as(&m.path), value_style));
-      }
+      // The ds4 "serves as <alias>" disclosure now rides the badge row above
+      // (`render_header_badge`), not this stats line — see that function.
       Line::from(spans)
     }
     None => match app.focused_path() {
@@ -828,13 +830,22 @@ mod tests {
     // A *running* focused row keys on the launch's actual backend, not the
     // routing prediction: tag it ds4 → the chip renders.
     app.managed[0].backend = Some("ds4".into());
-    assert!(render_badge(&app).contains("ds4"), "badge missing");
-    // The prediction alone must NOT badge a running row launched on llama.cpp.
+    let row = render_badge(&app);
+    assert!(row.contains("ds4"), "badge missing");
+    // The D-alias "serves as <alias>" disclosure rides this badge row (not the
+    // stats line, where the port/state/RAM/CPU run clips it off).
+    assert!(
+      row.contains("serves as") && row.contains("deepseek-v4-"),
+      "running ds4 row must disclose its served alias on the badge row: {row:?}"
+    );
+    // The prediction alone must NOT badge a running row launched on llama.cpp,
+    // and a llama.cpp row gets no alias disclosure.
     app.managed[0].backend = Some("llamacpp".into());
     app.ds4_badge_paths.insert(PathBuf::from("/m/qwen.gguf"));
+    let llama_row = render_badge(&app);
     assert!(
-      !render_badge(&app).contains("ds4"),
-      "running llama.cpp row must not badge ds4 from the prediction"
+      !llama_row.contains("ds4") && !llama_row.contains("serves as"),
+      "running llama.cpp row must not badge ds4 or disclose an alias"
     );
   }
 

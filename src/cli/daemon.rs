@@ -724,7 +724,7 @@ fn env_flag_truthy(name: &str) -> bool {
 /// an empty vec. Empty entries (`""` between separators) are skipped
 /// rather than producing `PathBuf::new()` — a stray colon shouldn't
 /// register as "scan the empty path".
-fn env_model_paths() -> Vec<PathBuf> {
+pub(crate) fn env_model_paths() -> Vec<PathBuf> {
   std::env::var_os("LLAMASTASH_MODEL_PATHS")
     .map(|raw| {
       std::env::split_paths(&raw)
@@ -739,7 +739,7 @@ fn env_model_paths() -> Vec<PathBuf> {
 /// `LLAMASTASH_NO_SCAN=1` recipe in the README, and accepts
 /// `true`/`yes`/`on` (case-insensitive) for parity with other env
 /// flags in this binary.
-fn env_no_scan() -> bool {
+pub(crate) fn env_no_scan() -> bool {
   env_flag_truthy("LLAMASTASH_NO_SCAN")
 }
 
