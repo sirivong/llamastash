@@ -72,6 +72,10 @@ A single binary plays TUI, CLI, and background daemon. The first client (TUI or 
 
 Run as many models as your hardware can hold. Each launch gets its own port, auto-allocated from a configurable inclusive range (default `41100..=41300`, override via [`port_range`](docs/usage.md#schema)). Every running model follows a `Launching → Loading → Ready → Stopping → Stopped` state machine with `/health` probing — you see when a model is actually serving versus still loading weights.
 
+### DeepSeek-V4 via the ds4 backend (experimental)
+
+For antirez's DeepSeek-V4 Flash/PRO GGUFs, llamastash runs [`ds4-server`](https://github.com/antirez/ds4) (the purpose-built engine) instead of llama.cpp. It's **default-on when the `ds4-server` binary resolves** (`ds4.binary` or `PATH`); force it with `[ds4]` config, `--ds4`, or `LLAMASTASH_DS4=1`. A compatible GGUF auto-routes to ds4 for chat/completions and **falls back to llama.cpp otherwise — never a refusal** (llama.cpp runs `deepseek4` too). `--backend ds4` / `--backend llamacpp` override either way; embedding/rerank always route to llama.cpp. Six ds4-native launch knobs (`power`, `tokens`, `threads`, `kv_disk_dir`, `kv_disk_space_mb`, `ssd_streaming`) surface in the TUI and as `start` flags, and when a model won't fit RAM the launcher auto-enables SSD streaming so it loads from disk instead of OOM-killing mid-load. The TUI badges ds4-routed rows and `doctor` flags a compatible-but-unavailable model. See [`docs/usage.md` § ds4 backend](docs/usage.md#ds4-backend).
+
 ### GPU-aware built-in arch defaults
 
 A static `(architecture, gpu_backend) → flags` table ships in the binary covering `llama*`, `qwen2*`, `qwen3*`, `mistral`, `mixtral`, `gemma*`, `phi*`, `deepseek*`, `granite`, `falcon`, `stablelm`, `command-r`, plus a `*` fallback. A fresh install gets sensible `n_gpu_layers` / `flash_attn` on every supported GPU backend with zero YAML to touch.

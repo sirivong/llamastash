@@ -409,7 +409,12 @@ lemonade:
   # Sources — CLI: (none) · Env: (none). Config-only.
   port: 13305
 
-# ─── ds4 (DwarfStar) — DeepSeek V4 backend ────────────────────────
+# ─── ds4 (DwarfStar) — DeepSeek V4 backend [EXPERIMENTAL] ─────────
+#
+# EXPERIMENTAL: new and lightly road-tested; keys and defaults below may
+# change between releases. llama.cpp stays the stable default and runs
+# DeepSeek-V4 too, so ds4 is never required (set `enabled: false` or use
+# `--backend llamacpp` to opt out).
 #
 # A third backend that runs antirez's `ds4-server` for the DeepSeek-V4
 # Flash/PRO GGUFs. A ds4-compatible GGUF auto-routes to ds4 when the

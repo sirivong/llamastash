@@ -553,14 +553,19 @@ fn render_header_path(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
 }
 
 /// Render the backend badge row that sits directly under the path, in the
-/// header's gap slot. A filled `ds4` chip when the focused model routes to
-/// ds4 (the daemon's honest `ds4_badge_paths` signal) — visible on the
-/// focused row whether selected or running; blank (the plain gap) otherwise.
+/// header's gap slot. A filled `ds4` chip when the focused model is ds4 — for
+/// a *running* row that means the launch actually resolved to ds4 (its honest
+/// `status` `backend`), for a *selected* (not-running) row the `list_models`
+/// routing prediction. Blank (the plain gap) otherwise.
 fn render_header_badge(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   let Some(path) = focused_path(app) else {
     return;
   };
-  if !app.ds4_badge_paths.contains(&path) {
+  let is_ds4 = match app.right_pane_focus() {
+    Some(m) => m.is_ds4(),
+    None => app.ds4_badge_paths.contains(&path),
+  };
+  if !is_ds4 {
     return;
   }
   let badge = Span::styled(
@@ -632,15 +637,16 @@ fn wrap_path_chunks(s: &str, width: usize, max_lines: usize) -> Vec<String> {
 }
 
 /// The ds4 `/v1/models` alias a running model advertises, derived from its
-/// filename (`…Pro…` → `deepseek-v4-pro`, else `deepseek-v4-flash`). Matches
-/// ds4-server's fixed alias so the in-product disclosure is accurate.
+/// filename (a `pro` token → `deepseek-v4-pro`, else `deepseek-v4-flash`).
+/// A best-effort mirror of ds4-server's fixed alias for the in-product
+/// disclosure; a non-standard filename may read as flash.
 fn ds4_serves_as(path: &std::path::Path) -> &'static str {
   let name = path
     .file_name()
     .and_then(|n| n.to_str())
     .unwrap_or_default()
     .to_ascii_lowercase();
-  if name.contains("-pro") || name.contains("v4-pro") {
+  if name.contains("pro") {
     "deepseek-v4-pro"
   } else {
     "deepseek-v4-flash"
@@ -689,8 +695,10 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
       ];
       // D-alias in-product disclosure: a running ds4 model advertises a fixed
       // alias in every response `model` field (≠ the request name); surface it
-      // so the mismatch is explicable. Only on ds4-backed running rows.
-      if app.ds4_badge_paths.contains(&m.path) {
+      // so the mismatch is explicable. Keyed on the launch's *actual* backend
+      // so a compatible file launched with `--backend llamacpp` doesn't get a
+      // false disclosure.
+      if m.is_ds4() {
         spans.push(Span::styled(
           crate::tui::glyphs::active().middot_sep(),
           palette.muted_style(),
@@ -817,14 +825,16 @@ mod tests {
     app.models = vec![fake_model()];
     app.managed = vec![ready_managed("qwen", None, None)];
     app.list_cursor = 2;
-    // ds4-routed → the badge chip renders.
-    app.ds4_badge_paths.insert(PathBuf::from("/m/qwen.gguf"));
+    // A *running* focused row keys on the launch's actual backend, not the
+    // routing prediction: tag it ds4 → the chip renders.
+    app.managed[0].backend = Some("ds4".into());
     assert!(render_badge(&app).contains("ds4"), "badge missing");
-    // Not ds4-routed → the gap stays blank.
-    app.ds4_badge_paths.clear();
+    // The prediction alone must NOT badge a running row launched on llama.cpp.
+    app.managed[0].backend = Some("llamacpp".into());
+    app.ds4_badge_paths.insert(PathBuf::from("/m/qwen.gguf"));
     assert!(
       !render_badge(&app).contains("ds4"),
-      "badge should be absent"
+      "running llama.cpp row must not badge ds4 from the prediction"
     );
   }
 
@@ -951,6 +961,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }
   }
 
@@ -1335,6 +1346,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     // Row 0 is the table header, row 1 is the directory group
@@ -1360,6 +1372,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     // Row 0 is the table header, row 1 is the directory group
     // header, row 2 is the model.
@@ -1384,6 +1397,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     app.list_cursor = 2;
     let palette = app.palette();
@@ -1421,6 +1435,7 @@ mod tests {
         vision: true,
         audio: false,
       }),
+      ds4_compatible: false,
     }];
     app.list_cursor = 2;
     let palette = app.palette();
@@ -1498,6 +1513,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     app.list_cursor = 2;
@@ -1572,6 +1588,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     app.managed = vec![ready_managed("qwen", None, None)];
     app.list_cursor = 2;

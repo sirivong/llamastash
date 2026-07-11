@@ -791,9 +791,6 @@ pub(crate) async fn compose_and_spawn(
     launch_params.backend_knobs.get("ssd_streaming"),
     Some(crate::config::KnobValue::Set(v)) if v == "true"
   );
-  // deepseek4 KV geometry is unknown to the demand model on either backend, so
-  // the admission estimate omits the KV term — surface that once per launch.
-  let is_deepseek4 = arch.as_deref() == Some("deepseek4");
   let mut admitted = false;
   if identity.as_gguf().is_some() {
     if let Some(host_slot) = ctx.host_metrics.as_ref() {
@@ -855,16 +852,6 @@ pub(crate) async fn compose_and_spawn(
         }
       }
     }
-  }
-  // KV-blind admission note (D-admission): the demand model omits the KV term
-  // for deepseek4, so surface it on every launch of that arch that proceeds.
-  if is_deepseek4 {
-    let msg =
-      "KV cache demand is not modeled for the deepseek4 architecture — the admission estimate \
-       omits it; watch memory headroom on launch."
-        .to_string();
-    log::warn!("{msg}");
-    warnings.push(msg);
   }
 
   // Strict-fit ctx-clamp gate: only meaningful when ctx is
@@ -933,6 +920,7 @@ pub(crate) async fn compose_and_spawn(
         started_at,
         params: launch_params.clone(),
         actuals: Default::default(),
+        resolved_backend: resolved_backend_id.clone(),
       });
     })
     .await;
@@ -956,6 +944,8 @@ pub(crate) async fn compose_and_spawn(
   persist_params.knobs = user_knobs;
   persist_params.ctx = None;
   persist_params.reasoning = false;
+  persist_params.backend_knobs =
+    backend_knobs_for_persist(&launch_params.backend_knobs, ssd_streaming_auto);
   // `jinja` is config-derived (set from `Config.jinja` after resolution)
   // and re-read from config on every launch — `resolve_layered` never
   // consults the persisted value. So the clone's resolved value is kept
@@ -1138,6 +1128,7 @@ async fn start_delegated_lemonade(
         started_at,
         params: params.clone(),
         actuals: Default::default(),
+        resolved_backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
       });
     })
     .await;
@@ -1211,6 +1202,24 @@ fn ds4_resident_estimate(weights_total: u64) -> u64 {
 /// Pure so the memory decision is unit-testable without a live host sampler.
 fn ds4_should_auto_stream(weights_total: u64, free: u64) -> bool {
   ds4_resident_estimate(weights_total) > free
+}
+
+/// The `backend_knobs` to persist into `last_params`: the resolved set, minus
+/// the *auto-enabled* `ssd_streaming`. That knob is a one-time response to the
+/// launch's current memory pressure, not a user opt-in — freezing it into
+/// `last_params` would make the next no-selection relaunch inherit it as
+/// explicit (skipping the pressure re-evaluation *and* the OOM admission gate)
+/// even after RAM frees up. A user-set / inherited `ssd_streaming` (i.e. auto
+/// did not fire) is preserved. Pure so the invariant is unit-testable.
+fn backend_knobs_for_persist(
+  resolved: &std::collections::BTreeMap<String, KnobValue<String>>,
+  ssd_streaming_auto: bool,
+) -> std::collections::BTreeMap<String, KnobValue<String>> {
+  let mut out = resolved.clone();
+  if ssd_streaming_auto {
+    out.remove("ssd_streaming");
+  }
+  out
 }
 
 /// Human-readable admission refusal: the effective free (post-headroom),
@@ -1452,6 +1461,35 @@ mod tests {
     assert!(!ds4_should_auto_stream(gib(80), gib(100)));
     // A pathological weight total saturates instead of overflowing.
     assert!(ds4_should_auto_stream(u64::MAX, gib(100)));
+  }
+
+  #[test]
+  fn auto_ssd_streaming_is_not_persisted_but_explicit_and_others_are() {
+    use crate::config::KnobValue;
+    let mut resolved = std::collections::BTreeMap::new();
+    resolved.insert("power".to_string(), KnobValue::Set("80".to_string()));
+    resolved.insert(
+      "ssd_streaming".to_string(),
+      KnobValue::Set("true".to_string()),
+    );
+
+    // Auto-enabled → the `ssd_streaming` key is stripped from what we persist,
+    // so a later relaunch re-evaluates memory pressure and the OOM gate isn't
+    // silently disabled; unrelated native knobs survive.
+    let auto = backend_knobs_for_persist(&resolved, true);
+    assert!(
+      !auto.contains_key("ssd_streaming"),
+      "auto-enabled ssd_streaming must not be frozen into last_params"
+    );
+    assert_eq!(auto.get("power"), Some(&KnobValue::Set("80".to_string())));
+
+    // User-set / inherited (auto did not fire) → preserved verbatim.
+    let explicit = backend_knobs_for_persist(&resolved, false);
+    assert_eq!(
+      explicit.get("ssd_streaming"),
+      Some(&KnobValue::Set("true".to_string())),
+      "a user-set ssd_streaming must persist"
+    );
   }
 
   #[test]

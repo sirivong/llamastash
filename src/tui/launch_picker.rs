@@ -50,7 +50,7 @@ pub enum PickerField {
   /// [`NativeKnobDescriptor`] slice (see [`crate::launch::native_knobs`]).
   /// Index-keyed (not the id string) so `PickerField` stays `Copy`; the
   /// descriptor is resolved through [`LaunchPickerState::native_descriptors`].
-  /// Empty for every shipping backend, so these rows never appear today.
+  /// Six rows for ds4; none for llama.cpp / Lemonade.
   NativeKnob(usize),
   Extras,
 }
@@ -80,7 +80,7 @@ pub struct PresetChoice {
   pub extras: Vec<std::ffi::OsString>,
   /// Per-backend native-knob values the preset pins (see
   /// [`crate::launch::native_knobs`]). Seeds the picker's `backend_knobs`
-  /// when this preset is selected. Empty for every shipping backend.
+  /// when this preset is selected. Populated for ds4; empty for llama.cpp.
   pub backend_knobs: BTreeMap<String, KnobValue<String>>,
 }
 
@@ -225,8 +225,8 @@ pub struct LaunchPickerState {
   pub extras: Vec<std::ffi::OsString>,
   /// The active backend's native-knob descriptors (see
   /// [`crate::launch::native_knobs`]). Seeded from `backend.native_knobs()`
-  /// when the picker is built — empty for every shipping backend, so the
-  /// native rows never render today. Tests inject a stub slice directly.
+  /// when the picker is built — six for ds4, empty for llama.cpp / Lemonade.
+  /// Tests inject a stub slice directly.
   pub native_descriptors: &'static [NativeKnobDescriptor],
   /// User-set native-knob values, keyed by descriptor id. Parallel to
   /// `user_knobs`; seeds from last-used / preset and returns into
@@ -584,10 +584,23 @@ impl LaunchPickerState {
     }
   }
 
+  /// The `backend` override to send on the wire. `model_backend` is a *scoping*
+  /// value the picker derives from the row's badge, not a user-chosen override
+  /// (the picker exposes no backend cycle). A `Ds4` scope is downgraded to
+  /// `Auto` so the daemon re-derives the route — it still lands on ds4 for a
+  /// compatible file, but the split-PRO half-file guard (Auto-only, since the
+  /// plan lets a *deliberate* `--backend ds4` pass) fires instead of a doomed
+  /// 100 GB+ load. `LlamaCpp`/`Lemonade` scopes pass through unchanged.
+  pub fn launch_backend(&self) -> BackendChoice {
+    match self.model_backend {
+      BackendChoice::Ds4 => BackendChoice::Auto,
+      other => other,
+    }
+  }
+
   /// Resolve [`Self::native_descriptors`] from the model's backend. Called
-  /// once the backend is known. Empty for every shipping backend, so no
-  /// native rows render today — a backend opts in by overriding
-  /// `native_knobs()`.
+  /// once the backend is known. ds4 declares six; llama.cpp / Lemonade none —
+  /// a backend opts in by overriding `native_knobs()`.
   pub fn seed_native_descriptors(&mut self) {
     use crate::backend::Backend;
     self.native_descriptors = self.resolved_backend().native_knobs();
@@ -837,7 +850,7 @@ impl LaunchPickerState {
       PickerField::Preset => true,
       PickerField::Knob(k) => self.knob_supported(k) && knob_row_visible(k, self.multi_device()),
       // A native row exists iff its index is within the backend's slice
-      // (empty for every shipping backend → never shown).
+      // (six for ds4, empty for llama.cpp / Lemonade).
       PickerField::NativeKnob(i) => i < self.native_descriptors.len(),
       PickerField::Extras => true,
     }
@@ -1872,11 +1885,11 @@ mod tests {
   }
 
   #[test]
-  fn seed_native_descriptors_is_empty_for_every_shipping_backend() {
-    // Each BackendChoice resolves to a backend that declares no native knobs,
-    // so the picker stays byte-identical. (A future backend with knobs must
-    // extend the exhaustive `resolved_backend` match — a compile error until
-    // it does.)
+  fn seed_native_descriptors_empty_for_llamacpp_lemonade_six_for_ds4() {
+    // llama.cpp / Lemonade declare no native knobs, so the picker stays
+    // byte-identical for them; ds4 declares six. (A future backend with knobs
+    // must extend the exhaustive `resolved_backend` match — a compile error
+    // until it does.)
     for choice in [
       BackendChoice::Auto,
       BackendChoice::LlamaCpp,
@@ -1890,6 +1903,14 @@ mod tests {
         "{choice:?} must surface no native knobs"
       );
     }
+    let mut s = LaunchPickerState::for_model("m");
+    s.model_backend = BackendChoice::Ds4;
+    s.seed_native_descriptors();
+    assert_eq!(
+      s.native_descriptors.len(),
+      6,
+      "ds4 must surface its six native knobs"
+    );
   }
 
   #[test]

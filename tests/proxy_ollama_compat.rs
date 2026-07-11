@@ -174,6 +174,7 @@ fn make_model(
     split_siblings: Vec::new(),
     display_label: display_label.map(str::to_string),
     multimodal: None,
+    ds4_compatible: false,
   }
 }
 
@@ -189,6 +190,7 @@ fn make_parse_error_model(path: &str) -> DiscoveredModel {
     split_siblings: Vec::new(),
     display_label: None,
     multimodal: None,
+    ds4_compatible: false,
   }
 }
 

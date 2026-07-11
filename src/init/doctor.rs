@@ -70,6 +70,10 @@ pub enum FindingId {
   /// "install the purpose-built engine", not an error. Additive id — readers
   /// refuse only versions above their max, so `schema_version` stays 2.
   Ds4Unavailable,
+  /// Info-tier: `ds4-server` is installed but disabled via `ds4.enabled:
+  /// false`. Distinct from `Ds4Unavailable` so the fix hint is "re-enable it",
+  /// not "build it". Additive id — `schema_version` stays 2.
+  Ds4Disabled,
 }
 
 impl FindingId {
@@ -84,6 +88,7 @@ impl FindingId {
       Self::ConfigModeDrift => "config_mode_drift",
       Self::RemoteSnapshotUnreachable => "remote_snapshot_unreachable",
       Self::Ds4Unavailable => "ds4_unavailable",
+      Self::Ds4Disabled => "ds4_disabled",
     }
   }
 
@@ -106,6 +111,10 @@ impl FindingId {
       Self::Ds4Unavailable => {
         "build ds4-server (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and set \
          `ds4.binary` to the built path (or put `ds4-server` on PATH); see docs/usage.md#ds4-backend"
+      }
+      Self::Ds4Disabled => {
+        "remove `ds4.enabled: false` from config.yaml (or set `LLAMASTASH_DS4=1`) to route \
+         DeepSeek-V4 models to ds4-server; see docs/usage.md#ds4-backend"
       }
     }
   }
@@ -678,19 +687,53 @@ pub async fn run(args: DoctorArgs, _cli: &Cli, _config: &Config) -> CliResult {
   Ok(())
 }
 
-/// Build the ds4 advisory when it applies: ds4 is unavailable (config +
-/// binary) **and** at least one discovered GGUF passes the ds4-compatibility
-/// predicate. Returns `None` (no scan) when ds4 is available. The scan is the
-/// same one the daemon runs at startup; it stops at the first match.
+/// Whether `LLAMASTASH_DS4` is set to a truthy value — the env force that
+/// enables ds4 over `ds4.enabled: false`, mirrored from the daemon so the
+/// diagnostic agrees with what a launch would actually do.
+fn ds4_env_forced() -> bool {
+  std::env::var("LLAMASTASH_DS4")
+    .ok()
+    .map(|v| {
+      matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+      )
+    })
+    .unwrap_or(false)
+}
+
+/// Build the ds4 advisory. Three cases, keyed on the same availability logic
+/// the daemon uses (`intends_enabled` + binary resolve, honoring the
+/// `LLAMASTASH_DS4` force):
+/// - **available** (intended + installed): nothing to advise, no scan.
+/// - **installed but disabled** (`ds4.enabled: false`, no force): a config
+///   choice, not a missing engine — advise how to re-enable, no scan and no
+///   wrong "build it" hint.
+/// - **binary absent**: scan for a ds4-compatible model and, if one is
+///   present, advise installing ds4. Only this case pays the scan (bounded by
+///   the arch pre-check), and it's the only one where the install advice fits.
 async fn ds4_advisory(config: &Config) -> Option<Finding> {
   use crate::discovery::known_caches::{default_set, RootResolution};
   use crate::discovery::scanner::{scan, ScanOptions};
   use crate::gguf::header::{read_path, HeaderReadOptions};
 
-  let ds4_available = config.ds4.intends_enabled(false)
-    && crate::backend::ds4::resolve_ds4_binary(config.ds4.binary.as_deref()).is_some();
-  if ds4_available {
+  let force = ds4_env_forced();
+  let intends = config.ds4.intends_enabled(force);
+  let binary = crate::backend::ds4::resolve_ds4_binary(config.ds4.binary.as_deref());
+  // Available: intended and installed. Nothing to advise, no scan.
+  if intends && binary.is_some() {
     return None;
+  }
+  // Installed but explicitly disabled: a deliberate config choice, not a
+  // missing engine. Advise how to re-enable (no scan, no "build it" hint).
+  if binary.is_some() && !intends {
+    return Some(Finding::new(
+      FindingId::Ds4Disabled,
+      Severity::Info,
+      "ds4-server is installed but disabled (`ds4.enabled: false`); remove that key (or set \
+       `LLAMASTASH_DS4=1`) to route DeepSeek-V4 models to the purpose-built engine"
+        .to_string(),
+    ));
   }
   let roots = default_set(RootResolution {
     user_paths: &config.model_paths,

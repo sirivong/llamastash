@@ -138,6 +138,7 @@ pub fn enumerate(root: PathBuf, cache: Option<MetadataCache>) -> mpsc::Receiver<
             // a directory sibling, so the scanner's `find_mmproj` doesn't
             // apply here — left unset until Ollama-side detection lands.
             multimodal: None,
+            ds4_compatible: hit.ds4_compatible,
           };
           if tx.send(model).await.is_err() {
             return;
@@ -156,11 +157,13 @@ pub fn enumerate(root: PathBuf, cache: Option<MetadataCache>) -> mpsc::Receiver<
           metadata: Some(summarise_metadata(&read.header)),
           parse_error: None,
           multimodal: None,
+          ds4_compatible: crate::backend::ds4::ds4_compatible(&read.header),
         },
         Ok(Err(e)) => CachedParse {
           metadata: None,
           parse_error: Some(format!("{resolved_name_tag}: {e}")),
           multimodal: None,
+          ds4_compatible: false,
         },
         Err(join_err) => {
           log::warn!("ollama parser task panicked: {join_err}");
@@ -182,6 +185,7 @@ pub fn enumerate(root: PathBuf, cache: Option<MetadataCache>) -> mpsc::Receiver<
         split_siblings: Vec::new(),
         display_label: Some(resolved_name_tag.clone()),
         multimodal: None,
+        ds4_compatible: cached.ds4_compatible,
       };
       if tx.send(model).await.is_err() {
         return;

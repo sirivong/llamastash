@@ -112,6 +112,13 @@ pub async fn route(state: Arc<ProxyState>, req: Request<Incoming>) -> ProxyRespo
     // other Anthropic-shape clients attach via `ANTHROPIC_BASE_URL`.
     (&Method::POST, "/v1/messages") => forward_request(state, req).await,
     (&Method::POST, "/v1/messages/count_tokens") => forward_request(state, req).await,
+    // OpenAI Responses API. Both backends speak it natively — llama-server
+    // (`POST /v1/responses` + `/v1/responses/input_tokens`) and ds4-server —
+    // so the proxy byte-pipes it like any other `/v1` route (same body-`model`
+    // resolution, same streaming). Agents that prefer the Responses surface
+    // attach through the one stable proxy URL.
+    (&Method::POST, "/v1/responses") => forward_request(state, req).await,
+    (&Method::POST, "/v1/responses/input_tokens") => forward_request(state, req).await,
     // Ollama-compat Tier 1: discovery-only endpoints.
     (&Method::GET, "/api/tags") => ollama_tags(state).await,
     (&Method::GET, "/api/version") => ollama_version(),
@@ -169,24 +176,30 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
   };
 
   let decision = route::decide(&state, parsed.model).await;
-  // ds4 serves chat/completions, not embeddings/rerank (D-ui scope). When an
-  // embeddings/rerank request resolves to a running ds4 model, answer with a
-  // clear JSON error instead of forwarding into ds4-server's bare 404.
+  // ds4 serves chat/completions, not embeddings/rerank (D-ui scope). Refuse
+  // such a request bound for ds4 with a clear JSON error instead of forwarding
+  // into ds4-server's bare 404 — covering both a *running* ds4 model and a
+  // *not-running* compatible model that would auto-start on ds4 (a
+  // multi-minute load that still couldn't serve the request).
   let req_path = uri.path().to_string();
   let is_embed_or_rerank = req_path == "/v1/embeddings" || req_path == "/v1/rerank";
   if is_embed_or_rerank {
-    if let RouteDecision::ReadyAt {
-      served_model_key, ..
-    } = &decision
-    {
-      if route::running_model_is_ds4(&state, served_model_key).await {
-        return error_response(
-          StatusCode::BAD_REQUEST,
-          "unsupported_endpoint",
-          "the ds4 backend serves chat/completions only, not embeddings or rerank; \
-           launch an embedding-capable model (it routes to llama.cpp) for this endpoint",
-        );
+    let hits_ds4 = match &decision {
+      RouteDecision::ReadyAt {
+        served_model_key, ..
+      } => route::running_model_is_ds4(&state, served_model_key).await,
+      RouteDecision::NotRunning { resolved_row, .. } => {
+        route::row_would_route_ds4(&state, resolved_row).await
       }
+      _ => false,
+    };
+    if hits_ds4 {
+      return error_response(
+        StatusCode::BAD_REQUEST,
+        "unsupported_endpoint",
+        "the ds4 backend serves chat/completions only, not embeddings or rerank; \
+         launch an embedding-capable model (it routes to llama.cpp) for this endpoint",
+      );
     }
   }
   // Both the Ready and NotRunning arms need the same inbound bundle;
@@ -780,6 +793,7 @@ mod tests {
       source: ModelSource::HuggingFace,
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
       parse_error: None,
       split_siblings: vec![],
       metadata: Some(ModelMetadata {

@@ -69,6 +69,10 @@ pub struct RunningRow {
   pub preset_count: u32,
   /// Default preset name (config-only) for this model, or `None`.
   pub preset_default: Option<String>,
+  /// Backend this launch resolved to (`llamacpp` / `ds4` / `lemonade`),
+  /// mirrored from the IPC `status` row's `backend` field. `None` on a row
+  /// the daemon didn't tag; defaults to `llamacpp` semantics downstream.
+  pub backend: Option<String>,
 }
 
 impl RunningRow {
@@ -430,6 +434,7 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     .unwrap_or(false);
   let preset_count = v.get("preset_count").and_then(Value::as_u64).unwrap_or(0) as u32;
   let preset_default = v.get("default").and_then(Value::as_str).map(str::to_string);
+  let backend = v.get("backend").and_then(Value::as_str).map(str::to_string);
   Some(RunningRow {
     launch_id,
     model_path,
@@ -447,6 +452,7 @@ fn parse_running_row(v: &Value) -> Option<RunningRow> {
     ctx_clamped,
     preset_count,
     preset_default,
+    backend,
   })
 }
 
@@ -703,6 +709,7 @@ mod tests {
         ctx_clamped: false,
         preset_count: 0,
         preset_default: None,
+        backend: None,
       },
       RunningRow {
         launch_id: "L2".into(),
@@ -721,6 +728,7 @@ mod tests {
         ctx_clamped: false,
         preset_count: 0,
         preset_default: None,
+        backend: None,
       },
     ];
     assert_eq!(resolve_running(&rows, "41100").unwrap().launch_id, "L1");
@@ -746,6 +754,7 @@ mod tests {
       ctx_clamped: false,
       preset_count: 0,
       preset_default: None,
+      backend: None,
     }];
     let err = resolve_running(&rows, "9999").unwrap_err();
     assert_eq!(err.code, MODEL_NOT_FOUND);
@@ -770,6 +779,7 @@ mod tests {
       ctx_clamped: false,
       preset_count: 0,
       preset_default: None,
+      backend: None,
     };
     let rows = vec![
       row("L1", "/cache/gemma-4-E2B-it-Q4_K_M.gguf", 41100),

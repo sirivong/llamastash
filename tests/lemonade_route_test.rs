@@ -79,6 +79,7 @@ fn lemonade_model(name: &str) -> DiscoveredModel {
     split_siblings: Vec::new(),
     display_label: Some(name.to_string()),
     multimodal: None,
+    ds4_compatible: false,
   }
 }
 
@@ -303,6 +304,7 @@ async fn idle_lemonade_model_is_unloaded_but_umbrella_stays_up() {
             LaunchMode::Chat,
           ),
           actuals: Default::default(),
+          resolved_backend: "lemonade".to_string(),
         })
     })
     .await;

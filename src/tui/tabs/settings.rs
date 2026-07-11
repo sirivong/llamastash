@@ -119,19 +119,15 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   // inheritance layer to name.
   let resolved_ctx = managed.map(|m| m.resolved_ctx.or(m.knobs.ctx.set_value().copied()));
   // A running ds4 model ignores the llama.cpp typed knobs — render its own
-  // native rows (ctx + the six ds4 tunables) from the recorded params instead
-  // of the empty llama.cpp groups. Editable launches keep the picker path.
-  let ds4_readonly = managed.is_some_and(|m| app.ds4_badge_paths.contains(&m.path));
+  // native rows (ctx + the six ds4 tunables) from the live params instead of
+  // the empty llama.cpp groups. Keyed on the launch's *actual* backend (not
+  // the routing prediction), so a compatible file launched with
+  // `--backend llamacpp` still shows the llama.cpp knobs it ran with.
+  // Editable launches keep the picker path.
+  let ds4_readonly = managed.is_some_and(|m| m.is_ds4());
   if ds4_readonly {
     let m = managed.expect("ds4_readonly implies a managed row");
-    push_ds4_readonly_rows(
-      &mut lines,
-      m,
-      resolved_ctx.flatten(),
-      app,
-      palette,
-      show_source,
-    );
+    push_ds4_readonly_rows(&mut lines, m, resolved_ctx.flatten(), palette, show_source);
   }
   for group in knob_display_groups() {
     // The ds4 read-only view rendered its rows above; skip the llama.cpp groups.
@@ -223,8 +219,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   match picker_view {
     Some(pv) => {
       // Native knobs render under their own group header (matching the
-      // llama.cpp knob groups above), above extras. Empty for every shipping
-      // backend, so this renders nothing today; ds4 surfaces six rows here.
+      // llama.cpp knob groups above), above extras. ds4 surfaces six rows
+      // here; llama.cpp / Lemonade have none.
       let any_native =
         (0..pv.native_descriptors.len()).any(|i| pv.field_visible(PickerField::NativeKnob(i)));
       if any_native {
@@ -392,7 +388,6 @@ fn push_ds4_readonly_rows(
   lines: &mut Vec<Line<'static>>,
   m: &ManagedRow,
   resolved_ctx: Option<u32>,
-  app: &App,
   palette: &Palette,
   show_source: bool,
 ) {
@@ -416,10 +411,14 @@ fn push_ds4_readonly_rows(
     show_source,
   ));
   lines.push(group_header("ds4 native", palette));
-  let backend_knobs = app.last_params.get(&m.path).map(|p| &p.backend_knobs);
+  // Read the six values from the launch's *live* `backend_knobs` (the running
+  // row, sourced from `status`), so the panel reflects what the server is
+  // actually running with — including an auto-enabled `ssd_streaming` — rather
+  // than the saved `last_params` delta.
   for d in crate::backend::ds4::DS4_NATIVE_KNOBS {
-    let value = backend_knobs
-      .and_then(|bk| bk.get(d.id))
+    let value = m
+      .backend_knobs
+      .get(d.id)
       .and_then(KnobValue::as_set)
       .cloned()
       .unwrap_or_else(|| INHERITED_LABEL.to_string());
@@ -653,6 +652,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }
   }
 
@@ -737,35 +737,26 @@ mod tests {
 
   #[test]
   fn ds4_running_view_shows_native_knobs_not_llamacpp() {
-    use crate::tui::app::{LastParamsRow, ManagedRow};
+    use crate::tui::app::ManagedRow;
     use ratatui::text::Line;
-    let mut app = App::new(AppOptions::default());
+    let app = App::new(AppOptions::default());
     let path = PathBuf::from("/m/DeepSeek-V4-Flash.gguf");
-    // The daemon's honest signal: this path routes to ds4.
-    app.ds4_badge_paths.insert(path.clone());
+    // The running row carries the launch's live native knobs (from `status`)
+    // and the resolved `ds4` backend tag.
     let mut backend_knobs = std::collections::BTreeMap::new();
     backend_knobs.insert("ssd_streaming".into(), KnobValue::Set("true".into()));
     backend_knobs.insert("power".into(), KnobValue::Set("80".into()));
-    app.last_params.insert(
-      path.clone(),
-      LastParamsRow {
-        ctx: None,
-        reasoning: false,
-        knobs: Default::default(),
-        backend_knobs,
-        extras: vec![],
-        port: Some(41100),
-      },
-    );
     let m = ManagedRow {
       launch_id: "L1".into(),
       path,
       port: 41100,
+      backend_knobs,
+      backend: Some("ds4".into()),
       ..Default::default()
     };
     let palette = app.palette();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    push_ds4_readonly_rows(&mut lines, &m, Some(32768), &app, palette, true);
+    push_ds4_readonly_rows(&mut lines, &m, Some(32768), palette, true);
     let text: String = lines
       .iter()
       .flat_map(|l| l.spans.iter())

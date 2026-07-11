@@ -189,3 +189,67 @@ async fn preset_crud_round_trips_through_config_and_survives_restart() {
   std::fs::remove_dir_all(&cfg_dir).ok();
   std::fs::remove_dir_all(&model_dir).ok();
 }
+
+/// `presets_save` carries the native (ds4) `backend_knobs` through to the
+/// stored preset — the `Ctrl+P` save-from-running path relies on this so a
+/// ds4 launch's `--power` / `--ssd-streaming` are save-able, not just
+/// apply-able. Regression for the dropped `backend_knobs` in the save chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preset_save_carries_ds4_backend_knobs() {
+  let state = unique_temp("bk-state");
+  let cfg_dir = unique_temp("bk-cfg");
+  let config_path = cfg_dir.join("config.yaml");
+  let model_dir = unique_temp("bk-models");
+  std::fs::write(model_dir.join("coder.gguf"), build_minimal_gguf("qwen2")).unwrap();
+
+  let handle = spawn_daemon(&state, &config_path, &model_dir).await;
+  let socket = state.clone();
+  let model_path = wait_for_model(&socket).await;
+
+  let saved = call(
+    &socket,
+    "presets_save",
+    json!({
+      "model_path": model_path,
+      "name": "streamy",
+      "backend_knobs": { "ssd_streaming": "true", "power": "60" },
+    }),
+  )
+  .await;
+  assert_eq!(
+    saved["saved"]["params"]["backend_knobs"]["ssd_streaming"],
+    json!("true"),
+    "saved preset must carry the native ssd_streaming knob: {saved}"
+  );
+  assert_eq!(
+    saved["saved"]["params"]["backend_knobs"]["power"],
+    json!("60")
+  );
+
+  // It round-trips through `presets_show` and lands in config.yaml.
+  let shown = call(
+    &socket,
+    "presets_show",
+    json!({"model_path": model_path, "name": "streamy"}),
+  )
+  .await;
+  assert_eq!(
+    shown["preset"]["params"]["backend_knobs"]["ssd_streaming"],
+    json!("true"),
+    "shown preset must carry the native knobs: {shown}"
+  );
+
+  shutdown(&socket, handle).await;
+  let cfg = llamastash::config::load_config_from_path(&config_path).config;
+  let stored = cfg.presets.get("coder.gguf").expect("model key present");
+  let body = stored.entries.get("streamy").expect("preset entry present");
+  assert!(
+    body.backend_knobs.contains_key("ssd_streaming"),
+    "backend_knobs must persist to config.yaml: {:?}",
+    body.backend_knobs
+  );
+
+  std::fs::remove_dir_all(&state).ok();
+  std::fs::remove_dir_all(&cfg_dir).ok();
+  std::fs::remove_dir_all(&model_dir).ok();
+}

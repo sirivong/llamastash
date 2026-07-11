@@ -82,20 +82,14 @@ impl ModelCatalog {
 }
 
 /// Whether the `backend` badge for `m` should read `ds4` (R14 honest badge):
-/// ds4 is available, the arch is `deepseek4` (a cheap pre-check that spares a
-/// header read for every other model), and the file passes the full ds4
-/// quant-contract predicate. This is the *same* [`ds4_compatible`] the daemon
-/// routes on, so a row badges `ds4` exactly when a plain launch would.
+/// ds4 is available **and** the file passed the ds4 quant-contract predicate.
+/// The verdict is precomputed at scan time (`DiscoveredModel::ds4_compatible`)
+/// from the same header parse that fills `metadata`, so this hot-path helper
+/// (called per row on every `list_models`) reads a boolean instead of
+/// re-reading tensor info. It's the *same* predicate the daemon routes on, so
+/// a row badges `ds4` exactly when a plain launch would.
 pub(crate) fn ds4_badge_for(m: &DiscoveredModel, ds4_available: bool) -> bool {
-  if !ds4_available {
-    return false;
-  }
-  if m.metadata.as_ref().and_then(|md| md.arch.as_deref()) != Some("deepseek4") {
-    return false;
-  }
-  crate::gguf::read_path(&m.path, crate::gguf::HeaderReadOptions::default())
-    .map(|r| crate::backend::ds4::ds4_compatible(&r.header))
-    .unwrap_or(false)
+  ds4_available && m.ds4_compatible
 }
 
 /// JSON projection of a single [`DiscoveredModel`] for the
@@ -183,6 +177,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }
   }
 
@@ -297,6 +292,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     };
     cat.upsert(m).await;
     let v = cat.to_list_response(false).await;

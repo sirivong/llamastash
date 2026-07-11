@@ -38,6 +38,10 @@ pub struct CachedParse {
   /// alongside an already-cached model won't surface until that model
   /// file changes or the daemon restarts — an accepted edge case.
   pub multimodal: Option<crate::discovery::Multimodal>,
+  /// Whether the parsed header passes the ds4-compatibility predicate.
+  /// Computed on the same cache-miss header parse as `metadata`, so a warm
+  /// rescan reuses the verdict instead of re-reading tensor info.
+  pub ds4_compatible: bool,
 }
 
 #[derive(Debug)]
@@ -189,6 +193,7 @@ mod tests {
       }),
       parse_error: None,
       multimodal: None,
+      ds4_compatible: false,
     }
   }
 

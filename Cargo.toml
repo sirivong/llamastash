@@ -12,10 +12,10 @@ readme = "README.md"
 license = "MIT"
 edition = "2021"
 rust-version = "1.95"
-# `cargo run` (without --bin) targets the real binary. The other
-# `[[bin]]` entry (fake_llama_server) is only built for tests
-# under the `test-fixtures` feature, but cargo's run-target picker
-# checks the manifest before feature resolution, so we still need
+# `cargo run` (without --bin) targets the real binary. The fixture
+# `[[bin]]` entries (fake_llama_server, fake_ds4_server) are only built
+# for tests under the `test-fixtures` feature, but cargo's run-target
+# picker checks the manifest before feature resolution, so we still need
 # this hint.
 default-run = "llamastash"
 exclude = [

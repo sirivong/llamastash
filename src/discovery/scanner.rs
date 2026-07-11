@@ -499,6 +499,7 @@ async fn parse_into_model(
         split_siblings: siblings,
         display_label: None,
         multimodal: hit.multimodal,
+        ds4_compatible: hit.ds4_compatible,
       };
     }
   }
@@ -524,15 +525,19 @@ async fn parse_into_model(
       )
     });
   let cached = match parsed {
+    // Compute the ds4-compat verdict from the same header parse (free — no
+    // extra IO) so the `list_models` hot path never re-reads tensor info.
     Ok(read) => CachedParse {
       metadata: Some(summarise_metadata(&read.header)),
       parse_error: None,
       multimodal,
+      ds4_compatible: crate::backend::ds4::ds4_compatible(&read.header),
     },
     Err(e) => CachedParse {
       metadata: None,
       parse_error: Some(e.to_string()),
       multimodal,
+      ds4_compatible: false,
     },
   };
   if let Some(c) = cache {
@@ -549,6 +554,7 @@ async fn parse_into_model(
     split_siblings: siblings,
     display_label: None,
     multimodal: cached.multimodal,
+    ds4_compatible: cached.ds4_compatible,
   }
 }
 

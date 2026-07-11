@@ -269,6 +269,7 @@ mod tests {
       mode: "chat".into(),
       ready_at: None,
       params: None,
+      backend: None,
       latest_rss_bytes: None,
       latest_cpu_pct: None,
       resolved_ctx: None,

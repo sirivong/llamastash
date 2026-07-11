@@ -108,6 +108,23 @@ pub struct ManagedRow {
   /// live `status` `params.extras`). Empty for external rows. Lets
   /// `Ctrl+P` save-from-running carry the advanced args into the preset.
   pub extras: Vec<String>,
+  /// Native (per-backend) knobs the launch dispatched with (the live
+  /// `status` `params.backend_knobs`) — the six ds4 tunables, so `Ctrl+P`
+  /// save-from-running captures them into the preset (not just typed knobs).
+  /// Empty for llama.cpp / Lemonade launches.
+  pub backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
+  /// Backend this launch actually resolved to (`status` `backend`): `ds4`
+  /// when the launch dispatched to ds4, else `llamacpp` / `lemonade`. Keyed
+  /// on by the ds4 badge / knob panel so a running row reflects the real
+  /// backend, not the `list_models` routing prediction. `None` when untagged.
+  pub backend: Option<String>,
+}
+
+impl ManagedRow {
+  /// Whether this running launch actually dispatched to ds4.
+  pub fn is_ds4(&self) -> bool {
+    self.backend.as_deref() == Some(crate::backend::ds4::DS4_BACKEND_ID)
+  }
 }
 
 /// Persisted "last successful launch params" for one model, fetched
@@ -125,8 +142,8 @@ pub struct LastParamsRow {
   /// re-resolve from yaml / built-in / model default.
   pub knobs: crate::config::TypedKnobs,
   /// Per-backend native-knob deltas (see [`crate::launch::native_knobs`]),
-  /// keyed by descriptor id. Empty for every shipping backend. Seeds the
-  /// picker's `backend_knobs` so a returning user keeps their native values.
+  /// keyed by descriptor id. Populated for ds4; empty for llama.cpp / Lemonade.
+  /// Seeds the picker's `backend_knobs` so a returning user keeps their values.
   pub backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
   /// Free-form argv tail that landed on `--`. Surfaces back in the
   /// editor's `extras` row.
@@ -443,7 +460,7 @@ pub struct StartModelArgs {
   /// always resolves a concrete stop.
   pub selection: &'static str,
   /// Per-backend native-knob values from the picker (see
-  /// [`crate::launch::native_knobs`]). Empty for every shipping backend.
+  /// [`crate::launch::native_knobs`]). Populated for ds4; empty for llama.cpp.
   pub backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
 }
 
@@ -1492,8 +1509,8 @@ impl App {
       }
       _ => crate::launch::params::BackendChoice::LlamaCpp,
     };
-    // Surface the model's backend native knobs (empty for every shipping
-    // backend, so no native rows render today).
+    // Surface the model's backend native knobs (six for ds4, none for
+    // llama.cpp / Lemonade).
     state.seed_native_descriptors();
     // Populate the Device row from the launch device catalog — the
     // exact `--device` selectors the daemon's configured binaries
@@ -1703,13 +1720,16 @@ impl App {
       .display_label_for(&path)
       .unwrap_or_else(|| crate::util::paths::path_basename(&path));
 
-    // Capture knobs + extras from whichever surface is in view.
-    let (knobs, extras) = if let Some(m) = self.focused_managed() {
-      // Running model: the live dispatched knobs and advanced `--` tail.
-      (m.knobs.clone(), m.extras.clone())
+    // Capture knobs + native knobs + extras from whichever surface is in view.
+    let (knobs, backend_knobs, extras) = if let Some(m) = self.focused_managed() {
+      // Running model: the live dispatched knobs, native (ds4) knobs, and
+      // advanced `--` tail — so a ds4 launch's `--power` / `--ssd-streaming`
+      // land in the preset, not just the typed knobs.
+      (m.knobs.clone(), m.backend_knobs.clone(), m.extras.clone())
     } else if let Some(p) = &self.launch_picker {
       (
         p.user_knobs.clone(),
+        p.backend_knobs.clone(),
         p.extras
           .iter()
           .map(|s| s.to_string_lossy().into_owned())
@@ -1718,6 +1738,7 @@ impl App {
     } else if let Some(p) = self.build_default_picker() {
       (
         p.user_knobs.clone(),
+        p.backend_knobs.clone(),
         p.extras
           .iter()
           .map(|s| s.to_string_lossy().into_owned())
@@ -1732,6 +1753,7 @@ impl App {
       path,
       model_name,
       knobs,
+      backend_knobs,
       extras,
       existing,
       arch_shadow,
@@ -2084,6 +2106,7 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
       .and_then(Value::as_str)
       .map(String::from),
     multimodal: row.get("multimodal").and_then(parse_multimodal),
+    ds4_compatible: false,
   })
 }
 
@@ -2140,6 +2163,8 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
     ctx_clamped: false,
     knobs: crate::config::TypedKnobs::default(),
     extras: Vec::new(),
+    backend_knobs: Default::default(),
+    backend: None,
   })
 }
 
@@ -2223,6 +2248,15 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
         .collect()
     })
     .unwrap_or_default();
+  // Native (ds4) knobs, so `Ctrl+P` save-from-running and the ds4 knob panel
+  // reflect what the launch dispatched with. Missing / shape mismatch → empty.
+  let backend_knobs = row
+    .get("params")
+    .and_then(|p| p.get("backend_knobs"))
+    .and_then(|k| serde_json::from_value(k.clone()).ok())
+    .unwrap_or_default();
+  // The backend this launch actually resolved to (honest ds4 signal).
+  let backend = row.get("backend").and_then(Value::as_str).map(String::from);
   Some(ManagedRow {
     launch_id,
     path,
@@ -2235,6 +2269,8 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     ctx_clamped,
     knobs,
     extras,
+    backend_knobs,
+    backend,
   })
 }
 
@@ -2268,6 +2304,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }
   }
 

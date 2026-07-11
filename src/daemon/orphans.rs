@@ -157,15 +157,18 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
     };
     // Three-factor confirmation: PID alive (above), port listening, and the
     // `/v1/models` id matches — but the id contract is backend-specific
-    // (D-adopt). Dispatch on the live process's basename: a `ds4-server`
-    // child reports a fixed alias (never the path), so we match the alias
-    // set AND cross-check its argv `-m` against the recorded path (the alias
-    // alone can't discriminate two ds4 instances); every other child follows
-    // llama.cpp's path/basename rule.
+    // (D-adopt). Dispatch on the *recorded* backend tag, not the live
+    // process's basename: a renamed / wrapped `ds4-server` binary still
+    // stamped `resolved_backend: "ds4"` at launch, so keying on the tag
+    // adopts it where a basename match would drop the live child as stale
+    // (invisible to `status`, un-stoppable). A `ds4-server` child reports a
+    // fixed alias (never the path), so its branch matches the alias set AND
+    // cross-checks its argv `-m` against the recorded path (the alias alone
+    // can't discriminate two ds4 instances); every other child follows
+    // llama.cpp's path/basename rule. PID reuse is still caught: a mismatched
+    // live process fails the alias-body / path check below regardless of tag.
     let proc = sys.process(sysinfo::Pid::from_u32(snap.pid as u32));
-    let is_ds4 = proc
-      .map(|p| p.name().to_string_lossy().contains("ds4-server"))
-      .unwrap_or(false);
+    let is_ds4 = snap.resolved_backend == crate::backend::ds4::DS4_BACKEND_ID;
     let matched = if is_ds4 {
       let argv: Vec<String> = proc
         .map(|p| p.cmd().iter().map(|s| s.to_string_lossy().into()).collect())
@@ -468,6 +471,7 @@ mod tests {
       started_at: 1_700_000_000,
       params: LaunchParams::new(PathBuf::from(path), LaunchMode::Chat),
       actuals: Default::default(),
+      resolved_backend: "llamacpp".to_string(),
     }
   }
 
@@ -536,6 +540,65 @@ mod tests {
     // A non-existent path falls back to a direct compare (unequal).
     assert!(!paths_equal(&dir.join("gone.gguf"), &a));
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn ds4_alias_endpoint_check_is_prefix_tolerant_and_rejects_foreign() {
+    // ds4 adoption (D-adopt) matches the `/v1/models` id by the `deepseek-v4-`
+    // prefix, so a future `-turbo` build adopts; a foreign id on the reused
+    // port does not (the PID-reuse guard on the ds4 path).
+    let ds4_body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "deepseek-v4-turbo", "object": "model"}],
+    })
+    .to_string();
+    let (_resp, port) = spawn_one_shot(200, ds4_body).await;
+    assert!(
+      models_endpoint_reports_ds4_alias(port, Duration::from_secs(1)).await,
+      "a deepseek-v4-* alias must be accepted"
+    );
+
+    let foreign_body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "llama-3-8b", "object": "model"}],
+    })
+    .to_string();
+    let (_resp2, port2) = spawn_one_shot(200, foreign_body).await;
+    assert!(
+      !models_endpoint_reports_ds4_alias(port2, Duration::from_secs(1)).await,
+      "a foreign id must not be read as a ds4 alias"
+    );
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn ds4_tagged_snapshot_dispatches_to_alias_branch() {
+    // A snapshot tagged `resolved_backend: "ds4"` takes the ds4 adoption path
+    // (F8: dispatch keys on the recorded tag, not the process basename). The
+    // test process's argv carries no `-m <recorded path>`, so the ds4 branch's
+    // argv cross-check fails and the row is (correctly) stale — proving the
+    // ds4 branch ran, not the llama.cpp path/basename rule (which would have
+    // adopted on the alias-shaped body alone).
+    let live = std::process::id() as i32;
+    let body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "deepseek-v4-flash", "object": "model"}],
+    })
+    .to_string();
+    let (_resp, port) = spawn_one_shot(200, body).await;
+    let mut snap = fake_snapshot(live, port, "/m/deepseek-v4-flash.gguf", 1);
+    snap.resolved_backend = "ds4".to_string();
+    let report = sweep(SweepInputs {
+      recorded_running: &[snap],
+      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
+      probe_timeout: Duration::from_secs(1),
+    })
+    .await;
+    assert!(
+      report.adopted.is_empty() && report.stale.len() == 1,
+      "ds4 branch must reject when argv `-m` doesn't match (adopted={}, stale={})",
+      report.adopted.len(),
+      report.stale.len()
+    );
   }
 
   #[test]

@@ -355,6 +355,7 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
           LaunchMode::Chat,
         ),
         actuals: Default::default(),
+        resolved_backend: "lemonade".to_string(),
       })
     })
     .await;

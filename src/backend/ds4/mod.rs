@@ -48,6 +48,11 @@ const DS4_SERVER_BIN: &str = "ds4-server";
 /// Tolerant of future `deepseek-v4-*` ids via [`is_ds4_alias`].
 pub const DS4_ALIAS_IDS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
 
+/// The common prefix every ds4 `/v1/models` alias carries. Matching on this
+/// (rather than the two exact ids) keeps readiness + adoption tolerant of a
+/// future ds4-server build advertising e.g. `deepseek-v4-turbo`.
+pub const DS4_ALIAS_PREFIX: &str = "deepseek-v4-";
+
 /// Network-affecting flag heads ds4 adds on top of the base
 /// loopback/credential denylist ([`crate::launch::params::FORBIDDEN_ADVANCED_PREFIXES`]).
 /// `--cors` weakens the browser same-origin posture on the loopback child;
@@ -69,7 +74,7 @@ const GGML_I32: u32 = 26;
 /// Whether `id` names a ds4 model alias (the fixed `/v1/models` id). Tolerant
 /// of future `deepseek-v4-*` variants beyond the two shipped today.
 pub fn is_ds4_alias(id: &str) -> bool {
-  DS4_ALIAS_IDS.contains(&id) || id.starts_with("deepseek-v4-")
+  id.starts_with(DS4_ALIAS_PREFIX)
 }
 
 /// The **ds4-compatibility predicate** — the single routing signal (D-compat).
@@ -286,7 +291,12 @@ pub fn readiness() -> Readiness {
   Readiness::HttpPollModelId {
     path: "/v1/models".to_string(),
     ready_status: 200,
-    expect_model_ids: DS4_ALIAS_IDS.iter().map(|s| s.to_string()).collect(),
+    // Match the `deepseek-v4-` prefix, not the two exact ids: the probe does a
+    // substring check against the response body, so the prefix accepts every
+    // shipped alias (`-flash` / `-pro`) plus a future `-turbo`, staying in
+    // lockstep with `is_ds4_alias` / adoption. Scanning the whole body is
+    // consistent with the existing foreign-process-on-port threat model.
+    expect_model_ids: vec![DS4_ALIAS_PREFIX.to_string()],
   }
 }
 
@@ -625,7 +635,11 @@ mod tests {
       } => {
         assert_eq!(path, "/v1/models");
         assert_eq!(ready_status, 200);
-        assert!(expect_model_ids.iter().any(|s| s == "deepseek-v4-flash"));
+        // The prefix (a substring of every ds4 alias body) is what the probe
+        // matches on, so `-flash` / `-pro` / a future `-turbo` all pass.
+        assert_eq!(expect_model_ids, vec![DS4_ALIAS_PREFIX.to_string()]);
+        assert!("deepseek-v4-flash".starts_with(&expect_model_ids[0]));
+        assert!("deepseek-v4-turbo".starts_with(&expect_model_ids[0]));
       }
       _ => panic!("ds4 readiness must be HttpPollModelId"),
     }

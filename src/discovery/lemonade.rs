@@ -75,6 +75,8 @@ fn row_for(entry: &ModelEntry) -> DiscoveredModel {
     // Lemonade serves registry models by name, not local GGUFs — there's no
     // companion projector to detect, so no multimodal signal.
     multimodal: None,
+    // Registry-served, not a local GGUF — never ds4-routable.
+    ds4_compatible: false,
   }
 }
 

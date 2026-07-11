@@ -135,8 +135,7 @@ async fn ds4_compatible_model_auto_routes_to_ds4_reaches_ready_and_stops() {
   wait_for_socket(&socket).await;
   let mut client = Client::connect(&socket).await.expect("connect");
 
-  // A ds4-compatible model, no `--backend`: must auto-route to ds4 and carry
-  // the deepseek4 KV-blind advisory in the response.
+  // A ds4-compatible model, no `--backend`: must auto-route to ds4.
   let start = client
     .call(
       "start_model",
@@ -144,27 +143,20 @@ async fn ds4_compatible_model_auto_routes_to_ds4_reaches_ready_and_stops() {
     )
     .await
     .expect("start_model");
-  let warnings: Vec<String> = start
-    .get("warnings")
-    .and_then(Value::as_array)
-    .map(|a| {
-      a.iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect()
-    })
-    .unwrap_or_default();
-  assert!(
-    warnings.iter().any(|w| w.contains("deepseek4")),
-    "expected the KV-blind deepseek4 advisory, got {warnings:?}"
-  );
 
-  // Reaches Ready via the alias body probe (the fixture delays its bind, so
-  // this exercises the load-before-listen window).
+  // Reaches Ready via the `/v1/models` alias body probe.
   let row = wait_ready(&mut client).await;
   assert_eq!(
     row_state(&row),
     "ready",
     "ds4 model must reach Ready (row: {row})"
+  );
+  // The status row reports the honest resolved backend (F5): this launch
+  // dispatched to ds4, so a running-row consumer keys on the real backend.
+  assert_eq!(
+    row.get("backend").and_then(Value::as_str),
+    Some("ds4"),
+    "running row must report the resolved ds4 backend (row: {row})"
   );
 
   // The running port answers `/v1/models` with the ds4 alias — proof the
@@ -248,4 +240,133 @@ async fn ds4_compatible_model_falls_back_to_llamacpp_when_ds4_unavailable() {
     .ok();
   client.call("shutdown", None).await.ok();
   let _ = tokio::time::timeout(Duration::from_secs(5), daemon).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_pro_half_file_is_refused_pre_spawn() {
+  let state = unique_temp("split");
+  let model_dir = unique_temp("split-models");
+  // A ds4-compatible GGUF named as one half of the PRO distributed pair.
+  let model_path = model_dir.join("DeepSeek-V4-Pro-Q4K-Layers00-30.gguf");
+  std::fs::write(&model_path, ds4_gguf_bytes()).unwrap();
+
+  let opts = DaemonOptions {
+    binary: Some(fake_llama_binary()),
+    port_range: allocate_port_range(),
+    ds4: Ds4Config {
+      enabled: Some(true),
+      binary: Some(fake_ds4_binary()),
+    },
+    ..DaemonOptions::rooted_at(state.clone())
+  };
+  let socket = opts.state_dir.clone();
+  let daemon = tokio::spawn(async move { run_foreground(opts).await });
+  wait_for_socket(&socket).await;
+  let mut client = Client::connect(&socket).await.expect("connect");
+
+  // No `--backend` (Auto) → the split-half guard refuses pre-spawn, naming
+  // distributed mode. This is the one surviving ds4 pre-spawn refusal.
+  let err = client
+    .call(
+      "start_model",
+      Some(json!({ "model_path": model_path.to_string_lossy() })),
+    )
+    .await
+    .expect_err("split-half launch must be refused");
+  let msg = format!("{err}");
+  assert!(
+    msg.contains("distributed") || msg.contains("half"),
+    "refusal must name ds4 distributed mode; got {msg}"
+  );
+
+  client.call("shutdown", None).await.ok();
+  let _ = tokio::time::timeout(Duration::from_secs(5), daemon).await;
+}
+
+/// Spawn the `fake_ds4_server` fixture directly (not via the daemon) so its
+/// two headline behaviours — load-before-listen (`--load-delay-ms`) and a
+/// configurable alias (`--alias`) — are actually exercised, together with the
+/// readiness probe's `deepseek-v4-` prefix match (F6 forward-compat).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_tolerates_future_alias_and_load_before_listen() {
+  use llamastash::daemon::probe::{poll_until_ready_model_id, ProbeOptions, ProbeOutcome};
+
+  let port = {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+  };
+  // Advertise a *future* variant id and delay the bind by 400 ms — the port
+  // refuses connections during the "load" window, then answers with the
+  // alias, exactly like the real ds4-server.
+  let mut child = std::process::Command::new(fake_ds4_binary())
+    .args([
+      "--host",
+      "127.0.0.1",
+      "--port",
+      &port.to_string(),
+      "--alias",
+      "deepseek-v4-turbo",
+      "--load-delay-ms",
+      "400",
+    ])
+    .spawn()
+    .expect("spawn fake_ds4_server");
+
+  // The prefix `deepseek-v4-` is what the ds4 readiness contract polls on.
+  let opts = ProbeOptions {
+    interval: Duration::from_millis(50),
+    timeout: Duration::from_secs(10),
+  };
+  let outcome =
+    poll_until_ready_model_id(port, opts, "/v1/models", 200, &["deepseek-v4-".to_string()]).await;
+  assert_eq!(
+    outcome,
+    ProbeOutcome::Ready,
+    "a `deepseek-v4-turbo` server behind a load delay must still reach Ready"
+  );
+
+  let _ = child.kill();
+  let _ = child.wait();
+}
+
+/// A foreign server that grabbed the reserved port (wrong `/v1/models` id)
+/// must never satisfy readiness — the alias-body gate keeps polling until the
+/// timeout, so a bare 200 can't be mistaken for the real backend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn readiness_rejects_foreign_alias_on_the_port() {
+  use llamastash::daemon::probe::{poll_until_ready_model_id, ProbeOptions, ProbeOutcome};
+
+  let port = {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    let p = l.local_addr().unwrap().port();
+    drop(l);
+    p
+  };
+  let mut child = std::process::Command::new(fake_ds4_binary())
+    .args([
+      "--host",
+      "127.0.0.1",
+      "--port",
+      &port.to_string(),
+      "--alias",
+      "some-other-model",
+    ])
+    .spawn()
+    .expect("spawn fake_ds4_server");
+
+  let opts = ProbeOptions {
+    interval: Duration::from_millis(40),
+    timeout: Duration::from_millis(600),
+  };
+  let outcome =
+    poll_until_ready_model_id(port, opts, "/v1/models", 200, &["deepseek-v4-".to_string()]).await;
+  assert!(
+    matches!(outcome, ProbeOutcome::Timeout { .. }),
+    "a foreign 200 (non-ds4 alias) must not satisfy readiness; got {outcome:?}"
+  );
+
+  let _ = child.kill();
+  let _ = child.wait();
 }

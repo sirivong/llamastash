@@ -736,6 +736,8 @@ struct PresetsSaveParams {
   #[serde(default)]
   knobs: crate::config::TypedKnobs,
   #[serde(default)]
+  backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
+  #[serde(default)]
   extras: Vec<String>,
 }
 
@@ -762,6 +764,9 @@ async fn presets_save_handler(
   lp.ctx = parsed.ctx;
   lp.reasoning = parsed.reasoning.unwrap_or(false);
   lp.knobs = parsed.knobs;
+  // Carry the native (ds4) knobs into the preset — a ds4 launch's `--power` /
+  // `--ssd-streaming` are save-able, not just apply-able.
+  lp.backend_knobs = parsed.backend_knobs;
   lp.extras = parsed.extras.into_iter().map(OsString::from).collect();
   let body = preset_body_from_launch_params(&lp);
 
@@ -1093,6 +1098,7 @@ mod tests {
         split_siblings: Vec::new(),
         display_label: None,
         multimodal: None,
+        ds4_compatible: false,
       })
       .await;
 
@@ -1206,6 +1212,7 @@ mod tests {
       pid: 0,
       port,
       started_at: 0,
+      resolved_backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
       params: LaunchParams::new(
         PathBuf::from(format!("lemonade://{name}")),
         LaunchMode::Chat,

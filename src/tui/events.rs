@@ -135,6 +135,7 @@ pub struct SavePresetCmd {
   pub model_path: PathBuf,
   pub name: String,
   pub knobs: crate::config::TypedKnobs,
+  pub backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
   pub extras: Vec<String>,
 }
 
@@ -1468,6 +1469,7 @@ fn commit_save_preset(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) {
       model_path: dialog.model_path,
       name: name.clone(),
       knobs: dialog.knobs,
+      backend_knobs: dialog.backend_knobs,
       extras: dialog.extras,
     })),
     format!("saved preset `{name}`"),
@@ -1906,7 +1908,9 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
     extras,
     mode,
     prefer_port: picker.prefer_port,
-    backend: picker.model_backend,
+    // Scoping value, not a user override: a ds4 scope sends `Auto` so the
+    // daemon routes (and the split-half guard fires). See `launch_backend`.
+    backend: picker.launch_backend(),
     selection,
     backend_knobs: picker.backend_knobs.clone(),
   });
@@ -2238,7 +2242,8 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
           // Drives daemon default-preset + last_params inheritance.
           "selection": selection,
           // Per-backend native knobs; omitted-when-empty on the daemon side
-          // via `#[serde(default)]`. Empty for every shipping backend.
+          // via `#[serde(default)]`. Populated for ds4 (six tunables), empty
+          // for llama.cpp / Lemonade.
           "backend_knobs": backend_knobs,
         }),
       )
@@ -2265,6 +2270,7 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
         "model_path": cmd.model_path,
         "name": cmd.name,
         "knobs": cmd.knobs,
+        "backend_knobs": cmd.backend_knobs,
         "extras": cmd.extras,
       }),
     ),
@@ -3358,6 +3364,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     app.list_cursor = 2;
     let original_focus = app.focus;
@@ -3546,6 +3553,7 @@ mod tests {
         split_siblings: Vec::new(),
         display_label: None,
         multimodal: None,
+        ds4_compatible: false,
       })
       .collect();
     app.focus = Focus::List;
@@ -3736,6 +3744,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     app.go_top();
     // Open picker and tweak ctx + reasoning so we can assert they
@@ -3802,6 +3811,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }];
     app.go_top();
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
@@ -3851,6 +3861,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
     }
   }
 

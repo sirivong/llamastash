@@ -402,6 +402,8 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 
 ## ds4 backend
 
+> **⚠️ Experimental.** ds4 support is new and lightly road-tested (validated on a single Strix Halo / ROCm host). Its behaviour, config keys, and defaults may change between releases. llama.cpp is the stable default and runs DeepSeek-V4 too, so ds4 is never required — if anything here misbehaves, force llama.cpp with `--backend llamacpp` or `ds4.enabled: false`.
+
 [ds4](https://github.com/antirez/ds4) (antirez's DwarfStar) is a third backend: a direct, process-per-model engine that runs the `ds4-server` binary for the DeepSeek-V4 Flash/PRO GGUFs at [huggingface.co/antirez/deepseek-v4-gguf](https://huggingface.co/antirez/deepseek-v4-gguf). It is the purpose-built engine for those files (disk KV cache, SSD streaming); llama.cpp also runs DeepSeek-V4, so ds4 is preferred, never required.
 
 **You supply the binary.** LlamaStash does not install ds4-server — build it from the repo (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and either put `ds4-server` on `PATH` or point `ds4.binary` at it. ds4 is **default-on the moment the binary resolves**; it stays completely dormant when it doesn't (no discovery, no new JSON fields on other rows).
@@ -448,7 +450,7 @@ Any other ds4-server flag (`--kv-cache-*`, `--prefill-chunk`, …) rides the fre
 
 ### Oversized models and below-floor hardware
 
-The DeepSeek-V4 GGUFs are 81–300+ GB; the practical RAM floor is roughly 128 GB on CUDA/ROCm and 96 GB on Metal. On a box below the floor, full residency out-of-memories. LlamaStash handles this for you: when a ds4 launch's resident estimate (~1.25× the weights, covering the expert cache + KV) exceeds free memory, it **auto-enables `ssd_streaming`** before spawn and prints a one-line notice (`ds4 needs ~N GiB resident but only M is free — enabled SSD streaming`). ds4-server then streams weights from disk under a bounded cache instead of OOM-killing mid-load. Set the **`ssd_streaming` native knob** yourself to force streaming on, or `ssd_streaming: false` to force full residency and skip the auto-enable. The knob is also the one launch where the pre-spawn admission gate is skipped (the on-disk size no longer maps to memory demand); this bypass keys on the native knob only — an extras-spelled `--ssd-streaming` still hits the admission gate. Because DeepSeek-V4's KV-cache geometry is not modeled, every deepseek4 launch also prints a one-line "KV demand not modeled for deepseek4" advisory — watch your memory headroom on load.
+The DeepSeek-V4 GGUFs are 81–300+ GB; the practical RAM floor is roughly 128 GB on CUDA/ROCm and 96 GB on Metal. On a box below the floor, full residency out-of-memories. LlamaStash handles this for you: when a ds4 launch's resident estimate (~1.25× the weights, covering the expert cache + KV) exceeds free memory, it **auto-enables `ssd_streaming`** before spawn and prints a one-line notice (`ds4 needs ~N GiB resident but only M is free — enabled SSD streaming`). ds4-server then streams weights from disk under a bounded cache instead of OOM-killing mid-load. Set the **`ssd_streaming` native knob** yourself to force streaming on, or `ssd_streaming: false` to force full residency and skip the auto-enable. The knob is also the one launch where the pre-spawn admission gate is skipped (the on-disk size no longer maps to memory demand); this bypass keys on the native knob only — an extras-spelled `--ssd-streaming` still hits the admission gate. DeepSeek-V4's KV cache is modeled from the header (its two-tier compressed cache, ~0.5 GiB at 16k ctx and ~11 GiB at 1M for Flash), so the admission estimate is realistic at long context; the auto-streaming notice above is the memory signal to watch when residency is tight.
 
 ### Response model alias
 
@@ -466,7 +468,7 @@ The installable Agent Skills bundle for this flow lives under [`skills/llamastas
 
 The proxy resolves `body.model` against the same fuzzy matcher `llamastash start <ref>` uses, forwards the request byte-for-byte to the matching `llama-server` child, and streams the response back. If the named model isn't running, the proxy auto-starts it (replaying `last_params`, else `arch_defaults`). If the launch fails and another model is already Ready, the proxy falls back to it and stamps `x-llamastash-served-by` + `x-llamastash-fallback-reason: launch_failed` headers on the response. Substitution is observable; no extra round-trip is needed to discover what served the request. The full mechanism — coalesced launches, family-MRU fallback selection, scope boundaries — is documented in [`docs/plans/2026-05-21-001-feat-proxy-router-plan.md`](https://github.com/llamastash/llamastash/blob/main/docs/plans/2026-05-21-001-feat-proxy-router-plan.md).
 
-Routes served: `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`, and the Anthropic `/v1/messages` + `/v1/messages/count_tokens`.
+Routes served: `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank`, the OpenAI `/v1/responses` (+ `/v1/responses/input_tokens`), and the Anthropic `/v1/messages` + `/v1/messages/count_tokens`.
 
 ### Anthropic-shape clients (Claude Code)
 

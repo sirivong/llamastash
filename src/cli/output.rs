@@ -595,6 +595,8 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
       // Config-preset hint, mirrored byte-for-byte from IPC `status`.
       obj.insert("preset_count".into(), serde_json::json!(r.preset_count));
       obj.insert("default".into(), serde_json::json!(r.preset_default));
+      // Resolved backend, mirrored from IPC `status`.
+      obj.insert("backend".into(), serde_json::json!(r.backend));
       Value::Object(obj)
     })
     .collect();
@@ -1011,6 +1013,7 @@ mod tests {
         ctx_clamped: false,
         preset_count: 0,
         preset_default: None,
+        backend: None,
       }],
       external: vec![ExternalRow {
         pid: 999,
@@ -1118,6 +1121,7 @@ mod tests {
       ctx_clamped: false,
       preset_count: 0,
       preset_default: None,
+      backend: None,
     }
   }
 

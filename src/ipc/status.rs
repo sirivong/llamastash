@@ -51,6 +51,9 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
       "port": params.port,
       "reasoning": params.reasoning,
       "knobs": &params.knobs,
+      // Native (per-backend) knobs the launch dispatched with, so a client
+      // can reproduce a ds4 launch and the TUI can save them into a preset.
+      "backend_knobs": &params.backend_knobs,
       "extras": params
         .extras
         .iter()
@@ -60,10 +63,14 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
     let latest = model.latest_resource().await;
     let latest_rss_bytes = latest.as_ref().map(|r| r.rss_bytes);
     let latest_cpu_pct = latest.as_ref().map(|r| r.cpu_percent);
-    let actuals = running
-      .iter()
-      .find(|r| r.port == model.port())
-      .map(|r| r.actuals);
+    let running_snap = running.iter().find(|r| r.port == model.port());
+    let actuals = running_snap.map(|r| r.actuals);
+    // The backend this launch *resolved* to, stamped on the running snapshot
+    // at spawn — the honest signal (respects an explicit `--backend llamacpp`
+    // on a compatible file), not the `list_models` ds4 badge prediction.
+    let resolved_backend = running_snap
+      .map(|r| r.resolved_backend.clone())
+      .unwrap_or_else(|| "llamacpp".to_string());
     let resolved_ctx = actuals.and_then(|a| a.resolved_ctx);
     let ctx_clamped = actuals.map(|a| a.ctx_clamped).unwrap_or(false);
     let (preset_count, preset_default) = super::methods::preset_hint(
@@ -80,6 +87,10 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
       "ready_at": ready_at,
       "state": state_obj,
       "params": params_json,
+      // Backend this launch actually resolved to (`llamacpp` / `ds4` /
+      // `lemonade`) — the TUI keys its ds4 badge / knob panel on this, not on
+      // the routing prediction.
+      "backend": resolved_backend,
       "latest_rss_bytes": latest_rss_bytes,
       "latest_cpu_pct": latest_cpu_pct,
       // Resolved context window `--fit` chose; null until the
@@ -133,6 +144,7 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
         "port": running_snap.params.port,
         "reasoning": running_snap.params.reasoning,
         "knobs": &running_snap.params.knobs,
+        "backend_knobs": &running_snap.params.backend_knobs,
         "extras": running_snap.params.extras
           .iter()
           .map(|s| s.to_string_lossy().into_owned())
@@ -152,6 +164,7 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
         "ready_at": running_snap.started_at,
         "state": state_obj,
         "params": params_json,
+        "backend": running_snap.resolved_backend.clone(),
         // Resource readings stay on the umbrella's own row — mirroring
         // its RSS onto every resident model would double-count it.
         "latest_rss_bytes": Value::Null,
@@ -513,6 +526,7 @@ mod tests {
         LaunchMode::Chat,
       ),
       actuals: Default::default(),
+      resolved_backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
     }
   }
 

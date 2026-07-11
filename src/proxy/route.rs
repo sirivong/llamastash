@@ -347,6 +347,28 @@ pub(crate) async fn running_model_is_ds4(state: &Arc<ProxyState>, id: &ModelId) 
     .unwrap_or(false)
 }
 
+/// Whether auto-starting `row` would land on ds4 (D-ui scope). Used by the
+/// embeddings/rerank guard on the *not-running* path: a compatible model
+/// launched for a `/v1/embeddings` request would auto-start on ds4 in chat
+/// mode (the catalog mode hint), then forward into ds4-server's bare 404 after
+/// a multi-minute load — the guard refuses before that. True only when ds4 is
+/// available, the row is ds4-compatible, and its launch mode isn't
+/// embedding/rerank (those route to llama.cpp, which *can* serve them).
+pub(crate) async fn row_would_route_ds4(state: &Arc<ProxyState>, row: &CatalogRow) -> bool {
+  if !state.ctx.ds4_available() {
+    return false;
+  }
+  if matches!(row.mode_hint.as_deref(), Some("embedding") | Some("rerank")) {
+    return false;
+  }
+  let cat = state.ctx.catalog.snapshot().await;
+  cat
+    .iter()
+    .find(|m| same_path(&m.path, &row.path))
+    .map(|m| m.ds4_compatible)
+    .unwrap_or(false)
+}
+
 pub(crate) fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
   let path = m.path.to_string_lossy().into_owned();
   let parent = m.parent.to_string_lossy().into_owned();
@@ -679,6 +701,7 @@ mod tests {
       source: crate::discovery::ModelSource::HuggingFace,
       display_label: None,
       multimodal: None,
+      ds4_compatible: false,
       parse_error: None,
       split_siblings: vec![],
       metadata: Some(ModelMetadata {
@@ -704,6 +727,49 @@ mod tests {
       row.mode_hint.as_deref(),
       Some("embedding"),
       "proxy auto-start needs embedding hint to add --embeddings"
+    );
+  }
+
+  #[tokio::test]
+  async fn row_would_route_ds4_guards_compatible_chat_not_embedding() {
+    use crate::daemon::context::MethodContext;
+    use crate::daemon::shutdown::ShutdownToken;
+    use crate::discovery::ModelCatalog;
+
+    // ds4 available: any existing file satisfies `resolve_ds4_binary`.
+    let exe = std::env::current_exe().unwrap();
+    let ds4_cfg = crate::config::loader::Ds4Config {
+      enabled: Some(true),
+      binary: Some(exe),
+    };
+
+    // A ds4-compatible chat model → auto-start routes to ds4, so an
+    // embeddings/rerank request against it must be refused (F7).
+    let mut chat = discovered_with_mode(ModeHint::Chat);
+    chat.path = std::path::PathBuf::from("/m/deepseek.gguf");
+    chat.ds4_compatible = true;
+    let chat_row = catalog_row_from_discovered(&chat);
+
+    // A compatible-but-embedding-hint model routes to llama.cpp (which *can*
+    // serve embeddings), so it must NOT be guarded.
+    let mut embed = discovered_with_mode(ModeHint::Embedding);
+    embed.path = std::path::PathBuf::from("/m/embed.gguf");
+    embed.ds4_compatible = true;
+    let embed_row = catalog_row_from_discovered(&embed);
+
+    let catalog = ModelCatalog::new();
+    catalog.upsert(chat).await;
+    catalog.upsert(embed).await;
+    let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_ds4(ds4_cfg, false);
+    let state = crate::proxy::state::ProxyState::from_context(&ctx, false, true);
+
+    assert!(
+      super::row_would_route_ds4(&state, &chat_row).await,
+      "compatible chat model would auto-start on ds4 → guard fires"
+    );
+    assert!(
+      !super::row_would_route_ds4(&state, &embed_row).await,
+      "embedding-hint model routes to llama.cpp → not guarded"
     );
   }
 

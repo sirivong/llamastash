@@ -173,6 +173,17 @@ pub struct RunningSnapshot {
   /// the fetch lands. `#[serde(default)]` keeps older rows loading.
   #[serde(default)]
   pub actuals: crate::daemon::actuals::Actuals,
+  /// The backend id this launch *resolved* to (`llamacpp` / `lemonade` /
+  /// `ds4`). Stamped at spawn (unlike `last_params.resolved_backend`, which
+  /// waits for Ready), so `status` can report the *real* backend on a Loading
+  /// row and the orphan sweep can dispatch adoption on it instead of a
+  /// fragile process-name match. Same `default`/`skip_serializing_if` as the
+  /// `last_params` tag, so a llama.cpp row stays byte-stable.
+  #[serde(
+    default = "default_resolved_backend",
+    skip_serializing_if = "is_default_backend"
+  )]
+  pub resolved_backend: String,
 }
 
 impl RunningSnapshot {
@@ -330,6 +341,7 @@ mod tests {
       started_at: 1_700_000_000,
       params: fake_params("/m/a.gguf"),
       actuals: Default::default(),
+      resolved_backend: "llamacpp".to_string(),
     });
 
     save(&dir, &s).expect("save");
@@ -582,6 +594,7 @@ mod tests {
       started_at: 1_700_000_001,
       params: fake_params("/unused"),
       actuals: Default::default(),
+      resolved_backend: "llamacpp".to_string(),
     });
 
     save(&dir, &s).expect("save");

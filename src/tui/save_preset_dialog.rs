@@ -43,6 +43,10 @@ pub struct SavePresetDialog {
   pub model_name: String,
   /// Captured launch knobs (ctx/reasoning folded in; Auto preserved).
   pub knobs: TypedKnobs,
+  /// Captured native (per-backend) knobs — the six ds4 tunables when the
+  /// captured launch is ds4-backed, so the preset stores them too. Empty for
+  /// llama.cpp / Lemonade launches.
+  pub backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
   /// Captured extras argv tail.
   pub extras: Vec<String>,
   /// The model's own (per-model) preset names — a save under one of these
@@ -60,10 +64,12 @@ pub struct SavePresetDialog {
 
 impl SavePresetDialog {
   /// Open the dialog at the name stage with the input ready for typing.
+  #[allow(clippy::too_many_arguments)] // capture surface is inherently wide
   pub fn open(
     model_path: PathBuf,
     model_name: String,
     knobs: TypedKnobs,
+    backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
     extras: Vec<String>,
     existing: Vec<String>,
     arch_shadow: Vec<String>,
@@ -74,6 +80,7 @@ impl SavePresetDialog {
       model_path,
       model_name,
       knobs,
+      backend_knobs,
       extras,
       existing,
       arch_shadow,
@@ -248,6 +255,7 @@ mod tests {
       PathBuf::from("/m/a.gguf"),
       "a.gguf".into(),
       TypedKnobs::default(),
+      std::collections::BTreeMap::new(),
       Vec::new(),
       existing.iter().map(|s| s.to_string()).collect(),
       arch_shadow.iter().map(|s| s.to_string()).collect(),

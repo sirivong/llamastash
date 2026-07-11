@@ -99,6 +99,7 @@ fn discovered(path: &Path, display_label: Option<&str>, arch: Option<&str>) -> D
     split_siblings: Vec::new(),
     display_label: display_label.map(str::to_string),
     multimodal: None,
+    ds4_compatible: false,
   }
 }
 

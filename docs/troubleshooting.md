@@ -214,8 +214,8 @@ Once the underlying launch issue is fixed, the fallback path stops firing. To tu
 
 **Symptom:** after running a newer LlamaStash that launched a ds4 model and then reverting to an older binary, the daemon quarantines `state.json` as `state.json.broken-<ts>` and boots with defaults.
 
-**This is expected pre-release.** The ds4 work added a `resolved_backend` tag on last-params rows and a `"ds4"` backend value the older binary's state schema doesn't understand, so it rejects the file rather than misreading it. LlamaStash keeps no backward-compatibility guarantees before the first stable release. Favorites / last-params / the running snapshot reset for that boot; named presets live in `config.yaml` and survive. Don't hop between old and new binaries against one state dir.
+**This is expected pre-release.** The ds4 work added a `resolved_backend` tag on last-params **and running-snapshot** rows and a `"ds4"` backend value the older binary's state schema doesn't understand, so it rejects the file rather than misreading it. LlamaStash keeps no backward-compatibility guarantees before the first stable release. Favorites / last-params / the running snapshot reset for that boot; named presets live in `config.yaml` and survive. Don't hop between old and new binaries against one state dir.
 
-## HuggingFace pull does nothing
+## HuggingFace pull
 
-**This is intentional.** The in-app HF pull worker is deferred to v2 (R46). The `pull` subcommand is hidden from `--help` and exits unimplemented. Use `huggingface-cli download ...` for now; llamastash discovers the downloaded files via its cache scanner.
+`llamastash pull <owner/repo[:filename.gguf]>` downloads a GGUF into the HuggingFace cache layout the scanner already reads, so the model shows up in `list` / the TUI right after. The TUI's `d` HuggingFace dialog is the interactive face of the same worker. If a download stalls, check network / egress and that the repo + filename resolve on huggingface.co; a failed pull exits `69` (`PULL_FAILED`). The per-file cap is 512 GiB (raised for ds4's single-file DeepSeek-V4 GGUFs).
