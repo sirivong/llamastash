@@ -1,7 +1,7 @@
 ---
 title: "feat: ds4 (DwarfStar) direct backend for DeepSeek V4 GGUFs"
 type: feat
-status: active
+status: completed
 date: 2026-07-10
 origin: docs/brainstorms/2026-06-08-multi-backend-abstraction-requirements.md
 ---
