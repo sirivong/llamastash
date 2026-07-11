@@ -107,12 +107,13 @@ pub struct Config {
   /// from the top-level config which tolerates unknown keys for
   /// forward-compat.
   pub proxy: ProxyConfig,
-  /// Lemonade (NPU / multi-engine) managed-multiplexer backend. **Opt-in:**
-  /// disabled by default, so a standard install never runs Lemonade
-  /// discovery or offers the backend. Enable via `lemonade.enabled: true`,
-  /// the `--lemonade` daemon flag, or `LLAMASTASH_LEMONADE=1` (any of the
-  /// three wins — see `cli::daemon::compose_daemon_options`). llamastash
-  /// never installs `lemond`; the user sets it up and points us at it.
+  /// Lemonade (NPU / multi-engine) managed-multiplexer backend. **Default-on
+  /// when the binary is found:** if `lemond` is on `PATH` (or `lemonade.binary`
+  /// points at it) the backend is enabled unless `lemonade.enabled: false`. The
+  /// `--lemonade` daemon flag / `LLAMASTASH_LEMONADE=1` force-enable regardless
+  /// (see `cli::daemon::compose_daemon_options`). Zero footprint when the binary
+  /// is absent — no discovery, no umbrella. llamastash never installs `lemond`;
+  /// the user sets it up and points us at it. Mirrors ds4's on-when-found gate.
   pub lemonade: LemonadeConfig,
   /// ds4 (DwarfStar) direct backend for DeepSeek V4 GGUFs. **Default-on when
   /// the binary is found:** if `ds4-server` is on `PATH` (or `ds4.binary`
@@ -362,8 +363,10 @@ impl Default for ProxyConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct LemonadeConfig {
+  /// Tri-state enablement, mirroring [`Ds4Config::enabled`]: unset =
+  /// auto/on-when-`lemond`-found, `false` = force off, `true` = force on.
   #[serde(default)]
-  pub enabled: bool,
+  pub enabled: Option<bool>,
   #[serde(default)]
   pub binary: Option<PathBuf>,
   /// Loopback port the `lemond` umbrella binds and that discovery probes
@@ -377,12 +380,21 @@ impl LemonadeConfig {
   pub fn default_port() -> u16 {
     13305
   }
+
+  /// Whether the user *intends* Lemonade enabled, given the force flag
+  /// (`--lemonade` / `LLAMASTASH_LEMONADE`). Actual activation still requires
+  /// the `lemond` binary to resolve — this only encodes intent (default-on
+  /// unless explicitly `enabled: false`, which the force flag overrides).
+  /// Mirrors [`Ds4Config::intends_enabled`].
+  pub fn intends_enabled(&self, force: bool) -> bool {
+    force || self.enabled != Some(false)
+  }
 }
 
 impl Default for LemonadeConfig {
   fn default() -> Self {
     Self {
-      enabled: false,
+      enabled: None,
       binary: None,
       port: Self::default_port(),
     }
@@ -1915,9 +1927,9 @@ proxy:
     fs::write(&path, "{}\n").expect("write failed");
     let loaded = load_config_from_path(&path);
     assert!(loaded.warning.is_none());
-    assert!(
-      !loaded.config.lemonade.enabled,
-      "lemonade backend is opt-in (off unless enabled)"
+    assert_eq!(
+      loaded.config.lemonade.enabled, None,
+      "lemonade `enabled` defaults to unset (on-when-found intent, like ds4)"
     );
     assert!(loaded.config.lemonade.binary.is_none());
     assert_eq!(loaded.config.lemonade.port, 13305);
@@ -1933,7 +1945,7 @@ proxy:
     .expect("write failed");
     let on_loaded = load_config_from_path(&on_path);
     assert!(on_loaded.warning.is_none());
-    assert!(on_loaded.config.lemonade.enabled);
+    assert_eq!(on_loaded.config.lemonade.enabled, Some(true));
     assert_eq!(
       on_loaded.config.lemonade.binary.as_deref(),
       Some(std::path::Path::new("/opt/lemonade/lemond"))
@@ -1983,7 +1995,7 @@ proxy:
     // that an empty doc parsed): defaults the example pins explicitly.
     assert!(loaded.config.proxy.enabled);
     assert!(!loaded.config.proxy.insecure_no_auth);
-    assert!(!loaded.config.lemonade.enabled);
+    assert_eq!(loaded.config.lemonade.enabled, None);
     assert_eq!(loaded.config.lemonade.port, 13305);
   }
 

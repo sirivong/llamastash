@@ -9,8 +9,11 @@ AMD Ryzen AI / XDNA hardware, plus ROCm, ONNX, and others.
 > Expect rough edges; behaviour, config keys, and the discovery/routing
 > surface may change without notice. llama.cpp remains the stable default.
 
-It is **opt-in and off by default**. A standard install never contacts
-`lemond`. llama.cpp stays the direct, zero-overhead default.
+It is **default-on when the `lemond` binary resolves** (mirroring ds4): if
+`lemond` is on your `PATH`, or `lemonade.binary` points at it, LlamaStash
+auto-enables the backend unless you set `lemonade.enabled: false`. When no
+`lemond` is found it stays completely dormant — no discovery, no umbrella.
+llama.cpp stays the direct, zero-overhead default.
 
 > **LlamaStash does not install Lemonade.** You set up Lemonade and its
 > engines yourself; LlamaStash finds the `lemond` binary, supervises it, and
@@ -42,13 +45,18 @@ leaving your own copy bound to the same port would block it.
 
 ## 2. Point LlamaStash at it
 
-Enable the backend with any **one** of these (they OR together):
+If `lemond` is already on your `PATH`, LlamaStash finds it and **auto-enables**
+Lemonade — nothing to configure. Point at an off-PATH binary, force enablement
+over a config `enabled: false`, or opt out entirely with:
 
 - **Config** — in `config.yaml`:
 
   ```yaml
   lemonade:
-    enabled: true
+    # Tri-state, like ds4: leave unset for the default (auto: on whenever
+    # `lemond` resolves), `true` to force on, `false` to force off even when
+    # the binary is present.
+    # enabled: true
     # Optional: explicit *absolute* path to the lemond binary. If omitted,
     # LlamaStash looks for `lemond` (or `lemonade`) on your PATH. lemond
     # keeps its config.json + model data in its own default cache dir
@@ -58,8 +66,8 @@ Enable the backend with any **one** of these (they OR together):
     port: 13305
   ```
 
-- **Daemon flag** — `llamastash daemon start --lemonade`
-- **Env var** — `LLAMASTASH_LEMONADE=1`
+- **Daemon flag** — `llamastash daemon start --lemonade` (force on)
+- **Env var** — `LLAMASTASH_LEMONADE=1` (force on)
 
 `binary` resolution: the explicit `lemonade.binary` path if set (and it exists),
 otherwise `lemond` / `lemonade` on `PATH`. The same resolution drives the

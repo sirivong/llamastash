@@ -421,7 +421,7 @@ mod tests {
     // Explicit binary that exists resolves to its canonical path.
     let this_exe = std::env::current_exe().expect("current exe");
     let cfg = LemonadeConfig {
-      enabled: true,
+      enabled: Some(true),
       binary: Some(this_exe.clone()),
       port: 13305,
     };
@@ -431,7 +431,7 @@ mod tests {
     // Explicit binary that does NOT exist resolves to None (we never fall
     // back to PATH when the user named a specific file).
     let cfg_missing = LemonadeConfig {
-      enabled: true,
+      enabled: Some(true),
       binary: Some(PathBuf::from("/nonexistent/lemond-xyz")),
       port: 13305,
     };

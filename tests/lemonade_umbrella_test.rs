@@ -193,11 +193,14 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
   let ctx = MethodContext::new(ShutdownToken::new())
     .with_supervisors(registry.clone())
     .with_launch_env(env)
-    .with_lemonade(LemonadeConfig {
-      enabled: true,
-      binary: Some(fake_lemond_binary()),
-      port,
-    });
+    .with_lemonade(
+      LemonadeConfig {
+        enabled: Some(true),
+        binary: Some(fake_lemond_binary()),
+        port,
+      },
+      false,
+    );
 
   let row_state = |body: &serde_json::Value, name: &str| -> Option<(String, Option<String>)> {
     body["models"].as_array().and_then(|models| {

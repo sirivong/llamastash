@@ -112,12 +112,17 @@ pub struct DaemonOptions {
   /// unprivileged port and is best-effort (bind failure is
   /// non-fatal).
   pub proxy: ProxyConfig,
-  /// Lemonade backend config (opt-in enable + the user's `lemond` path +
-  /// port). Sourced from the `[lemonade]` section, OR-ed with the
-  /// `--lemonade` flag / `LLAMASTASH_LEMONADE` env. When `lemonade.enabled`
-  /// is false (the default) the daemon never runs Lemonade discovery,
-  /// supervises the umbrella, or routes to it.
+  /// Lemonade backend config (`lemonade.binary` + the `enabled` tri-state +
+  /// port). Sourced from the `[lemonade]` section. **Default-on when the
+  /// `lemond` binary resolves** unless `lemonade.enabled: false`; the
+  /// `--lemonade` flag / `LLAMASTASH_LEMONADE` env force it on (captured in
+  /// [`Self::lemonade_force`]). Gate activation through [`Self::lemonade_available`].
   pub lemonade: LemonadeConfig,
+  /// Whether `--lemonade` / `LLAMASTASH_LEMONADE` force-enabled Lemonade for
+  /// this run. Kept separate from the config so the detached re-exec can
+  /// re-append `--lemonade` to the child argv (env/flag don't survive detach;
+  /// config does). Mirrors [`Self::ds4_force`].
+  pub lemonade_force: bool,
   /// ds4 (DwarfStar) backend config (`ds4.binary` + the `enabled` tri-state).
   /// Sourced from the `[ds4]` section. **Default-on when the binary
   /// resolves** unless `ds4.enabled: false`; the `--ds4` flag /
@@ -167,6 +172,16 @@ pub struct DaemonOptions {
 }
 
 impl DaemonOptions {
+  /// Whether Lemonade activates at boot: enablement intent (the config
+  /// tri-state, or the `--lemonade`/env force) **and** the `lemond` binary
+  /// resolves. Mirrors ds4's on-when-found gate — a `lemond` on `PATH`
+  /// auto-enables Lemonade unless `lemonade.enabled: false`; absent binary =
+  /// zero footprint. Discovery / umbrella / re-exec all gate on this.
+  pub fn lemonade_available(&self) -> bool {
+    self.lemonade.intends_enabled(self.lemonade_force)
+      && crate::backend::lemonade::resolve_lemond_binary(&self.lemonade).is_some()
+  }
+
   /// Test/utility helper: pin every path under one root directory.
   /// Production callers should prefer `from_defaults` plus the CLI's
   /// `build_options` flow, which threads config-driven overrides
@@ -192,7 +207,14 @@ impl DaemonOptions {
       // from the test's standpoint. Tests that *do* want the proxy
       // off can flip `enabled` after construction.
       proxy: ProxyConfig::default(),
-      lemonade: LemonadeConfig::default(),
+      // Lemonade defaults **off** for test daemons: the on-when-found gate
+      // would otherwise pick up a host `lemond` and make model counts /
+      // backend rows non-deterministic. Tests that want it set it explicitly.
+      lemonade: LemonadeConfig {
+        enabled: Some(false),
+        ..LemonadeConfig::default()
+      },
+      lemonade_force: false,
       ds4: Ds4Config::default(),
       ds4_force: false,
       // Port `0` makes every test pick an ephemeral free slot — no
@@ -233,6 +255,7 @@ impl DaemonOptions {
       propagated_cli_args: Vec::new(),
       proxy: ProxyConfig::default(),
       lemonade: LemonadeConfig::default(),
+      lemonade_force: false,
       ds4: Ds4Config::default(),
       ds4_force: false,
       control_plane_port: control_plane::DEFAULT_CONTROL_PORT,
@@ -292,7 +315,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // Lemonade discovery is opt-in and off by default, so a standard install
   // never contacts `lemond`. Only an enabled backend threads its port in.
   let mut discovery_opts = opts.discovery.clone();
-  if opts.lemonade.enabled {
+  if opts.lemonade_available() {
     discovery_opts.lemonade_port = Some(opts.lemonade.port);
   }
   let _discovery = discovery_task::spawn(catalog.clone(), discovery_opts);
@@ -420,7 +443,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     .with_presets(preset_store)
     .with_external(external_combined)
     .with_proxy_status(std::sync::Arc::clone(&proxy_status_cell))
-    .with_lemonade(opts.lemonade.clone())
+    .with_lemonade(opts.lemonade.clone(), opts.lemonade_force)
     .with_ds4(opts.ds4.clone(), opts.ds4_force);
   if let Some(binary) = opts.binary.clone() {
     if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
@@ -495,7 +518,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // `lemond` binary is a clean warning, never a daemon-start failure —
   // llamastash never installs it. The `start_model` path's `ensure_umbrella`
   // is idempotent, so it reuses this umbrella rather than spawning a second.
-  if opts.lemonade.enabled {
+  if opts.lemonade_available() {
     match crate::backend::lemonade::resolve_lemond_binary(&opts.lemonade) {
       Some(binary) => {
         let port = opts.lemonade.port;
@@ -918,7 +941,7 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   // Carry the opt-in Lemonade enable through the re-exec so a
   // `daemon start --lemonade` (detached) keeps the backend on in the child.
   // The env var alone isn't reliable across a detached re-exec.
-  if opts.lemonade.enabled {
+  if opts.lemonade_force {
     cmd.arg("--lemonade");
   }
   // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config
@@ -1049,7 +1072,7 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   // Carry the opt-in Lemonade enable through the re-exec so a
   // `daemon start --lemonade` (detached) keeps the backend on in the child.
   // The env var alone isn't reliable across a detached re-exec.
-  if opts.lemonade.enabled {
+  if opts.lemonade_force {
     cmd.arg("--lemonade");
   }
   // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config

@@ -320,7 +320,7 @@ async fn backends_status(ctx: &MethodContext) -> Value {
   // configured port was already taken at boot — this reads `not running`, which
   // is the only visible signal outside the daemon log.
   if let Some(obj) = lemonade_row.as_object_mut() {
-    obj.insert("enabled".into(), json!(ctx.lemonade.enabled));
+    obj.insert("enabled".into(), json!(ctx.lemonade_available()));
     obj.insert("umbrella".into(), json!(lemonade_umbrella_state(ctx).await));
   }
   // Each row carries its resolved `binary` path when one exists, so
@@ -370,7 +370,7 @@ fn set_backend_binary(row: &mut Value, binary: Option<String>) {
 /// boot-time port conflict).
 async fn lemonade_umbrella_state(ctx: &MethodContext) -> &'static str {
   use crate::daemon::supervisor::ManagedState;
-  if !ctx.lemonade.enabled {
+  if !ctx.lemonade_available() {
     return "disabled";
   }
   match ctx
@@ -801,9 +801,17 @@ mod tests {
 
   #[tokio::test]
   async fn lemonade_umbrella_state_is_disabled_when_backend_off() {
-    // With Lemonade disabled the umbrella state short-circuits to
-    // "disabled" without touching the supervisor registry.
-    let c = ctx();
+    // An explicit `enabled: false` forces Lemonade off (the default is now
+    // on-when-found), so the umbrella state short-circuits to "disabled"
+    // without touching the supervisor registry — regardless of whether a
+    // `lemond` happens to sit on PATH.
+    let c = ctx().with_lemonade(
+      crate::config::loader::LemonadeConfig {
+        enabled: Some(false),
+        ..Default::default()
+      },
+      false,
+    );
     assert_eq!(super::lemonade_umbrella_state(&c).await, "disabled");
   }
 }

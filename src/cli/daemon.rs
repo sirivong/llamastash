@@ -190,14 +190,20 @@ pub(crate) fn precheck_indicated_backends(opts: &DaemonOptions) -> std::result::
         .to_string(),
     );
   }
-  if opts.lemonade.enabled {
+  // Lemonade is flagged only when *explicitly* requested (`--lemonade` / env,
+  // or `lemonade.enabled: true`); the default-on-when-found path stays silent
+  // when `lemond` is simply absent (zero footprint, like ds4).
+  let lemonade_explicit = opts.lemonade_force || opts.lemonade.enabled == Some(true);
+  if opts.lemonade.intends_enabled(opts.lemonade_force) {
     if crate::backend::lemonade::resolve_lemond_binary(&opts.lemonade).is_none() {
-      failures.push(
-        "lemonade is enabled but no `lemond` binary was found — set `lemonade.binary` or put \
-         `lemond` on PATH (see docs/lemonade-setup.md), or `llamastash daemon start --force` to \
-         start without it."
-          .to_string(),
-      );
+      if lemonade_explicit {
+        failures.push(
+          "lemonade is enabled but no `lemond` binary was found — set `lemonade.binary` or put \
+           `lemond` on PATH (see docs/lemonade-setup.md), or `llamastash daemon start --force` to \
+           start without it."
+            .to_string(),
+        );
+      }
     } else if crate::backend::lemonade::umbrella_port_state(opts.lemonade.port)
       == crate::backend::lemonade::UmbrellaPortState::Listening
     {
@@ -680,14 +686,13 @@ pub(crate) fn build_options(
   if no_proxy_fallback_cli || env_no_fallback {
     opts.proxy.fallback_enabled = false;
   }
-  // Lemonade opt-in: OR of (config field, `--lemonade` CLI flag,
-  // `LLAMASTASH_LEMONADE` env var). Off unless one of the three turns it
-  // on — the default install never runs Lemonade discovery or routes to the
-  // umbrella. The user's `binary` path + `port` ride along from the config
-  // layer (llamastash never installs `lemond`).
+  // Lemonade: default-on when the `lemond` binary resolves (like ds4). The
+  // `[lemonade]` block rides through; `--lemonade` / `LLAMASTASH_LEMONADE`
+  // force it on over `enabled: false` (captured separately so the detached
+  // re-exec can re-append `--lemonade`). The user's `binary` path + `port`
+  // ride along from config (llamastash never installs `lemond`).
   opts.lemonade = config.lemonade.clone();
-  let env_lemonade = env_flag_truthy("LLAMASTASH_LEMONADE");
-  opts.lemonade.enabled = opts.lemonade.enabled || lemonade_cli || env_lemonade;
+  opts.lemonade_force = lemonade_cli || env_flag_truthy("LLAMASTASH_LEMONADE");
   // ds4: default-on when the binary resolves. The config `[ds4]` block rides
   // through; `--ds4` / `LLAMASTASH_DS4` force it on over `enabled: false`
   // (captured separately so the detached re-exec can re-append `--ds4`).
@@ -1741,36 +1746,49 @@ mod tests {
   }
 
   #[test]
-  fn build_options_lemonade_is_off_by_default_and_or_combines() {
+  fn build_options_lemonade_defaults_on_and_force_flag_captured() {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
-    // Default: off — a standard install never touches lemond.
+    // Default: enablement intent is on (default-on-when-found, like ds4), the
+    // config `enabled` stays unset, and no force flag is captured.
     let baseline = build_options(
       None, None, false, false, None, false, false, false, &cli, &config,
     )
     .expect("build_options baseline");
-    assert!(!baseline.lemonade.enabled);
+    assert_eq!(baseline.lemonade.enabled, None);
+    assert!(!baseline.lemonade_force);
+    assert!(baseline.lemonade.intends_enabled(baseline.lemonade_force));
 
-    // CLI flag forces it on (config off).
+    // CLI flag captured as force (overrides a config `enabled: false`).
     let opts_cli = build_options(
       None, None, false, false, None, false, true, false, &cli, &config,
     )
     .expect("build_options lemonade");
-    assert!(opts_cli.lemonade.enabled);
+    assert!(opts_cli.lemonade_force);
+    assert!(opts_cli.lemonade.intends_enabled(opts_cli.lemonade_force));
 
-    // Config-only on (CLI off) also enables.
-    let config_on = Config {
+    // Config `enabled: false` disables the intent (no force present).
+    let config_off = Config {
       lemonade: crate::config::loader::LemonadeConfig {
-        enabled: true,
+        enabled: Some(false),
         ..Default::default()
       },
       ..Config::default()
     };
-    let opts_config = build_options(
-      None, None, false, false, None, false, false, false, &cli, &config_on,
+    let opts_off = build_options(
+      None,
+      None,
+      false,
+      false,
+      None,
+      false,
+      false,
+      false,
+      &cli,
+      &config_off,
     )
-    .expect("build_options config-on");
-    assert!(opts_config.lemonade.enabled);
+    .expect("build_options config-off");
+    assert!(!opts_off.lemonade.intends_enabled(opts_off.lemonade_force));
   }
 
   #[test]

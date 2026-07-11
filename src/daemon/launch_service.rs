@@ -1569,11 +1569,14 @@ mod tests {
     let ctx = MethodContext::new(ShutdownToken::new())
       .with_supervisors(registry)
       .with_launch_env(env)
-      .with_lemonade(LemonadeConfig {
-        enabled: true,
-        binary: Some(PathBuf::from("/nonexistent/lemond-xyz")),
-        port: 13305,
-      });
+      .with_lemonade(
+        LemonadeConfig {
+          enabled: Some(true),
+          binary: Some(PathBuf::from("/nonexistent/lemond-xyz")),
+          port: 13305,
+        },
+        false,
+      );
 
     let parsed = StartParams {
       model_path,

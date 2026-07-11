@@ -11,6 +11,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - Context-length quick-picks extend to 1 Mi and are gated per model to its trained window — the ctx cycle never offers a context larger than the model supports (type a custom value for anything off the ladder).
 - A model's `default:` preset is now its standing launch config and **auto-applies** — on a plain `start <model>` (no `--preset`) and on proxy auto-start, not just as a TUI cycle hint. Resolved server-side as a new precedence layer (`your flags > default preset > last-used > arch defaults > fit`). `default: auto` launches pure fit; `start --preset auto` is the clean per-launch "ignore last-used + default" gesture. The TUI cycle drops the separate `[default]` stop, marks whichever stop is the default with `(default)` and opens on it, and the preset row shows the available count (`preset (N)`). See `docs/plans/2026-06-30-001-feat-default-preset-resolver-layer-plan.md`.
 
+### Changed
+
+- **Lemonade is now default-on when the `lemond` binary resolves** (matching ds4), instead of opt-in/off-by-default. If `lemond` is on `PATH` (or `lemonade.binary` points at it) the daemon runs Lemonade discovery + umbrella unless `lemonade.enabled: false`; `--lemonade` / `LLAMASTASH_LEMONADE=1` still force it on. Zero footprint when the binary is absent. `lemonade.enabled` is now tri-state (unset = auto / `true` = force on / `false` = force off).
+
 ### Fixed
 
 - deepseek4 KV cache is now modeled from the header (its two-tier compressed cache) instead of the naive per-head estimate, which over-counted ~8x at long context (~86 GiB vs the real ~11 GiB at 1M for Flash) and could spuriously refuse a launch. The "KV demand not modeled" advisory is dropped.

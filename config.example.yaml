@@ -375,27 +375,31 @@ proxy:
   # (Config field, CLI flag, and env are OR-ed — any one waives auth.)
   insecure_no_auth: false
 
-# ─── Lemonade (NPU / multi-engine backend) ────────────────────────
+# ─── Lemonade (NPU / multi-engine backend) [EXPERIMENTAL] ─────────
 #
-# Opt-in second backend for engines llama.cpp can't reach — NPU
-# inference on AMD Ryzen AI / XDNA, plus ROCm / ONNX / others — via
-# the Lemonade (`lemond`) managed umbrella. Experimental: behaviour
-# and these keys may change.
+# EXPERIMENTAL: behaviour and these keys may change. A second backend
+# for engines llama.cpp can't reach — NPU inference on AMD Ryzen AI /
+# XDNA, plus ROCm / ONNX / others — via the Lemonade (`lemond`) managed
+# umbrella.
 #
-# Off by default: a standard install never runs Lemonade discovery or
-# routes to the umbrella. llamastash never installs `lemond` — you set
-# Lemonade up yourself and point us at it (see docs/lemonade-setup.md).
+# Default-on when the `lemond` binary resolves (like ds4): if `lemond`
+# is on PATH (or `binary` below points at it) the daemon runs Lemonade
+# discovery + umbrella unless `enabled: false`. Zero footprint when the
+# binary is absent. llamastash never installs `lemond` — you set it up
+# yourself and point us at it (see docs/lemonade-setup.md).
 #
 # Unknown keys inside this block are rejected loudly (no
 # silently-tolerated typos).
 lemonade:
-  # Turn the backend on. When true the daemon runs Lemonade discovery,
-  # supervises the `lemond` umbrella, and routes matching models to it.
+  # Force the backend on or off. Tri-state — leave unset for the default
+  # (auto: on whenever `lemond` resolves), `true` to force on, `false`
+  # to force off even when the binary is present.
   #
-  # Sources — CLI: daemon start --lemonade ·
-  #           Env: LLAMASTASH_LEMONADE (1/true/yes/on).
-  # (Config field, CLI flag, and env are OR-ed — any one enables it.)
-  enabled: false
+  # Sources — CLI: daemon start --lemonade (force on) ·
+  #           Env: LLAMASTASH_LEMONADE=1 (force on).
+  # (The flag and env only force on; `false` here still wins as an
+  # explicit off.)
+  # enabled: true
 
   # Explicit path to the user's `lemond` binary. Comment out to fall
   # back to a `lemond` (or `lemonade`) found on `$PATH`.

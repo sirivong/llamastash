@@ -105,6 +105,9 @@ pub struct MethodContext {
   /// the right port, and `status` reads it for the `installed` signal.
   /// Defaults to disabled, so catalog-only tests never touch `lemond`.
   pub lemonade: LemonadeConfig,
+  /// Whether `--lemonade`/`LLAMASTASH_LEMONADE` force-enabled Lemonade (folds
+  /// into [`Self::lemonade_available`] alongside the config `enabled` tri-state).
+  pub lemonade_force: bool,
   /// ds4 (DwarfStar) backend config. `start_model` reads `binary` to resolve
   /// `ds4-server`; selection + `status` read `ds4_available()` for routing +
   /// the `installed` signal.
@@ -237,6 +240,7 @@ impl MethodContext {
       proxy_status: None,
       ipc_url: None,
       lemonade: LemonadeConfig::default(),
+      lemonade_force: false,
       ds4: crate::config::Ds4Config::default(),
       ds4_force: false,
       admission: Arc::new(crate::launch::admission::Ledger::default()),
@@ -313,11 +317,21 @@ impl MethodContext {
     self
   }
 
-  /// Builder helper: attach the opt-in Lemonade backend config so the
+  /// Builder helper: attach the Lemonade backend config + force flag so the
   /// `start_model` + `status` paths can resolve the `lemond` binary / port.
-  pub fn with_lemonade(mut self, lemonade: LemonadeConfig) -> Self {
+  pub fn with_lemonade(mut self, lemonade: LemonadeConfig, force: bool) -> Self {
     self.lemonade = lemonade;
+    self.lemonade_force = force;
     self
+  }
+
+  /// Whether Lemonade is **available** on this daemon: the user intends it
+  /// enabled (default-on unless `lemonade.enabled: false`, `--lemonade`/env
+  /// override) **and** the `lemond` binary resolves. Mirrors
+  /// [`Self::ds4_available`]; `status` reads it for the umbrella state.
+  pub fn lemonade_available(&self) -> bool {
+    self.lemonade.intends_enabled(self.lemonade_force)
+      && crate::backend::lemonade::resolve_lemond_binary(&self.lemonade).is_some()
   }
 
   /// Builder helper: attach the ds4 backend config + force flag so the
