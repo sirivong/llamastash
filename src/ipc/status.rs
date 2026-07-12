@@ -68,9 +68,17 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
     // The backend this launch *resolved* to, stamped on the running snapshot
     // at spawn — the honest signal (respects an explicit `--backend llamacpp`
     // on a compatible file), not the `list_models` ds4 badge prediction.
-    let resolved_backend = running_snap
-      .map(|r| r.resolved_backend.clone())
-      .unwrap_or_else(|| "llamacpp".to_string());
+    // The Lemonade umbrella row keys deterministically on the lemonade backend:
+    // it shares its port with every delegated model's snapshot, so matching by
+    // port picks an arbitrary snapshot (or the `llamacpp` fallback when none is
+    // resident) and the reported backend flip-flops between calls.
+    let resolved_backend = if launch_id == crate::backend::lemonade::umbrella_launch_id() {
+      crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string()
+    } else {
+      running_snap
+        .map(|r| r.resolved_backend.clone())
+        .unwrap_or_else(|| "llamacpp".to_string())
+    };
     let resolved_ctx = actuals.and_then(|a| a.resolved_ctx);
     let ctx_clamped = actuals.map(|a| a.ctx_clamped).unwrap_or(false);
     let (preset_count, preset_default) = super::methods::preset_hint(

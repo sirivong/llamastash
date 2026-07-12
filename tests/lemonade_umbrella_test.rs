@@ -404,11 +404,16 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
       .any(|m| m["launch_id"] == format!("lemonade:{name}")),
     "stopped delegated row must drop out of status"
   );
-  assert!(
-    models
-      .iter()
-      .any(|m| m["launch_id"] == umbrella_launch_id().as_str()),
-    "umbrella row must survive a delegated stop"
+  let umbrella_row = models
+    .iter()
+    .find(|m| m["launch_id"] == umbrella_launch_id().as_str())
+    .expect("umbrella row must survive a delegated stop");
+  // The umbrella is the lemonade backend — its reported backend must be stable
+  // `lemonade`, not inferred from an arbitrary snapshot sharing its port (which
+  // flip-flopped to `llamacpp` when no delegated model was resident).
+  assert_eq!(
+    umbrella_row["backend"], "lemonade",
+    "umbrella row backend must be deterministically lemonade"
   );
 
   // A second stop of the same id is an InvalidParams error (unknown row).
