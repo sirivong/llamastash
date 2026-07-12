@@ -1959,19 +1959,23 @@ fn dispatch_launch(
 /// Base `…/v1` URL a *copy-paste curl* should point at for the running model
 /// `m`.
 ///
-/// Prefers the **port-stable proxy** when it's listening: one origin that
-/// survives relaunches (the direct backend port is ephemeral), speaks `/v1/`
-/// for every backend (it translates to lemonade's `/api/v1/` internally), and
-/// routes by the model id — so the pasted command keeps working. Falls back to
-/// the model's direct backend port only when the proxy is off/unbound. The
-/// `u` (URL) yank deliberately keeps the raw backend port instead; only `c`
-/// (curl) routes through the proxy.
+/// Prefers the **port-stable proxy** when it's listening *and auth-free*: one
+/// origin that survives relaunches (the direct backend port is ephemeral),
+/// speaks `/v1/` for every backend (it translates to lemonade's `/api/v1/`
+/// internally), and routes by the model id. But an **auth-enforced** proxy
+/// would `401` a keyless pasted command, so in that case (or when the proxy is
+/// off) it falls back to the backend's own loopback port, which takes no auth
+/// and always answers. Either way the yanked command runs as-is. The `u` (URL)
+/// yank deliberately keeps the raw backend port; only `c` (curl) prefers the
+/// proxy.
 fn curl_base_url(app: &App, m: &crate::tui::app::ManagedRow) -> String {
   let proxy = app
     .daemon_info
     .proxy
     .as_ref()
-    .filter(|p| p.status == "listening")
+    // Only a listening, explicitly auth-free proxy is safe to paste keyless.
+    // `auth: None` (older daemon, unknown) is treated as not-safe.
+    .filter(|p| p.status == "listening" && p.auth.as_deref() == Some("none"))
     .and_then(|p| p.listen.as_deref());
   match proxy {
     Some(listen) => format!("http://{listen}/v1"),
@@ -4127,6 +4131,14 @@ mod tests {
     app.managed = vec![ready_managed_for_events("/m/qwen.gguf", 41100)];
     app.go_top();
 
+    let proxy = |status: &str, auth: &str| crate::tui::app::ProxyInfo {
+      enabled: true,
+      listen: Some("127.0.0.1:11435".to_string()),
+      status: status.to_string(),
+      bind_error: None,
+      auth: Some(auth.to_string()),
+    };
+
     // No proxy → curl falls back to the raw backend port.
     let curl_direct = super::build_yank_text(&app, Action::YankCurl).expect("curl");
     assert!(
@@ -4134,19 +4146,24 @@ mod tests {
       "curl fallback must hit the backend port: {curl_direct}"
     );
 
-    // Proxy listening → curl targets the port-stable proxy; url is unchanged.
-    app.daemon_info.proxy = Some(crate::tui::app::ProxyInfo {
-      enabled: true,
-      listen: Some("127.0.0.1:11435".to_string()),
-      status: "listening".to_string(),
-      bind_error: None,
-      auth: None,
-    });
+    // Listening + auth-free → curl targets the port-stable proxy.
+    app.daemon_info.proxy = Some(proxy("listening", "none"));
     let curl_proxied = super::build_yank_text(&app, Action::YankCurl).expect("curl");
     assert!(
       curl_proxied.contains("http://127.0.0.1:11435/v1/chat/completions"),
-      "curl must route through the proxy when it's listening: {curl_proxied}"
+      "curl must route through an auth-free proxy: {curl_proxied}"
     );
+
+    // Listening but AUTH ENFORCED → a keyless proxy curl would 401, so fall
+    // back to the backend port (which takes no auth).
+    app.daemon_info.proxy = Some(proxy("listening", "enforced"));
+    let curl_authed = super::build_yank_text(&app, Action::YankCurl).expect("curl");
+    assert!(
+      curl_authed.contains("http://127.0.0.1:41100/v1/chat/completions"),
+      "curl must avoid an auth-enforced proxy: {curl_authed}"
+    );
+
+    // url always keeps the raw backend port, regardless of proxy state.
     let url = super::build_yank_text(&app, Action::YankUrl).expect("url");
     assert_eq!(
       url, "http://127.0.0.1:41100/v1",
