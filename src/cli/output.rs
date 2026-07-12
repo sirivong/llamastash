@@ -51,8 +51,11 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
   let body: Vec<Vec<String>> = rows
     .iter()
     .map(|r| {
-      let arch = r.arch.as_deref().unwrap_or("?");
-      let quant = r.quant.as_deref().unwrap_or("?");
+      // Shared `list_cell` so a missing Arch/Quant reads as one placeholder
+      // (`?`), matching the TUI list — an unknown quant no longer leaks the
+      // literal `Unknown` while Arch shows `?`.
+      let arch = crate::tui::fmt::list_cell(r.arch.as_deref(), "?");
+      let quant = crate::tui::fmt::list_cell(r.quant.as_deref(), "?");
       let ctx = r
         .native_ctx
         .map(|n| n.to_string())
@@ -64,14 +67,7 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
       // split-shard aggregation). One `stat` per row is cheap.
       let size = display_size(r);
       let status = running_status_cell(running.get(&r.path));
-      vec![
-        r.name(),
-        arch.to_string(),
-        quant.to_string(),
-        ctx,
-        size,
-        status,
-      ]
+      vec![r.name(), arch, quant, ctx, size, status]
     })
     .collect();
   let mut out = format::table(&header, &body);

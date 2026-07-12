@@ -1005,15 +1005,19 @@ fn column_value(id: ColumnId, model: &ListRow) -> String {
     return String::new();
   };
   let dash = crate::tui::glyphs::active().placeholder();
+  // Every empty/unknown text cell renders the dash placeholder (shared
+  // `fmt::list_cell`), so missing values read the same in every column and on
+  // the CLI table instead of a mix of blank / `Unknown` / `unknown` (e.g. a
+  // registry-served Lemonade row with no GGUF header).
   match id {
-    ColumnId::Device => device.as_deref().unwrap_or(dash).to_string(),
-    ColumnId::Arch => arch.clone(),
-    ColumnId::Quant => quant.clone(),
+    ColumnId::Device => crate::tui::fmt::list_cell(device.as_deref(), dash),
+    ColumnId::Arch => crate::tui::fmt::list_cell(Some(arch), dash),
+    ColumnId::Quant => crate::tui::fmt::list_cell(Some(quant), dash),
     ColumnId::Ctx => native_ctx.map(format_tokens).unwrap_or_else(|| dash.into()),
     ColumnId::Size => weights_bytes
       .map(format_bytes)
       .unwrap_or_else(|| dash.into()),
-    ColumnId::Mode => mode_hint.clone(),
+    ColumnId::Mode => crate::tui::fmt::list_cell(Some(mode_hint), dash),
     ColumnId::Port => port.map(|p| format!(":{p}")).unwrap_or_else(|| dash.into()),
   }
 }

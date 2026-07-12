@@ -28,6 +28,19 @@ pub(crate) fn caret(palette: &Palette) -> Span<'static> {
   )
 }
 
+/// A model-list column cell (Arch / Quant / Mode / …): `value` when it's a
+/// real value, else `placeholder`. Treats an empty string and the `unknown`
+/// sentinels (`Quant::Unknown` → `"Unknown"`, `ModeHint::Unknown` → `"unknown"`)
+/// as missing, so a registry-served model with no GGUF header (Lemonade) reads
+/// with the same placeholder as any other absent column. Shared by the TUI list
+/// pane (`—`) and the CLI `list` table (`?`) so the two never drift.
+pub(crate) fn list_cell(value: Option<&str>, placeholder: &str) -> String {
+  match value {
+    Some(v) if !v.is_empty() && !v.eq_ignore_ascii_case("unknown") => v.to_string(),
+    _ => placeholder.to_string(),
+  }
+}
+
 /// Format a token count for the Ctx column / launch picker:
 /// `131072` → `128k`, `262144` → `256k`, `2_000_000` → `2.0M`.
 /// Sub-1024 values render as raw integers (e.g., `512`).
@@ -335,6 +348,18 @@ mod tests {
     let text: String = clipped.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(text, "ctx  32768");
     assert!(!text.contains('…'));
+  }
+
+  #[test]
+  fn list_cell_maps_empty_and_unknown_sentinels_to_placeholder() {
+    // Real values pass through.
+    assert_eq!(list_cell(Some("Q4_K"), "—"), "Q4_K");
+    assert_eq!(list_cell(Some("llama"), "?"), "llama");
+    // Empty, None, and the unknown sentinels (either case) → the placeholder.
+    assert_eq!(list_cell(Some(""), "—"), "—");
+    assert_eq!(list_cell(None, "—"), "—");
+    assert_eq!(list_cell(Some("Unknown"), "?"), "?"); // Quant::Unknown label
+    assert_eq!(list_cell(Some("unknown"), "?"), "?"); // ModeHint::Unknown label
   }
 
   #[test]
