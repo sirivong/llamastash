@@ -547,6 +547,11 @@ fn render_header_name(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
 /// always visible (paths have no whitespace, so ratatui's default
 /// word-wrap would just truncate them). Blank when nothing is focused.
 fn render_header_path(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
+  // Lemonade registry rows reserve zero height for the path (see
+  // `focused_path_line_count`); nothing to paint.
+  if focused_is_lemonade_registry(app) {
+    return;
+  }
   let Some(path) = focused_path(app) else {
     return;
   };
@@ -582,6 +587,17 @@ fn focused_path(app: &App) -> Option<std::path::PathBuf> {
     .right_pane_focus()
     .map(|m| m.path.clone())
     .or_else(|| app.focused_path())
+}
+
+/// Whether the focused row is a Lemonade registry model (synthetic
+/// `lemonade://<id>` path). Such rows have no real file on disk — the path is
+/// dead weight (it repeats the name + the ` lemonade ` badge), so the header
+/// drops the path row for them.
+fn focused_is_lemonade_registry(app: &App) -> bool {
+  match focused_path(app) {
+    Some(p) => crate::backend::lemonade::registry_name_from_path(&p).is_some(),
+    None => false,
+  }
 }
 
 /// A backend identity chip for the header row. Any backend that warrants header
@@ -635,6 +651,10 @@ fn focused_backend_badge(app: &App) -> Option<BackendBadge> {
 /// variable-height slot for the path row so the path wraps cleanly
 /// without pushing tab content off-screen on pathological paths.
 fn focused_path_line_count(app: &App, inner_width: u16) -> u16 {
+  // Lemonade registry models have no real file path — drop the row entirely.
+  if focused_is_lemonade_registry(app) {
+    return 0;
+  }
   let Some(path) = focused_path(app) else {
     return 1;
   };
@@ -679,6 +699,12 @@ fn wrap_path_chunks(s: &str, width: usize, max_lines: usize) -> Vec<String> {
   out
 }
 
+/// Suffix marking a value shared across all Lemonade models by the one umbrella
+/// process — its port, RAM, and CPU are the umbrella's, not per-model. Same `*`
+/// the Host pane uses for shared/aggregate pools (`MEM*` / `GPU*`); explained in
+/// the help overlay's Legend.
+pub(crate) const SHARED_UMBRELLA_MARKER: &str = "*";
+
 /// Render line 2 of the header: `:port  state  RAM  CPU` for a
 /// running model, `not launched` when the focused model has no
 /// supervisor row, blank when nothing is focused.
@@ -688,7 +714,19 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
       let (rss, cpu) = stats_pair(m);
       let label_style = palette.label_style();
       let value_style = palette.text_style();
-      let spans = vec![
+      let middot = || {
+        Span::styled(
+          crate::tui::glyphs::active().middot_sep(),
+          palette.muted_style(),
+        )
+      };
+      // Lemonade delegated rows share the umbrella's port/RAM/CPU — mark them.
+      let mark = if m.is_lemonade() {
+        SHARED_UMBRELLA_MARKER
+      } else {
+        ""
+      };
+      let mut spans = vec![
         // `ID:L9` prefix surfaces the launch id alongside the port so
         // it's visible without diving into the Settings tab. The
         // label tone matches `RAM` / `CPU` so the trio reads as one
@@ -696,7 +734,7 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
         Span::styled("ID:", label_style),
         Span::styled(m.launch_id.clone(), value_style),
         Span::styled("  ", Style::default()),
-        Span::styled(format!(":{}  ", m.port), palette.muted_style()),
+        Span::styled(format!(":{}{}  ", m.port, mark), palette.muted_style()),
         Span::styled(
           format!("{} ", glyph_for(m.state)),
           Style::default().fg(crate::tui::status_icons::colour_for(m.state, palette)),
@@ -705,22 +743,29 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
           label_for(m.state).to_ascii_lowercase(),
           palette.text_style(),
         ),
-        Span::styled("  ", Style::default()),
-        // Split stats into label/value spans so `RAM` and `CPU` read
-        // as blue labels matching the in-pane convention (Host /
-        // Daemon panes) instead of disappearing into the same muted
-        // tone as the value digits.
-        Span::styled(rss, value_style),
-        Span::styled(" RAM", label_style),
-        Span::styled(
-          crate::tui::glyphs::active().middot_sep(),
-          palette.muted_style(),
-        ),
-        Span::styled(cpu, value_style),
-        Span::styled(" CPU", label_style),
       ];
-      // The ds4 "serves as <alias>" disclosure now rides the badge row above
-      // (`render_header_badge`), not this stats line — see that function.
+      // ctx — the resolved `--fit` window (llama.cpp) or the pinned value; omit
+      // when neither is known (ds4/lemonade launched without an explicit ctx).
+      let known_ctx = m
+        .resolved_ctx
+        .or_else(|| m.knobs.ctx.as_ref().and_then(|k| k.as_set().copied()));
+      if let Some(ctx) = known_ctx {
+        spans.push(middot());
+        spans.push(Span::styled(
+          crate::tui::fmt::format_tokens(ctx as u64),
+          value_style,
+        ));
+        spans.push(Span::styled(" ctx", label_style));
+      }
+      // Split stats into label/value spans so `RAM` and `CPU` read as blue
+      // labels matching the in-pane convention (Host / Daemon panes) instead of
+      // disappearing into the same muted tone as the value digits.
+      spans.push(middot());
+      spans.push(Span::styled(format!("{rss}{mark}"), value_style));
+      spans.push(Span::styled(" RAM", label_style));
+      spans.push(middot());
+      spans.push(Span::styled(format!("{cpu}{mark}"), value_style));
+      spans.push(Span::styled(" CPU", label_style));
       Line::from(spans)
     }
     None => match app.focused_path() {
@@ -890,6 +935,61 @@ mod tests {
       .expect("model row present");
     let sel_badge = focused_backend_badge(&sel_app).expect("lemonade source → badge");
     assert_eq!(sel_badge.chip.trim(), "lemonade");
+  }
+
+  fn render_stats_text(app: &App) -> String {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(100, 1)).unwrap();
+    term
+      .draw(|f| render_header_stats(f, Rect::new(0, 0, 100, 1), app, palette))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+    (0..buf.area.width)
+      .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+      .collect()
+  }
+
+  #[test]
+  fn header_stats_shows_ctx_and_marks_lemonade_shared() {
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.managed = vec![ready_managed("qwen", Some(4_000_000), Some(1.0))];
+    app.list_cursor = 2;
+    app.managed[0].resolved_ctx = Some(32768);
+    app.managed[0].backend = Some("llamacpp".into());
+    let s = render_stats_text(&app);
+    assert!(s.contains("32k") && s.contains("ctx"), "ctx missing: {s:?}");
+    assert!(
+      !s.contains('*'),
+      "llama.cpp must not carry the shared marker: {s:?}"
+    );
+
+    // Lemonade → port/RAM/CPU carry the shared-umbrella marker.
+    app.managed[0].backend = Some("lemonade".into());
+    let lemon = render_stats_text(&app);
+    assert!(
+      lemon.contains('*'),
+      "lemonade row must carry the shared marker: {lemon:?}"
+    );
+  }
+
+  #[test]
+  fn lemonade_registry_drops_the_path_row() {
+    let mut app = App::new(AppOptions::default());
+    app.models = vec![fake_model()];
+    app.managed = vec![ready_managed("Llama-3.1-8B", None, None)];
+    app.managed[0].path = PathBuf::from("lemonade://Llama-3.1-8B");
+    app.managed[0].backend = Some("lemonade".into());
+    app.list_cursor = 2;
+    assert!(focused_is_lemonade_registry(&app));
+    assert_eq!(
+      focused_path_line_count(&app, 50),
+      0,
+      "lemonade path row must reserve zero height"
+    );
   }
 
   fn app_with_focus(focus: crate::tui::keybindings::Focus, tab: RightTab) -> App {

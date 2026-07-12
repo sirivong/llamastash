@@ -133,6 +133,13 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
   {
     let ustate_obj = flatten_state(&umbrella.state().await);
     let upid = umbrella.pid().await;
+    // The umbrella's own resource reading, mirrored onto every delegated model
+    // row — they run inside this one shared process, so its RSS/CPU is the only
+    // honest figure. The TUI marks these as shared (`*`) so they don't read as
+    // per-model; nothing sums the per-row rss, so the mirror never double-counts.
+    let ulatest = umbrella.latest_resource().await;
+    let u_rss = ulatest.as_ref().map(|r| r.rss_bytes);
+    let u_cpu = ulatest.as_ref().map(|r| r.cpu_percent);
     for running_snap in ctx.state.snapshot().await.running.iter() {
       let Some(backend_id) = running_snap.lemonade_backend_id() else {
         continue;
@@ -173,10 +180,10 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
         "state": state_obj,
         "params": params_json,
         "backend": running_snap.resolved_backend.clone(),
-        // Resource readings stay on the umbrella's own row — mirroring
-        // its RSS onto every resident model would double-count it.
-        "latest_rss_bytes": Value::Null,
-        "latest_cpu_pct": Value::Null,
+        // The shared umbrella's RSS/CPU (see `u_rss`/`u_cpu` above), surfaced
+        // per delegated row and flagged shared by the TUI.
+        "latest_rss_bytes": u_rss,
+        "latest_cpu_pct": u_cpu,
         "preset_count": preset_count,
         "default": preset_default,
       }));

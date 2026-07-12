@@ -11,7 +11,7 @@
 │▶ Running                                                                   ││ qwen-7b                                │
 │ ● qwen-7b                                   qwen3    Q4_K    32k     4.2G  ││ /m/x/qwen-7b.gguf                      │
 │★ Favorites                                                                 ││                                        │
-│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ ID:L1  :41100  ● ready  4.2G RAM · 312 │
+│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ ID:L1  :41100  ● ready · 4.2G RAM · 31 │
 │────────────────────────────────────────────────────────────────────────────││ ────────────────────────────────────── │
 │m/x                                                                         ││ llama_model_loader: loaded meta data   │
 │ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ with 26 key-value pairs                │

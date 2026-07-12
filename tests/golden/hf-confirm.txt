@@ -11,7 +11,7 @@
 │▶ Runni│ size:  4.2G                                                                                          │       │
 │ ● qwen│                                                                                                      │       │
 │★ Favor│ Press ⏎ to confirm — the download enqueues in the status strip.                                      │       │
-│ ★ mist│ Esc returns to the file picker.                                                                      │ · 312 │
+│ ★ mist│ Esc returns to the file picker.                                                                      │M · 31 │
 │───────│                                                                                                      │────── │
 │m/x    │                                                                                                      │       │
 │ ★ mist│                                                                                                      │       │

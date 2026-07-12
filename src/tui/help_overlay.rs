@@ -246,6 +246,13 @@ fn legend_section() -> Section {
       "GPU*".to_string(),
       "combined usage + hottest temp across multiple GPUs".to_string(),
     ),
+    (
+      format!(
+        "RAM/CPU/port{}",
+        crate::tui::right_pane::SHARED_UMBRELLA_MARKER
+      ),
+      "shared Lemonade umbrella (one process serves all Lemonade models)".to_string(),
+    ),
   ];
   for (glyph, desc) in crate::discovery::Multimodal::LEGEND {
     rows.push((glyph.to_string(), desc.to_string()));
