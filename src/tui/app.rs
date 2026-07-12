@@ -2201,6 +2201,14 @@ fn parse_proxy_info(v: &Value) -> Option<ProxyInfo> {
 
 fn parse_status_row(row: &Value) -> Option<ManagedRow> {
   let launch_id = row.get("launch_id")?.as_str()?.to_string();
+  // The Lemonade umbrella is the multiplexer *process*, not a model: the daemon
+  // tracks it as a managed launch, but its path is the `lemond` binary, so it
+  // would render as a bogus "lemond" running row and yank an invalid model id.
+  // Drop it from the TUI — specific `lemonade://<id>` launches still surface as
+  // their own rows. (The daemon `status` / CLI keep it; this is TUI-only.)
+  if launch_id == crate::backend::lemonade::umbrella_launch_id().as_str() {
+    return None;
+  }
   let port = row.get("port")?.as_u64()? as u16;
   let path = row
     .get("id")
@@ -2540,6 +2548,42 @@ mod tests {
     assert_eq!(app.managed[0].state, SurfaceState::Ready);
     assert_eq!(app.managed[0].rss_bytes, Some(4_500_000_000));
     assert_eq!(app.managed[0].cpu_pct, Some(312.0));
+  }
+
+  #[test]
+  fn ingest_status_drops_the_lemonade_umbrella_row() {
+    // The umbrella process is not a model — it must not appear in the running
+    // list. A specific `lemonade://<id>` launch alongside it stays.
+    let mut app = App::new(AppOptions::default());
+    let umbrella = crate::backend::lemonade::umbrella_launch_id()
+      .as_str()
+      .to_string();
+    let body = json!({
+      "models": [
+        {
+          "launch_id": umbrella,
+          "id": {"path": "/usr/bin/lemond", "header_blake3": "00".repeat(32)},
+          "port": 13305,
+          "state": {"state": "ready"},
+          "backend": "lemonade",
+        },
+        {
+          "launch_id": "lemonade:Llama-3.1-8B",
+          "id": {"path": "lemonade://Llama-3.1-8B", "header_blake3": "00".repeat(32)},
+          "port": 13305,
+          "state": {"state": "ready"},
+          "backend": "lemonade",
+        }
+      ],
+      "gpu": {"backend": "cpu_only"}
+    });
+    app.ingest_status(&body);
+    let ids: Vec<&str> = app.managed.iter().map(|m| m.launch_id.as_str()).collect();
+    assert_eq!(
+      ids,
+      vec!["lemonade:Llama-3.1-8B"],
+      "umbrella row must be hidden"
+    );
   }
 
   #[test]
