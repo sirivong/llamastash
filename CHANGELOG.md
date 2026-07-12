@@ -14,12 +14,16 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 ### Changed
 
 - **Lemonade is now default-on when the `lemond` binary resolves** (matching ds4), instead of opt-in/off-by-default. If `lemond` is on `PATH` (or `lemonade.binary` points at it) the daemon runs Lemonade discovery + umbrella unless `lemonade.enabled: false`; `--lemonade` / `LLAMASTASH_LEMONADE=1` still force it on. Zero footprint when the binary is absent. `lemonade.enabled` is now tri-state (unset = auto / `true` = force on / `false` = force off).
+- The running-model header shows the resolved context window for every backend (`… · 16k ctx · …`), omitted when unknown.
+- Lemonade running rows are tidier: a `lemonade` backend badge, the shared umbrella hidden from the running list (its RAM/CPU/port surface on the model rows behind a `*` shared-marker — the help Legend explains it), the synthetic `lemonade://` path row dropped, and deleting a registry model refused with guidance (it is managed by Lemonade, not a local file).
 
 ### Fixed
 
 - deepseek4 KV cache is now modeled from the header (its two-tier compressed cache) instead of the naive per-head estimate, which over-counted ~8x at long context (~86 GiB vs the real ~11 GiB at 1M for Flash) and could spuriously refuse a launch. The "KV demand not modeled" advisory is dropped.
 - TUI Settings knob rows no longer wrap when a `(model/server default)` source label doesn't fit the pane — they truncate on one line with `…`, so cycling presets or live updates don't make the form jump. The running view and the editable form now render through one shared path, so both show/hide/truncate these labels identically.
 - Free-form `llama-server` flags (e.g. `--chat-template-file`, `--mmproj`) survive a proxy auto-start reload and a plain restart: a launch that doesn't pick params inherits its model's effective default (the default preset, else last-used). Use `--preset auto` to launch with nothing inherited. (#49, supersedes the earlier origin-gated behavior)
+- Model-list columns render one consistent placeholder for empty/unknown values — `—` in the TUI, `?` in the CLI — instead of a mix of blank / `Unknown` / `unknown` (e.g. registry-served Lemonade models with no GGUF header).
+- The TUI `c` (copy curl) targets the port-stable proxy when it is auth-free (falling back to the backend port when the proxy requires a key), so a pasted command survives relaunches and works for every backend; `u` still copies the raw backend URL.
 
 ## [0.0.5] — 2026-06-25
 
