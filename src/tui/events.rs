@@ -1295,6 +1295,14 @@ fn apply_delete_model(app: &mut App) {
 /// so the hint and the keybinding stay in lock-step.
 fn delete_refusal_reason(app: &App) -> Option<&'static str> {
   use crate::tui::status_icons::SurfaceState;
+  // Lemonade registry models are served by the umbrella, not stored as a local
+  // GGUF — there is nothing on disk to unlink, and llamastash does not manage
+  // the Lemonade registry. Refuse with guidance instead of a failed `unlink`.
+  if let Some(path) = app.focused_path() {
+    if crate::backend::lemonade::registry_name_from_path(&path).is_some() {
+      return Some("model is managed by Lemonade — delete it via Lemonade");
+    }
+  }
   if let Some(managed) = app.focused_managed() {
     return Some(match managed.state {
       SurfaceState::Ready | SurfaceState::Loading | SurfaceState::Launching => {
@@ -2787,6 +2795,29 @@ mod tests {
       }
       other => panic!("expected DeleteModel confirm, got {other:?}"),
     }
+  }
+
+  #[test]
+  fn ctrl_d_on_lemonade_model_refuses_with_toast() {
+    // A Lemonade model is a registry entry (synthetic `lemonade://` path), not
+    // a local GGUF — Ctrl+D must refuse with guidance, not stage a delete that
+    // would fail on a non-existent file.
+    let mut app = App::new(Default::default());
+    app.models = vec![fake_model_for_events(
+      "lemonade://Llama-3.1-8B",
+      "lemonade://",
+    )];
+    app.go_top();
+    pump_input(&mut app, key(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(
+      app.confirm_dialog.is_none(),
+      "Lemonade registry row must not stage a delete"
+    );
+    let toast = app.toast_message().unwrap_or("");
+    assert!(
+      toast.contains("Lemonade"),
+      "expected a Lemonade-delete toast, got `{toast}`"
+    );
   }
 
   #[test]
