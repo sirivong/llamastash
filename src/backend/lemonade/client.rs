@@ -208,6 +208,21 @@ impl LemonadeClient {
     Ok(list.data)
   }
 
+  /// `GET /api/v1/system-info` — host devices + per-recipe backend install
+  /// status (the HTTP equivalent of `lemonade backends`). `status` parses the
+  /// `recipes.*.backends.*.state == "installed"` entries to report the
+  /// accelerators lemond actually has installed, not a static guess.
+  pub async fn system_info(&self) -> Result<serde_json::Value, LemonadeError> {
+    let resp = self
+      .http
+      .get(format!("{}/api/v1/system-info", self.base))
+      .send()
+      .await
+      .map_err(transport)?;
+    ensure_success(&resp)?;
+    decode(resp).await
+  }
+
   /// `POST /api/v1/load {model_name}` — preload a model into memory.
   /// Optional (chat autoloads); use it to avoid first-request latency.
   pub async fn load(&self, model_name: &str) -> Result<(), LemonadeError> {

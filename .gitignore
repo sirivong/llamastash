@@ -18,3 +18,6 @@ __pycache__/
 *.profraw
 # vulkaninfo profile dumps written into cwd by the Vulkan probe
 VP_VULKANINFO_*.json
+
+# lemond writes its backend cache here when run from the repo root
+/backends/
