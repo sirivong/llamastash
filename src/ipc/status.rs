@@ -131,8 +131,9 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
     .get(&crate::backend::lemonade::umbrella_launch_id())
     .await
   {
-    let ustate_obj = flatten_state(&umbrella.state().await);
-    let upid = umbrella.pid().await;
+    let ustate = umbrella.state().await;
+    let umbrella_ready = matches!(ustate, crate::daemon::supervisor::ManagedState::Ready);
+    let ustate_obj = flatten_state(&ustate);
     // The umbrella's own resource reading, mirrored onto every delegated model
     // row — they run inside this one shared process, so its RSS/CPU is the only
     // honest figure. The TUI marks these as shared (`*`) so they don't read as
@@ -150,9 +151,14 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
       let Some(launch_id) = running_snap.launch_id.clone() else {
         continue;
       };
+      // The cached per-model state is `Ready` from preload and is never
+      // updated when the umbrella dies out-of-band (crash / external kill).
+      // Trust it only while the umbrella is actually Ready; otherwise the model
+      // can't be resident, so reflect the umbrella's real state instead of a
+      // stale green row.
       let state_obj = match ctx.supervisors.delegated_state(&backend_id.name).await {
-        Some(s) => flatten_state(&s),
-        None => ustate_obj.clone(),
+        Some(s) if umbrella_ready => flatten_state(&s),
+        _ => ustate_obj.clone(),
       };
       let synthetic_id = crate::gguf::identity::ModelId {
         path: running_snap.params.model_path.clone(),
@@ -181,7 +187,10 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
         "id": synthetic_id,
         "port": running_snap.port,
         "mode": running_snap.params.mode.label(),
-        "pid": upid,
+        // A delegated model has no process of its own — it runs inside the
+        // shared umbrella. Report no pid (`-` in the CLI table, `null` in JSON);
+        // only the umbrella's own row carries the pid.
+        "pid": null,
         "ready_at": running_snap.started_at,
         "state": state_obj,
         "params": params_json,

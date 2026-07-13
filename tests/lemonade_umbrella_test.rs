@@ -395,6 +395,12 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
   assert_eq!(row["port"], json!(port));
   assert_eq!(row["state"]["state"], "ready");
   assert_eq!(row["mode"], "chat");
+  // A delegated model has no process of its own — no pid (`-` in the CLI).
+  assert!(
+    row["pid"].is_null(),
+    "delegated row must report no pid, got {:?}",
+    row["pid"]
+  );
 
   // Stop via the `L#` id: the umbrella unloads the model (fake_lemond clears
   // its resident slot) and the row disappears; the umbrella row stays.
@@ -429,6 +435,12 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
   assert_eq!(
     umbrella_row["backend"], "lemonade",
     "umbrella row backend must be deterministically lemonade"
+  );
+  // Only the umbrella carries a pid — it's the one real process.
+  assert!(
+    umbrella_row["pid"].is_number(),
+    "umbrella row must carry the shared process pid, got {:?}",
+    umbrella_row["pid"]
   );
 
   // A second stop of the same id is an InvalidParams error (unknown row).
