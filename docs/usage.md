@@ -323,7 +323,7 @@ Snapshot of daemon health, managed launches, external (unmanaged) `llama-server`
   "models": [...],
   "external": [...],
   "gpu": "CpuOnly",
-  "proxy": {"enabled": true, "listen": "127.0.0.1:11434", "status": "listening", "bind_error": null}
+  "proxy": {"enabled": true, "listen": "127.0.0.1:11434", "status": "listening", "bind_error": null, "ui_url": "http://127.0.0.1:11434/ui/"}
 }
 ```
 
@@ -611,17 +611,17 @@ llamastash status --json | jq .proxy
 
 ```json
 // Listening on the configured port (keyless loopback default):
-{ "enabled": true,  "listen": "127.0.0.1:11435", "host": "127.0.0.1", "status": "listening",       "auth": "none",     "bind_error": null }
+{ "enabled": true,  "listen": "127.0.0.1:11435", "host": "127.0.0.1", "status": "listening",       "auth": "none",     "bind_error": null, "ui_url": "http://127.0.0.1:11435/ui/" }
 // Listening on the LAN with a bearer key required:
-{ "enabled": true,  "listen": "0.0.0.0:11434",   "host": "0.0.0.0",   "status": "listening",       "auth": "enforced", "bind_error": null }
+{ "enabled": true,  "listen": "0.0.0.0:11434",   "host": "0.0.0.0",   "status": "listening",       "auth": "enforced", "bind_error": null, "ui_url": "http://0.0.0.0:11434/ui/" }
 // Config has proxy.enabled: false:
-{ "enabled": false, "listen": null,              "host": null,        "status": "disabled",        "auth": "none",     "bind_error": null }
+{ "enabled": false, "listen": null,              "host": null,        "status": "disabled",        "auth": "none",     "bind_error": null, "ui_url": null }
 // All six ports in the scan range (port..=port+5) taken:
-{ "enabled": true,  "listen": "127.0.0.1:11439", "host": "127.0.0.1", "status": "port_in_use",     "auth": "none",     "bind_error": null }
+{ "enabled": true,  "listen": "127.0.0.1:11439", "host": "127.0.0.1", "status": "port_in_use",     "auth": "none",     "bind_error": null, "ui_url": null }
 // Bind failed for some other reason (EACCES, EADDRNOTAVAIL, …):
-{ "enabled": true,  "listen": "127.0.0.1:80",    "host": "127.0.0.1", "status": "unbound",         "auth": "none",     "bind_error": "permission denied" }
+{ "enabled": true,  "listen": "127.0.0.1:80",    "host": "127.0.0.1", "status": "unbound",         "auth": "none",     "bind_error": "permission denied", "ui_url": null }
 // Non-loopback host requested with no key and no --insecure-no-auth (daemon stays up, proxy skipped):
-{ "enabled": true,  "listen": "0.0.0.0:11434",   "host": "0.0.0.0",   "status": "refused_insecure", "auth": "required", "bind_error": "refused to bind a non-loopback proxy without authentication; set proxy.api_key or pass --insecure-no-auth" }
+{ "enabled": true,  "listen": "0.0.0.0:11434",   "host": "0.0.0.0",   "status": "refused_insecure", "auth": "required", "bind_error": "refused to bind a non-loopback proxy without authentication; set proxy.api_key or pass --insecure-no-auth", "ui_url": null }
 ```
 
 The same block is on the IPC `status` method response. The TUI's Daemon info pane shows the proxy state on row 3 as `proxy <status> <addr>` (an authed LAN listener adds `(auth)`); a toast fires on the transition into `port_in_use` or `refused_insecure`. `proxy.enabled: false` renders the row as `proxy disabled`.

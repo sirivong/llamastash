@@ -361,6 +361,9 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
       if let Some(line) = proxy_human_label(&snap.proxy) {
         rows.push(("proxy", line));
       }
+      if let Some(url) = proxy_ui_url(&snap.proxy) {
+        rows.push(("web ui", url.to_string()));
+      }
       out.push_str(&format::kv_block(&rows));
       out.push('\n');
     } else {
@@ -371,17 +374,28 @@ pub fn status_human(snap: &StatusSnapshot) -> String {
       if let Some(line) = proxy_human_label(&snap.proxy) {
         out.push_str(&format!("proxy: {line}\n"));
       }
+      if let Some(url) = proxy_ui_url(&snap.proxy) {
+        out.push_str(&format!("web ui: {url}\n"));
+      }
     }
   } else if let Some(line) = proxy_human_label(&snap.proxy) {
     // No daemon block (older daemon) but the proxy field is
     // present — surface it on its own line so the user can still
     // see the listener state.
+    let ui = proxy_ui_url(&snap.proxy);
     if tty {
       out.push_str(&format::section_header("proxy", None));
-      out.push_str(&format::kv_block(&[("status", line)]));
+      let mut rows: Vec<(&'static str, String)> = vec![("status", line)];
+      if let Some(url) = ui {
+        rows.push(("web ui", url.to_string()));
+      }
+      out.push_str(&format::kv_block(&rows));
       out.push('\n');
     } else {
       out.push_str(&format!("proxy: {line}\n"));
+      if let Some(url) = ui {
+        out.push_str(&format!("web ui: {url}\n"));
+      }
     }
   }
 
@@ -555,6 +569,14 @@ fn proxy_human_label(proxy: &Value) -> Option<String> {
     }
     other => Some(format!("{other} {listen}")),
   }
+}
+
+/// The stock web-UI URL from the proxy block — present only while the proxy is
+/// listening (the daemon populates `ui_url` only in that state). Surfaced as a
+/// `web ui` row in `status` so users don't have to reconstruct the port-stable
+/// `/ui/` origin by hand.
+fn proxy_ui_url(proxy: &Value) -> Option<&str> {
+  proxy.as_object()?.get("ui_url")?.as_str()
 }
 
 /// JSON projection of `status` (preserves the daemon's wire shape so
@@ -1024,6 +1046,55 @@ mod tests {
     assert!(
       plain.contains("connections  3"),
       "kv connections: {plain:?}"
+    );
+  }
+
+  #[test]
+  fn status_human_surfaces_web_ui_url_when_proxy_listening() {
+    use crate::cli::resolve::DaemonHealth;
+    let _g = ColorGuard::set(false);
+    let daemon = || DaemonHealth {
+      pid: 1,
+      uptime_seconds: 1,
+      active_connections: 0,
+      build: None,
+      server_path: None,
+      ipc_url: None,
+    };
+    let listening = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: Some(daemon()),
+      proxy: serde_json::json!({
+        "enabled": true,
+        "listen": "127.0.0.1:11435",
+        "status": "listening",
+        "bind_error": Value::Null,
+        "ui_url": "http://127.0.0.1:11435/ui/",
+      }),
+      backends: Value::Null,
+    };
+    let s = status_human(&listening);
+    assert!(s.contains("web ui"), "web ui row present: {s:?}");
+    assert!(
+      s.contains("http://127.0.0.1:11435/ui/"),
+      "the /ui/ url is shown: {s:?}"
+    );
+    // A non-listening proxy carries `ui_url: null` → no web ui line.
+    let disabled = StatusSnapshot {
+      models: vec![],
+      external: vec![],
+      gpu: Value::Null,
+      host: Value::Null,
+      daemon: Some(daemon()),
+      proxy: serde_json::json!({"enabled": false, "status": "disabled", "ui_url": Value::Null}),
+      backends: Value::Null,
+    };
+    assert!(
+      !status_human(&disabled).contains("web ui"),
+      "no web ui line when the proxy isn't listening"
     );
   }
 

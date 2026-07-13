@@ -327,22 +327,39 @@ async fn backends_status(ctx: &MethodContext) -> Value {
     .as_ref()
     .map(|e| e.binary.exists())
     .unwrap_or(false);
+  // Live GPU classes the host exposes, from `llama-server --list-devices`.
+  // The same physical GPUs back ds4 (Metal/CUDA/ROCm), so this unions into
+  // both rows below — ds4's static `[cpu]` floor would otherwise report a
+  // ROCm host as cpu-only, the opposite of what ds4-server actually runs on.
+  let device_accels: Vec<crate::backend::Accelerator> = match ctx.launch.as_ref() {
+    Some(env) => env
+      .device_catalog
+      .read()
+      .await
+      .iter()
+      .filter_map(|d| accelerator_from_selector(&d.selector))
+      .collect(),
+    None => Vec::new(),
+  };
   let mut llama_acc = llama.accelerators();
-  if let Some(env) = ctx.launch.as_ref() {
-    let cat = env.device_catalog.read().await;
-    for d in cat.iter() {
-      if let Some(a) = accelerator_from_selector(&d.selector) {
-        llama_acc.insert(a);
-      }
-    }
+  for a in &device_accels {
+    llama_acc.insert(*a);
   }
 
   let lemonade = LemonadeBackend::new();
+  // Prefer what lemond actually has installed (live `system-info` probe) over
+  // the backend's static capability floor — the static `[cpu, npu]` misses a
+  // ROCm/Vulkan build and claims an NPU the host may not have. Falls back to
+  // the static list when the umbrella is down or the probe fails.
+  let lemonade_acc = lemonade_installed_accelerators(ctx)
+    .await
+    .map(|a| a.labels())
+    .unwrap_or_else(|| lemonade.accelerators().labels());
   let mut lemonade_row = backend_row(
     lemonade.id(),
     lemonade.lifecycle().label(),
     lemond_installed(&ctx.lemonade),
-    lemonade.accelerators().labels(),
+    lemonade_acc,
   );
   // Managed-multiplexer health: surface whether the umbrella llamastash
   // supervises is actually up, so `status` distinguishes "installed" (binary on
@@ -372,11 +389,15 @@ async fn backends_status(ctx: &MethodContext) -> Value {
   // `enabled` = intent (default-on unless `ds4.enabled: false`) AND installed.
   let ds4_backend = crate::backend::ds4::Ds4Backend::new();
   let ds4_binary = crate::backend::ds4::resolve_ds4_binary(ctx.ds4.binary.as_deref());
+  let mut ds4_acc = ds4_backend.accelerators();
+  for a in &device_accels {
+    ds4_acc.insert(*a);
+  }
   let mut ds4_row = backend_row(
     ds4_backend.id(),
     ds4_backend.lifecycle().label(),
     ds4_binary.is_some(),
-    ds4_backend.accelerators().labels(),
+    ds4_acc.labels(),
   );
   if let Some(obj) = ds4_row.as_object_mut() {
     obj.insert("enabled".into(), json!(ctx.ds4_available()));
@@ -443,6 +464,80 @@ fn accelerator_from_selector(selector: &str) -> Option<crate::backend::Accelerat
   }
 }
 
+/// Map a lemond backend/recipe name (`"rocm"`, `"npu"`, `"vulkan"`, …) to an
+/// accelerator class. Same label vocabulary as [`Accelerator::label`], so it
+/// round-trips.
+fn accelerator_from_label(name: &str) -> Option<crate::backend::Accelerator> {
+  use crate::backend::Accelerator;
+  match name.to_ascii_lowercase().as_str() {
+    "cpu" => Some(Accelerator::Cpu),
+    "cuda" => Some(Accelerator::Cuda),
+    "rocm" => Some(Accelerator::Rocm),
+    "vulkan" => Some(Accelerator::Vulkan),
+    "metal" => Some(Accelerator::Metal),
+    "npu" => Some(Accelerator::Npu),
+    _ => None,
+  }
+}
+
+/// Accelerators lemond actually has installed, from a live `system-info`
+/// probe (the HTTP form of `lemonade backends`): the distinct backend classes
+/// with at least one `state: "installed"` entry across recipes. `None` when
+/// the umbrella isn't registered or the probe fails, so the caller keeps the
+/// backend's static capability floor.
+async fn lemonade_installed_accelerators(
+  ctx: &MethodContext,
+) -> Option<crate::backend::AcceleratorSupport> {
+  if !ctx.lemonade_available() {
+    return None;
+  }
+  // The managed umbrella's live port when llamastash spawned it; otherwise the
+  // configured port, so an externally-run lemond (started outside llamastash)
+  // is probed too.
+  let port = match ctx
+    .supervisors
+    .get(&crate::backend::lemonade::umbrella_launch_id())
+    .await
+  {
+    Some(umbrella) => umbrella.port(),
+    None => ctx.lemonade.port,
+  };
+  let client = crate::backend::lemonade::LemonadeClient::new(port).ok()?;
+  // Bounded independently of the client's own timeout (minutes, tuned for model
+  // loads): a slow/hung lemond must never stall a `status` response.
+  let info = tokio::time::timeout(std::time::Duration::from_secs(2), client.system_info())
+    .await
+    .ok()?
+    .ok()?;
+  let acc = installed_accelerators_from_system_info(&info);
+  (!acc.labels().is_empty()).then_some(acc)
+}
+
+/// Pure parse of a lemond `system-info` body into the accelerator classes it
+/// has installed: the distinct `recipes.*.backends.*` names whose `state` is
+/// `"installed"`. Split out from the HTTP path so it's unit-testable against a
+/// captured body.
+fn installed_accelerators_from_system_info(info: &Value) -> crate::backend::AcceleratorSupport {
+  let mut acc = crate::backend::AcceleratorSupport::default();
+  let Some(recipes) = info.get("recipes").and_then(Value::as_object) else {
+    return acc;
+  };
+  for recipe in recipes.values() {
+    let Some(backends) = recipe.get("backends").and_then(Value::as_object) else {
+      continue;
+    };
+    for (name, body) in backends {
+      if body.get("state").and_then(Value::as_str) != Some("installed") {
+        continue;
+      }
+      if let Some(a) = accelerator_from_label(name) {
+        acc.insert(a);
+      }
+    }
+  }
+  acc
+}
+
 /// The "installed" signal for the Lemonade backend in `status`. Honors the
 /// full resolution order — explicit `lemonade.binary` first, then `lemond` /
 /// `lemonade` on PATH — so a user who points at an off-PATH `lemond` still
@@ -473,6 +568,7 @@ fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
       "status": "disabled",
       "auth": "none",
       "bind_error": Value::Null,
+      "ui_url": Value::Null,
     }),
     ProxyStatus::Listening {
       addr,
@@ -484,6 +580,9 @@ fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
       "status": "listening",
       "auth": if auth_enforced { "enforced" } else { "none" },
       "bind_error": Value::Null,
+      // The stock web UI rides this same listener at a port-stable origin.
+      // Populated only while listening (the only state that actually serves it).
+      "ui_url": format!("http://{addr}/ui/"),
     }),
     ProxyStatus::PortInUse { addr } => json!({
       "enabled": true,
@@ -492,6 +591,7 @@ fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
       "status": "port_in_use",
       "auth": "none",
       "bind_error": Value::Null,
+      "ui_url": Value::Null,
     }),
     ProxyStatus::Unbound { addr, bind_error } => json!({
       "enabled": true,
@@ -500,6 +600,7 @@ fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
       "status": "unbound",
       "auth": "none",
       "bind_error": bind_error,
+      "ui_url": Value::Null,
     }),
     // Refused to expose a non-loopback proxy without auth. The daemon
     // is healthy; the proxy just didn't bind. `auth` reports
@@ -514,6 +615,7 @@ fn project_proxy_status(cell: &crate::proxy::StatusCell) -> Value {
       "bind_error":
         "refused to bind a non-loopback proxy without authentication; \
          set proxy.api_key or pass --insecure-no-auth",
+      "ui_url": Value::Null,
     }),
   }
 }
@@ -832,6 +934,35 @@ mod tests {
     // An unrecognised selector contributes no accelerator class.
     assert_eq!(accelerator_from_selector("sycl0"), None);
     assert_eq!(accelerator_from_selector(""), None);
+  }
+
+  #[test]
+  fn installed_accelerators_parses_lemond_system_info() {
+    use super::installed_accelerators_from_system_info;
+    // Shape mirrors the real `/api/v1/system-info` `recipes` block: only the
+    // `state: "installed"` backends count (flm/npu, whispercpp/rocm+vulkan);
+    // `installable` / `unsupported` are ignored. Order is by accelerator class.
+    let info = json!({
+      "recipes": {
+        "flm": { "backends": { "npu": { "state": "installed", "version": "v0.9.44" } } },
+        "whispercpp": { "backends": {
+          "cpu":    { "state": "installable" },
+          "rocm":   { "state": "installed", "version": "v1.8.4" },
+          "vulkan": { "state": "installed", "version": "v1.8.4" }
+        } },
+        "llamacpp": { "backends": {
+          "cpu":  { "state": "installable" },
+          "cuda": { "state": "unsupported" },
+          "rocm": { "state": "installable" }
+        } }
+      }
+    });
+    let acc = installed_accelerators_from_system_info(&info);
+    assert_eq!(acc.labels(), vec!["rocm", "vulkan", "npu"]);
+    // A body with no recipes yields an empty set (caller falls back to static).
+    assert!(installed_accelerators_from_system_info(&json!({}))
+      .labels()
+      .is_empty());
   }
 
   #[tokio::test]

@@ -13,6 +13,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - **`Alt+L` cycles the TUI left/right pane split.** Steps the Models-list width through the configurable `left_pane_ratios` slots (default `[65, 100, 50, 35, 0]`) in wide mode — `100` gives the list the whole width (all columns show), `0` hands it all to the right pane. Session-only; the pick resets to the first slot on restart.
 - A **Params** column in the model list (TUI + `llamastash list`) showing the parameter count (`7B`, `235B`, `1.2T`), derived from the GGUF header. The label is now compact and accurate across the full range instead of bucketed.
 - A **Backend** column in the model list (TUI + `llamastash list`) showing where a model routes — `llamacpp` / `lemonade` / `ds4` (the daemon's prediction for idle rows, the resolved backend for running ones). Shown only on multi-backend hosts, so a pure-llama.cpp user never sees a redundant all-`llamacpp` column.
+- `status` surfaces the **web-UI URL** — a `web ui` row in the human output and a `ui_url` field in the proxy block (`--json` / IPC), so you don't have to reconstruct the port-stable `http://<proxy>/ui/` origin by hand. Present only while the proxy is listening.
 
 ### Changed
 
