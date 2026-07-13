@@ -4,10 +4,6 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
-### Fixed
-
-- `init`-generated dev-tool configs now authenticate against an auth-enforced proxy: they carry the resolved `proxy.api_key` (honoring the `LLAMASTASH_PROXY_API_KEY` override) instead of the `llamastash` stub, and OpenCode's `apiKey` moves inside `options` — where the `@ai-sdk/openai-compatible` SDK actually reads it, so a top-level one no longer gets silently ignored. `env.sh` / `claude-code.sh` tighten to `0o600` since they can now hold the real bearer token. The env override + blank-normalization now resolve through one shared `ProxyConfig::effective_api_key`, shared by the daemon and the init writers.
-
 ## [0.0.6] — 2026-07-13
 
 ### Added
@@ -29,6 +25,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- `init`-generated dev-tool configs now authenticate against an auth-enforced proxy: they carry the resolved `proxy.api_key` (honoring the `LLAMASTASH_PROXY_API_KEY` override) instead of the `llamastash` stub, and OpenCode's `apiKey` moves inside `options` — where the `@ai-sdk/openai-compatible` SDK actually reads it, so a top-level one no longer gets silently ignored. `env.sh` / `claude-code.sh` tighten to `0o600` since they can now hold the real bearer token. The env override + blank-normalization now resolve through one shared `ProxyConfig::effective_api_key`, shared by the daemon and the init writers.
 - Lemonade models can now be favorited (`f`) and show up in the TUI's `↺ Recent` section. Favoriting a `lemonade://` registry model no longer errors (there's no GGUF file to hash — it uses a synthetic id keyed on the catalog path), and a successful Lemonade launch records `last_params` like every other backend.
 - Split-GGUF parameter counts now sum tensor elements across every shard, so a 2-shard 80B model reports ~80B instead of the shard-1-only ~56B in the `Params` column of `list` / `show` (an explicit `general.parameter_count` still wins). Small models (embedding-scale) now label in millions (`22.7M`) instead of showing a placeholder.
 - `status.backends` accelerators are now accurate per backend: ds4 picks up the host GPU (e.g. `rocm`) from the live device catalog instead of reporting cpu-only, and lemonade reports what `lemond` actually has installed via a live `system-info` probe (e.g. `rocm, vulkan, npu`) instead of a static `cpu, npu` guess.
