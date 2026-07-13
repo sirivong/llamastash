@@ -309,7 +309,7 @@ fn backends_human(backends: &serde_json::Value, tty: bool) -> Option<String> {
         colors::dim("not installed")
       };
       let umbrella_str = umbrella
-        .map(|u| format!("  {}", colors::dim(&format!("umbrella: {u}"))))
+        .map(|u| format!("  {}", colors::dim(&format!("(umbrella: {u})"))))
         .unwrap_or_default();
       out.push_str(&format!(
         "  {} {}  {}{}\n",
