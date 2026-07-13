@@ -499,25 +499,19 @@ fn mnemonic_spans(label: &str, active: bool, palette: &Palette) -> Vec<Span<'sta
 /// `Models` panel headings so the right pane reads as a peer panel).
 /// Falls back to `—` when nothing is focused.
 fn render_header_name(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-  use crate::util::paths::model_display_name;
   let name_style = palette.title_style();
-  // Prefer the discovery-supplied friendly label (Ollama's
-  // `<name>:<tag>`) over the path's file_stem so the header doesn't
-  // render the `sha256-<hex>` blob name.
-  let label_for = |path: &std::path::Path| {
-    app
-      .display_label_for(path)
-      .unwrap_or_else(|| model_display_name(path))
-  };
   // Resolve the focused path (running launch first, then the list
   // selection) so the title and its modality glyphs describe one model.
+  // The name itself comes from the shared `App::model_label` resolver
+  // (catalog `display_label`, else scheme-aware path fallback) so the header
+  // matches the list/info surfaces in every state.
   let focused = app
     .right_pane_focus()
     .map(|m| m.path.clone())
     .or_else(|| app.focused_path());
   let name_line = match focused {
     Some(path) => {
-      let mut spans = vec![Span::styled(label_for(&path), name_style)];
+      let mut spans = vec![Span::styled(app.model_label(&path), name_style)];
       // `◉` vision / `♪` audio after the title when discovery found an
       // mmproj projector — single-cell glyphs in the accent tone, see
       // `Multimodal::LEGEND` (also surfaced in the help overlay).

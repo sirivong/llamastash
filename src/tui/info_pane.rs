@@ -16,7 +16,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Palette;
 use crate::tui::app::App;
-use crate::util::paths::model_display_name;
 
 const LABEL_WIDTH: usize = 8;
 const LABEL_SERVER: &str = "server  ";
@@ -420,12 +419,7 @@ fn running_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a
   let parts: Vec<String> = app
     .managed
     .iter()
-    .map(|m| {
-      let label = app
-        .display_label_for(&m.path)
-        .unwrap_or_else(|| model_display_name(&m.path));
-      format!("{label} :{}", m.port)
-    })
+    .map(|m| format!("{} :{}", app.model_label(&m.path), m.port))
     .collect();
   let joined = parts.join(crate::tui::glyphs::active().middot_sep());
   let trimmed = right_ellipsise(&joined, list_budget);

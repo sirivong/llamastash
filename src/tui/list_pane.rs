@@ -311,12 +311,10 @@ fn running_row(m: &DiscoveredModel, launch: &RunningLaunchRow) -> ListRow {
 fn running_row_stub(launch: &RunningLaunchRow) -> ListRow {
   ListRow::Model {
     path: launch.path.clone(),
-    name: launch
-      .path
-      .file_stem()
-      .and_then(|s| s.to_str())
-      .unwrap_or("(unknown)")
-      .to_string(),
+    // Shared fallback: `file_stem` here would truncate a dotted Lemonade
+    // registry name (`lemonade://qwen3.5-4b-FLM` → `qwen3`); `model_display_name`
+    // keeps the full name for synthetic paths and still stems real GGUF files.
+    name: crate::util::paths::model_display_name(&launch.path),
     arch: String::new(),
     quant: String::new(),
     native_ctx: None,
@@ -341,19 +339,14 @@ fn surface_state_for(
 }
 
 fn display_name(m: &DiscoveredModel) -> String {
-  // `display_label` is populated by sources where the file basename
-  // is hostile (Ollama's content-addressed `sha256-<hex>` blobs). For
-  // every other source (HF cache, LM Studio, user paths) we render
-  // the full file_stem so the user always sees the unambiguous
-  // weight identifier — quant, finetune, variant.
-  if let Some(label) = &m.display_label {
-    return label.clone();
-  }
-  m.path
-    .file_stem()
-    .and_then(|s| s.to_str())
-    .map(|s| s.to_string())
-    .unwrap_or_else(|| m.path.display().to_string())
+  // Same rule as `App::model_label`, but with the `display_label` already in
+  // hand: prefer it (sources where the basename is hostile — Ollama's
+  // content-addressed `sha256-<hex>` blobs, Lemonade registry names), else the
+  // shared scheme-aware path fallback so the full weight identifier (quant,
+  // finetune, variant) shows and a dotted synthetic name isn't stem-truncated.
+  m.display_label
+    .clone()
+    .unwrap_or_else(|| crate::util::paths::model_display_name(&m.path))
 }
 
 fn model_row(

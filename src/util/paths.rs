@@ -41,11 +41,22 @@ pub fn project_dirs() -> Option<ProjectDirs> {
   ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
 }
 
-/// Human-friendly short label derived from a GGUF file path. Falls
-/// back to `"model"` when the path has no readable `file_stem`. Used
-/// by every TUI surface that needs a short tag for the focused model
-/// (chat-tab `model` field, right-pane title, launch picker, logs).
+/// Human-friendly short label derived from a model path. Falls back to
+/// `"model"` when the path has no readable `file_stem`. Used by every TUI
+/// surface that needs a short tag for the focused model (chat-tab `model`
+/// field, right-pane title, launch picker, logs) — the shared fallback when
+/// the live catalog has no `display_label` for the path.
+///
+/// A Lemonade registry path (`lemonade://qwen3.5-4b-FLM`) is synthetic: the
+/// whole string after the scheme is the name, so `file_stem` is wrong there —
+/// it mistakes the `.5-4b-FLM` for a file extension and returns `qwen3`. Return
+/// the full registry name for those, so a Lemonade model reads identically
+/// whether or not the catalog match landed (it transiently misses while the
+/// umbrella is mid-load / errored).
 pub fn model_display_name(path: &Path) -> String {
+  if let Some(name) = crate::backend::lemonade::registry_name_from_path(path) {
+    return name.to_string();
+  }
   path
     .file_stem()
     .and_then(|s| s.to_str())
@@ -287,6 +298,21 @@ mod tests {
   };
 
   use super::*;
+
+  #[test]
+  fn model_display_name_stems_real_files_but_keeps_lemonade_registry_names() {
+    // A real GGUF: drop the `.gguf` extension, keep the dotted version tag.
+    assert_eq!(
+      model_display_name(Path::new("/models/Qwen2.5-Coder-7B-Q4_K_M.gguf")),
+      "Qwen2.5-Coder-7B-Q4_K_M"
+    );
+    // A Lemonade synthetic path: the dotted registry name is the whole label —
+    // `file_stem` would truncate `qwen3.5-4b-FLM` to `qwen3`.
+    assert_eq!(
+      model_display_name(Path::new("lemonade://qwen3.5-4b-FLM")),
+      "qwen3.5-4b-FLM"
+    );
+  }
 
   /// Serialize the tests that actually mutate process-global env vars
   /// (a small handful covering the `LLAMASTASH_STATE_DIR` /

@@ -1351,6 +1351,19 @@ impl App {
       .and_then(|m| m.display_label.clone())
   }
 
+  /// The one canonical model name for a path, shared by every surface (list
+  /// rows, right-pane header, info pane, chat field): the live catalog's
+  /// friendly `display_label` when the path is known, else the path-derived
+  /// fallback ([`crate::util::paths::model_display_name`], scheme-aware). One
+  /// resolver so a model reads identically in every state — the catalog match
+  /// transiently misses while a Lemonade umbrella is mid-load, and this keeps
+  /// the name stable across that gap instead of flipping to a truncated form.
+  pub fn model_label(&self, path: &Path) -> String {
+    self
+      .display_label_for(path)
+      .unwrap_or_else(|| crate::util::paths::model_display_name(path))
+  }
+
   /// Multimodal capability of the model at `path` (vision / audio) if
   /// discovery detected an mmproj projector companion. Drives the glyph
   /// the right-pane header renders after the model title.

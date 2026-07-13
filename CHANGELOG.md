@@ -24,6 +24,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - Free-form `llama-server` flags (e.g. `--chat-template-file`, `--mmproj`) survive a proxy auto-start reload and a plain restart: a launch that doesn't pick params inherits its model's effective default (the default preset, else last-used). Use `--preset auto` to launch with nothing inherited. (#49, supersedes the earlier origin-gated behavior)
 - Model-list columns render one consistent placeholder for empty/unknown values — `—` in the TUI, `?` in the CLI — instead of a mix of blank / `Unknown` / `unknown` (e.g. registry-served Lemonade models with no GGUF header).
 - The TUI `c` (copy curl) targets the port-stable proxy when it is auth-free (falling back to the backend port when the proxy requires a key), so a pasted command survives relaunches and works for every backend; `u` still copies the raw backend URL.
+- A Lemonade model with a dotted registry name (e.g. `qwen3.5-4b-FLM`) keeps its full name in every TUI state; it used to truncate to `qwen3` while loading / errored / stopping, when the name fell back to a `file_stem` that mistook `.5-4b-FLM` for a file extension. Name derivation now runs through one shared resolver (catalog label, else a scheme-aware path fallback) across the list, header, and info surfaces.
 
 ## [0.0.5] — 2026-06-25
 
