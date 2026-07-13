@@ -155,6 +155,14 @@ pub struct Config {
   /// env var overrides this and forces ASCII on regardless.
   #[serde(default)]
   pub ascii_glyphs: bool,
+  /// Left (Models list) pane width percentages the TUI `Alt+L` shortcut
+  /// cycles through, in wide mode. Slot 0 is the startup default; each press
+  /// advances to the next, wrapping. `100` hides the right pane, `0` hides the
+  /// list. Session-only — the pick resets to slot 0 on restart. At most 5 slots
+  /// are honored (extras ignored); each is clamped to `0..=100`; an empty /
+  /// all-invalid list falls back to the factory `[65, 100, 50, 35, 0]`.
+  #[serde(default = "default_left_pane_ratios")]
+  pub left_pane_ratios: Vec<u16>,
   /// Named launch presets, the single writable home for presets. Map
   /// keys are classified per-resolution against the live model catalog
   /// (see [`crate::launch::presets::classify_preset_key`]): a key that
@@ -175,6 +183,32 @@ fn default_fit_ctx_floor() -> u32 {
 fn default_true() -> bool {
   true
 }
+
+/// Factory left-pane width cycle: current (65/35), list-full, even, right-heavy,
+/// right-full. Also the fallback when a user override sanitizes to empty.
+pub fn default_left_pane_ratios() -> Vec<u16> {
+  vec![65, 100, 50, 35, 0]
+}
+
+/// Sanitize a configured `left_pane_ratios` list: keep at most the first
+/// [`MAX_LEFT_PANE_RATIO_SLOTS`] slots, clamp each to `0..=100`, and fall back
+/// to [`default_left_pane_ratios`] when the result is empty (unset / all
+/// dropped). Applied once when the TUI resolves its options.
+pub fn sanitize_left_pane_ratios(raw: &[u16]) -> Vec<u16> {
+  let slots: Vec<u16> = raw
+    .iter()
+    .take(MAX_LEFT_PANE_RATIO_SLOTS)
+    .map(|p| (*p).min(100))
+    .collect();
+  if slots.is_empty() {
+    default_left_pane_ratios()
+  } else {
+    slots
+  }
+}
+
+/// Upper bound on `left_pane_ratios` slots the `Alt+L` cycle honors.
+pub const MAX_LEFT_PANE_RATIO_SLOTS: usize = 5;
 
 /// OpenAI-compat proxy router configuration.
 ///
@@ -955,6 +989,7 @@ impl Default for Config {
       strict_fit: false,
       jinja: true,
       ascii_glyphs: false,
+      left_pane_ratios: default_left_pane_ratios(),
       presets: BTreeMap::new(),
     }
   }
@@ -1161,6 +1196,21 @@ mod tests {
   };
 
   use super::*;
+
+  #[test]
+  fn sanitize_left_pane_ratios_caps_clamps_and_defaults() {
+    // Factory default when unset/empty.
+    assert_eq!(sanitize_left_pane_ratios(&[]), default_left_pane_ratios());
+    // A valid override passes through verbatim (order + dupes preserved).
+    assert_eq!(sanitize_left_pane_ratios(&[40, 40, 80]), vec![40, 40, 80]);
+    // At most 5 slots — the 6th+ are ignored.
+    assert_eq!(
+      sanitize_left_pane_ratios(&[10, 20, 30, 40, 50, 60, 70]),
+      vec![10, 20, 30, 40, 50]
+    );
+    // Each slot clamps to 0..=100 (150 -> 100).
+    assert_eq!(sanitize_left_pane_ratios(&[150, 0, 100]), vec![100, 0, 100]);
+  }
 
   #[test]
   fn preset_body_deserialises_flattened_knobs() {

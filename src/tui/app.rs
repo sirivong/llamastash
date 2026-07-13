@@ -270,6 +270,11 @@ pub struct AppOptions {
   /// off so the terminal keeps native click-and-drag text selection
   /// — see the long comment in [`super::events::run`] for the trade.
   pub mouse_focus: bool,
+  /// Left (Models list) pane width percentages the `Alt+L` shortcut cycles
+  /// through in wide mode. Already sanitized (≤5 slots, each `0..=100`, never
+  /// empty) by [`crate::config::loader::sanitize_left_pane_ratios`]. Slot 0 is
+  /// the startup default; `App::left_pane_ratio_slot` tracks the live pick.
+  pub left_pane_ratios: Vec<u16>,
 }
 
 impl Default for AppOptions {
@@ -280,6 +285,7 @@ impl Default for AppOptions {
       keymap: KeyMap::default(),
       offline: false,
       mouse_focus: false,
+      left_pane_ratios: crate::config::loader::default_left_pane_ratios(),
     }
   }
 }
@@ -439,6 +445,9 @@ pub struct App {
   /// toast each refresh; transitions keep the noise to once-per-
   /// session-collision.
   pub(crate) last_proxy_status: Option<String>,
+  /// Live index into [`AppOptions::left_pane_ratios`] — the wide-mode split the
+  /// `Alt+L` shortcut cycles. Session-only: starts at slot 0 each launch.
+  pub(crate) left_pane_ratio_slot: usize,
 }
 
 /// Fully-resolved launch request shared by `WriterCmd::StartModel`
@@ -582,6 +591,24 @@ impl App {
       hit_rects: RefCell::new(MouseHitRects::default()),
       events_tx: None,
       last_proxy_status: None,
+      left_pane_ratio_slot: 0,
+    }
+  }
+
+  /// The left (Models list) pane width % for the current cycle slot, used by
+  /// the wide-mode body split. Falls back to the factory default if the slot
+  /// list is somehow empty (sanitizer guarantees it isn't).
+  pub fn left_pane_ratio(&self) -> u16 {
+    let slots = &self.options.left_pane_ratios;
+    slots.get(self.left_pane_ratio_slot).copied().unwrap_or(65)
+  }
+
+  /// Advance `Alt+L` to the next left/right split slot, wrapping. Session-only
+  /// (never persisted). No-op when only one slot is configured.
+  pub fn cycle_left_pane_ratio(&mut self) {
+    let len = self.options.left_pane_ratios.len();
+    if len > 0 {
+      self.left_pane_ratio_slot = (self.left_pane_ratio_slot + 1) % len;
     }
   }
 
@@ -2310,6 +2337,31 @@ mod tests {
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
   use crate::launch::list_devices::LaunchDevice;
   use serde_json::json;
+
+  #[test]
+  fn cycle_left_pane_ratio_walks_slots_and_wraps() {
+    let mut app = App::new(AppOptions {
+      left_pane_ratios: vec![65, 100, 50],
+      ..Default::default()
+    });
+    assert_eq!(app.left_pane_ratio(), 65, "starts at slot 0");
+    app.cycle_left_pane_ratio();
+    assert_eq!(app.left_pane_ratio(), 100);
+    app.cycle_left_pane_ratio();
+    assert_eq!(app.left_pane_ratio(), 50);
+    app.cycle_left_pane_ratio();
+    assert_eq!(app.left_pane_ratio(), 65, "wraps back to slot 0");
+  }
+
+  #[test]
+  fn cycle_left_pane_ratio_single_slot_is_stable() {
+    let mut app = App::new(AppOptions {
+      left_pane_ratios: vec![70],
+      ..Default::default()
+    });
+    app.cycle_left_pane_ratio();
+    assert_eq!(app.left_pane_ratio(), 70, "one slot: cycling is a no-op");
+  }
 
   fn fake(path: &str, parent: &str) -> DiscoveredModel {
     DiscoveredModel {

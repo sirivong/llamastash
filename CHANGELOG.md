@@ -10,6 +10,8 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - Proxy forwards the OpenAI **Responses API** (`/v1/responses` + `/v1/responses/input_tokens`) — both the llama.cpp and ds4 backends speak it, so agents on the Responses surface attach through the one stable proxy URL.
 - Context-length quick-picks extend to 1 Mi and are gated per model to its trained window — the ctx cycle never offers a context larger than the model supports (type a custom value for anything off the ladder).
 - A model's `default:` preset is now its standing launch config and **auto-applies** — on a plain `start <model>` (no `--preset`) and on proxy auto-start, not just as a TUI cycle hint. Resolved server-side as a new precedence layer (`your flags > default preset > last-used > arch defaults > fit`). `default: auto` launches pure fit; `start --preset auto` is the clean per-launch "ignore last-used + default" gesture. The TUI cycle drops the separate `[default]` stop, marks whichever stop is the default with `(default)` and opens on it, and the preset row shows the available count (`preset (N)`). See `docs/plans/2026-06-30-001-feat-default-preset-resolver-layer-plan.md`.
+- **`Alt+L` cycles the TUI left/right pane split.** Steps the Models-list width through the configurable `left_pane_ratios` slots (default `[65, 100, 50, 35, 0]`) in wide mode — `100` gives the list the whole width (all columns show), `0` hands it all to the right pane. Session-only; the pick resets to the first slot on restart.
+- A **Params** column in the model list (TUI + `llamastash list`) showing the parameter count (`7B`, `235B`, `1.2T`), derived from the GGUF header. The label is now compact and accurate across the full range instead of bucketed.
 
 ### Changed
 

@@ -17,9 +17,8 @@ pub struct ModelMetadata {
   pub arch: Option<String>,
   /// Approximate total parameter count, where derivable.
   pub total_parameters: Option<u64>,
-  /// Common human label for the parameter count (e.g., "7B"). Optional;
-  /// returned only when `total_parameters` is set and matches a familiar
-  /// bucket.
+  /// Compact human label for the parameter count (e.g., "7B", "235B",
+  /// "1.2T"). `None` when `total_parameters` is unset or below 100M.
   pub parameter_label: Option<String>,
   /// Dominant tensor quantisation across the model's weight tensors.
   pub quant: Quant,
@@ -367,31 +366,31 @@ fn parameter_count(header: &GgufHeader, arch: Option<&str>) -> Option<u64> {
   }
 }
 
-/// Round a raw parameter count to a familiar "0.5B / 1B / 3B / 7B / 13B"
-/// bucket. Returns `None` if the count is too small to label confidently.
+/// Format a raw parameter count as a compact, accurate label:
+/// `6_900_000_000` → `6.9B`, `8_030_000_000` → `8B`,
+/// `235_000_000_000` → `235B`, `671_000_000_000` → `671B`,
+/// `1_200_000_000_000` → `1.2T`. Values at/above 100 drop the
+/// decimal, and a trailing `.0` is trimmed so `7.0B` reads as `7B`.
+/// Returns `None` below 100M, where a tensor-summed count is too
+/// noisy to label confidently.
 fn label_for_param_count(count: u64) -> Option<String> {
-  const G: u64 = 1_000_000_000;
   const M: u64 = 1_000_000;
-  let buckets_b: &[(u64, &str)] = &[
-    (500 * M, "0.5B"),
-    (G, "1B"),
-    (3 * G, "3B"),
-    (7 * G, "7B"),
-    (8 * G, "8B"),
-    (13 * G, "13B"),
-    (20 * G, "20B"),
-    (30 * G, "30B"),
-    (34 * G, "34B"),
-    (70 * G, "70B"),
-    (180 * G, "180B"),
-  ];
   if count < 100 * M {
     return None;
   }
-  let (_, label) = buckets_b
-    .iter()
-    .min_by_key(|(target, _)| (count as i128 - *target as i128).unsigned_abs())?;
-  Some((*label).to_string())
+  let (value, unit) = if count >= 1_000_000 * M {
+    (count as f64 / 1e12, "T")
+  } else {
+    (count as f64 / 1e9, "B")
+  };
+  let label = if value >= 100.0 {
+    format!("{value:.0}{unit}")
+  } else {
+    let one_dp = format!("{value:.1}");
+    let trimmed = one_dp.strip_suffix(".0").unwrap_or(&one_dp);
+    format!("{trimmed}{unit}")
+  };
+  Some(label)
 }
 
 /// The most byte-significant quant across weight tensors. Used as a
@@ -713,9 +712,29 @@ mod tests {
   }
 
   #[test]
-  fn parameter_label_buckets_to_7b() {
-    let label = label_for_param_count(6_900_000_000);
-    assert_eq!(label.as_deref(), Some("7B"));
+  fn parameter_label_formats_compact_and_accurate() {
+    assert_eq!(
+      label_for_param_count(6_900_000_000).as_deref(),
+      Some("6.9B")
+    );
+    // Trailing `.0` trims: 8.03B rounds to one decimal then drops it.
+    assert_eq!(label_for_param_count(8_030_000_000).as_deref(), Some("8B"));
+    assert_eq!(label_for_param_count(7_000_000_000).as_deref(), Some("7B"));
+    // Large models keep their real magnitude instead of collapsing.
+    assert_eq!(
+      label_for_param_count(235_000_000_000).as_deref(),
+      Some("235B")
+    );
+    assert_eq!(
+      label_for_param_count(671_000_000_000).as_deref(),
+      Some("671B")
+    );
+    assert_eq!(
+      label_for_param_count(1_200_000_000_000).as_deref(),
+      Some("1.2T")
+    );
+    // Below 100M is too noisy to label.
+    assert_eq!(label_for_param_count(50_000_000), None);
   }
 
   #[test]

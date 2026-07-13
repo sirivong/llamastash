@@ -432,40 +432,48 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) 
   let filter_chip = models_filter_chip(app);
   let list_focused = list_is_focused(app.focus);
   let right_focused = right_is_focused(app.focus);
+  // A `left_pane_ratios` slot of `100` (list-full) or `0` (right-full)
+  // collapses one pane to zero width. Skip rendering a zero-width pane —
+  // widgets subtract border cells and would underflow — and zero its
+  // hit-test rect so a stray click can't match a collapsed footprint.
+  let show_list = split[0].width > 0;
+  let show_right_pane = show_right && split.get(1).is_some_and(|r| r.width > 0);
   // Refresh the body-level hit-test rects for the mouse-focus
   // dispatch. The list-pane rect is always populated; the right-pane
   // rect is zeroed when the right pane is hidden so a stray click in
   // that screen region doesn't match a stale frame's footprint.
   {
     let mut hits = app.hit_rects.borrow_mut();
-    hits.list_pane = split[0];
-    hits.right_pane = if show_right {
+    hits.list_pane = if show_list { split[0] } else { Rect::default() };
+    hits.right_pane = if show_right_pane {
       split[1]
     } else {
       Rect::default()
     };
-    if !show_right {
+    if !show_right_pane {
       hits.right_tabs.clear();
     }
   }
-  if rows.is_empty() {
-    render_empty_state(frame, split[0], palette, title, &filter_chip, list_focused);
-  } else {
-    list_pane::render(
-      frame,
-      split[0],
-      palette,
-      list_pane::RenderInputs {
-        rows: &rows,
-        selected: app.list_cursor,
-        title,
-        filter_chip_label: &filter_chip,
-        focused: list_focused,
-        show_device: app.multi_device(),
-      },
-    );
+  if show_list {
+    if rows.is_empty() {
+      render_empty_state(frame, split[0], palette, title, &filter_chip, list_focused);
+    } else {
+      list_pane::render(
+        frame,
+        split[0],
+        palette,
+        list_pane::RenderInputs {
+          rows: &rows,
+          selected: app.list_cursor,
+          title,
+          filter_chip_label: &filter_chip,
+          focused: list_focused,
+          show_device: app.multi_device(),
+        },
+      );
+    }
   }
-  if show_right {
+  if show_right_pane {
     right_pane::render(frame, split[1], app, palette, right_focused);
   }
 }
@@ -476,13 +484,18 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) 
 /// - **Right hidden** → list owns the whole body, regardless of
 ///   width. Covers both `models.is_empty()` and compact-mode with
 ///   focus on the list.
-/// - **Wide mode** (`area.width ≥ COMPACT_WIDTH_THRESHOLD`) →
-///   `65 / 35` (the established wide-mode split).
-/// - **Compact mode, drilled in** → `35 / 65`. The list collapses
-///   to its marker + Name column (the ranked-column picker drops
-///   everything else as the budget shrinks), and the right pane
-///   gets the larger slice for chat / settings / logs content.
-fn body_split(area: Rect, show_right: bool, _app: &App) -> std::rc::Rc<[Rect]> {
+/// - **Wide mode** (`area.width ≥ COMPACT_WIDTH_THRESHOLD`) → the
+///   user's `Alt+L` cycle slot (`App::left_pane_ratio`, default
+///   `65`), so the left/right split is `<slot> / <100 - slot>`.
+///   `100` collapses the right pane; `0` collapses the list — the
+///   caller skips rendering a zero-width pane.
+/// - **Compact mode, drilled in** → `35 / 65`, unchanged. The list
+///   collapses to its marker + Name column (the ranked-column picker
+///   drops everything else as the budget shrinks), and the right
+///   pane gets the larger slice for chat / settings / logs content.
+///   The ratio override is wide-mode only so it can't fight the
+///   compact drill-in.
+fn body_split(area: Rect, show_right: bool, app: &App) -> std::rc::Rc<[Rect]> {
   if !show_right {
     return Layout::default()
       .direction(Direction::Horizontal)
@@ -490,7 +503,11 @@ fn body_split(area: Rect, show_right: bool, _app: &App) -> std::rc::Rc<[Rect]> {
       .split(area);
   }
   let constraints = if area.width >= crate::tui::app::COMPACT_WIDTH_THRESHOLD {
-    [Constraint::Percentage(65), Constraint::Percentage(35)]
+    let left = app.left_pane_ratio();
+    [
+      Constraint::Percentage(left),
+      Constraint::Percentage(100 - left),
+    ]
   } else {
     [Constraint::Percentage(35), Constraint::Percentage(65)]
   };
@@ -766,6 +783,42 @@ mod tests {
   use ratatui::backend::TestBackend;
   use ratatui::style::Color;
   use ratatui::Terminal;
+
+  #[test]
+  fn body_split_wide_follows_the_left_pane_ratio_slot() {
+    let mut app = App::new(AppOptions {
+      left_pane_ratios: vec![65, 100, 0],
+      ..Default::default()
+    });
+    let area = Rect::new(0, 0, 200, 40); // safely wide (> COMPACT_WIDTH_THRESHOLD)
+
+    // Slot 0 (65) → 65 / 35 of 200.
+    let slot0 = body_split(area, true, &app);
+    assert_eq!((slot0[0].width, slot0[1].width), (130, 70));
+
+    // Slot 1 (100) → list full, right pane collapses to zero width.
+    app.cycle_left_pane_ratio();
+    let slot1 = body_split(area, true, &app);
+    assert_eq!((slot1[0].width, slot1[1].width), (200, 0));
+
+    // Slot 2 (0) → list collapses, right pane full.
+    app.cycle_left_pane_ratio();
+    let slot2 = body_split(area, true, &app);
+    assert_eq!((slot2[0].width, slot2[1].width), (0, 200));
+  }
+
+  #[test]
+  fn body_split_ignores_ratio_in_compact_mode() {
+    let app = App::new(AppOptions {
+      left_pane_ratios: vec![90],
+      ..Default::default()
+    });
+    // Narrow area (< COMPACT_WIDTH_THRESHOLD) keeps the adaptive 35 / 65
+    // drill-in regardless of the configured slot.
+    let area = Rect::new(0, 0, 80, 40);
+    let s = body_split(area, true, &app);
+    assert_eq!((s[0].width, s[1].width), (28, 52)); // 35% / 65% of 80
+  }
 
   fn render_into(width: u16, height: u16, mut app: App) -> Vec<String> {
     let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1194,6 +1247,7 @@ mod tests {
         path: PathBuf::from("/m/qwen.gguf"),
         name: "qwen".into(),
         arch: String::new(),
+        params: String::new(),
         quant: String::new(),
         native_ctx: None,
         weights_bytes: None,

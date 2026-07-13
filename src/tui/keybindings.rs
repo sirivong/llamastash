@@ -200,6 +200,11 @@ pub enum Action {
   /// Cycle to the previous theme — overshoot recovery for the
   /// forward `t:theme` chord. Bound to `Shift+T`.
   CycleThemePrev,
+  /// Cycle the wide-mode left/right pane split through the configured
+  /// `left_pane_ratios` slots (session-only). Bound to `Alt+L` — a
+  /// view/layout action, so `Alt` rather than the `Shift` (navigate) or
+  /// `Ctrl` (destructive) namespaces.
+  CyclePaneRatio,
   /// Snap focus back to the Models list. Bound to `Esc` in the
   /// right pane (closes the pane) and in the AdvancedPanel
   /// overlay. The LaunchPicker is no longer a modal — Settings
@@ -490,6 +495,13 @@ fn build_default_bindings() -> Vec<Binding> {
     action: Action::CycleThemePrev, scopes: FocusSet::NAV,
     hint: "prev theme", description: None,
     chords: [(KeyCode::Char('T'), KeyModifiers::SHIFT, "T", CAT_GLOBAL)],
+  });
+  // View/layout (Alt namespace). `Alt+l` reports as lowercase `l` + ALT
+  // (no Shift), unlike the Shift-letter jumps that match uppercase.
+  v.extend_from_slice(&binds! {
+    action: Action::CyclePaneRatio, scopes: FocusSet::NAV,
+    hint: "split", description: Some("cycle pane split"),
+    chords: [(KeyCode::Char('l'), KeyModifiers::ALT, crate::alt_label!("L"), CAT_GLOBAL)],
   });
   // ─── Daemon-level / destructive (all behind Ctrl) ───────────
   v.extend_from_slice(&binds! {
@@ -1074,6 +1086,7 @@ impl Action {
     ("yank_path", Action::YankPath),
     ("cycle_theme", Action::CycleTheme),
     ("cycle_theme_prev", Action::CycleThemePrev),
+    ("cycle_pane_ratio", Action::CyclePaneRatio),
     ("open_hf_dialog", Action::OpenHfDialog),
     ("save_preset", Action::SavePreset),
     ("focus_list", Action::FocusList),
@@ -1419,6 +1432,29 @@ mod tests {
   }
 
   #[test]
+  fn alt_l_cycles_pane_ratio_from_nav_not_from_inputs() {
+    // Alt+l (no Shift -> lowercase 'l') cycles the split from any nav focus.
+    assert_eq!(
+      action_for(Focus::List, KeyCode::Char('l'), KeyModifiers::ALT),
+      Some(Action::CyclePaneRatio)
+    );
+    assert_eq!(
+      action_for(Focus::RightPane, KeyCode::Char('l'), KeyModifiers::ALT),
+      Some(Action::CyclePaneRatio)
+    );
+    // Not bound in text inputs, so typing there is unaffected.
+    assert_eq!(
+      action_for(Focus::ChatInput, KeyCode::Char('l'), KeyModifiers::ALT),
+      None
+    );
+    // Doesn't shadow the existing Shift+L (jump to Logs tab).
+    assert_eq!(
+      action_for(Focus::List, KeyCode::Char('L'), KeyModifiers::SHIFT),
+      Some(Action::FocusLogsTab)
+    );
+  }
+
+  #[test]
   fn shift_p_in_list_focus_opens_hf_dialog() {
     // Navigation policy: "Pull" lives behind Shift+P (Shift =
     // navigate). The `d` key is reserved for Ctrl+D = delete.
@@ -1724,6 +1760,10 @@ mod tests {
     assert_eq!(
       Action::from_config_name("cycle-theme"),
       Some(Action::CycleTheme)
+    );
+    assert_eq!(
+      Action::from_config_name("cycle_pane_ratio"),
+      Some(Action::CyclePaneRatio)
     );
     assert_eq!(Action::from_config_name("nope"), None);
   }

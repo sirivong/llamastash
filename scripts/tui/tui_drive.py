@@ -17,7 +17,8 @@ The script is a JSON array of [keys, wait_seconds, label] steps:
 
 Keys are sent as literal characters; `|` separates tokens inside one step and
 these named tokens map to escape sequences: <down> <up> <left> <right>
-<enter> <esc> <tab>, plus <ctrl-x> for any control chord (e.g. <ctrl-p>).
+<enter> <esc> <tab>, plus <ctrl-x> for any control chord (e.g. <ctrl-p>)
+and <alt-x> for any Alt chord (e.g. <alt-l>).
 After each step's keys, the driver pumps pty output for
 `wait_seconds`, then prints the screen under a `===== SCREEN: <label> =====`
 header. `q` is sent at the end so the TUI exits cleanly.
@@ -55,10 +56,14 @@ KEYMAP = {
 
 def expand(token: str) -> str:
     """Map a token to the bytes to send. `<ctrl-x>` becomes the control
-    byte for letter x (Ctrl+P -> 0x10); known tokens use KEYMAP; anything
-    else is sent literally (so plain text types itself)."""
+    byte for letter x (Ctrl+P -> 0x10); `<alt-x>` becomes ESC+x in one write
+    (how terminals encode Alt+letter, so crossterm decodes it as Alt+x rather
+    than a bare Esc); known tokens use KEYMAP; anything else is sent literally
+    (so plain text types itself)."""
     if token.startswith("<ctrl-") and token.endswith(">") and len(token) == 8:
         return chr(ord(token[6].upper()) - 0x40)
+    if token.startswith("<alt-") and token.endswith(">") and len(token) == 7:
+        return "\x1b" + token[5]
     return KEYMAP.get(token, token)
 
 

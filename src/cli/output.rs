@@ -27,7 +27,7 @@ pub fn row_path(v: &Value) -> Option<&str> {
 
 /// Render `list_models` rows as a padded table on TTY, or
 /// tab-separated rows when colors are disabled (piped / `--no-colors` /
-/// `NO_COLOR`). Columns: NAME, ARCH, QUANT, CTX, SIZE, STATUS.
+/// `NO_COLOR`). Columns: NAME, ARCH, PARAMS, QUANT, CTX, SIZE, STATUS.
 ///
 /// SIZE displays the GGUF weights footprint (matches the TUI list
 /// pane's SIZE column) — PATH was dropped because the canonical paths
@@ -47,14 +47,15 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
   if rows.is_empty() {
     return format!("{}\n", colors::dim("(no models discovered)"));
   }
-  let header = ["NAME", "ARCH", "QUANT", "CTX", "SIZE", "STATUS"];
+  let header = ["NAME", "ARCH", "PARAMS", "QUANT", "CTX", "SIZE", "STATUS"];
   let body: Vec<Vec<String>> = rows
     .iter()
     .map(|r| {
-      // Shared `list_cell` so a missing Arch/Quant reads as one placeholder
-      // (`?`), matching the TUI list — an unknown quant no longer leaks the
-      // literal `Unknown` while Arch shows `?`.
+      // Shared `list_cell` so a missing Arch/Quant/Params reads as one
+      // placeholder (`?`), matching the TUI list — an unknown quant no longer
+      // leaks the literal `Unknown` while Arch shows `?`.
       let arch = crate::tui::fmt::list_cell(r.arch.as_deref(), "?");
+      let params = crate::tui::fmt::list_cell(r.parameter_label.as_deref(), "?");
       let quant = crate::tui::fmt::list_cell(r.quant.as_deref(), "?");
       let ctx = r
         .native_ctx
@@ -67,7 +68,7 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
       // split-shard aggregation). One `stat` per row is cheap.
       let size = display_size(r);
       let status = running_status_cell(running.get(&r.path));
-      vec![r.name(), arch, quant, ctx, size, status]
+      vec![r.name(), arch, params, quant, ctx, size, status]
     })
     .collect();
   let mut out = format::table(&header, &body);
@@ -716,7 +717,7 @@ mod tests {
     let s = list_human(&rows, &HashMap::new());
     assert_eq!(
       s,
-      "NAME\tARCH\tQUANT\tCTX\tSIZE\tSTATUS\nqwen.gguf\tqwen2\tQ4_K\t8192\t3.9G\t\n"
+      "NAME\tARCH\tPARAMS\tQUANT\tCTX\tSIZE\tSTATUS\nqwen.gguf\tqwen2\t7B\tQ4_K\t8192\t3.9G\t\n"
     );
   }
 

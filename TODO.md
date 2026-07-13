@@ -202,7 +202,7 @@ places.
 - [x] ~~ds4 (DwarfStar) as a direct peer backend for DeepSeek V4 GGUFs.~~ — shipped: the PR #46 native-knob channel landed first, then the ds4 backend (`src/backend/ds4/`), compat-predicate routing with llama.cpp fallback (`ds4_compatible`), config/enablement (`[ds4]`, `--ds4`, `LLAMASTASH_DS4`), admission/`ssd_streaming` bypass, adoption + external sweep, proxy `/ui` exclusion, `ds4_unavailable` doctor advisory, and docs. Plan: [`docs/plans/2026-07-10-001-feat-ds4-backend-plan.md`](docs/plans/2026-07-10-001-feat-ds4-backend-plan.md). Deferred follow-ups (documented as scope-out, not gaps):
   - [x] ~~`/v1/responses` proxy forwarding~~ — done: llama-server and ds4-server both speak it, so the proxy byte-pipes `/v1/responses` + `/v1/responses/input_tokens` like the other `/v1` routes. See [`src/proxy/router.rs`](src/proxy/router.rs).
   - [x] ~~deepseek4 KV-cache geometry in the admission demand model~~ — done: `deepseek4_kv_bytes` models the two-tier cache from the header (`attention.compress_ratios` + `key_length`), tracking reality (~0.5 GiB at 16k, ~11 GiB at 1M for Flash) instead of the naive GQA over-count (~86 GiB at 1M); the "KV demand not modeled" advisory is dropped. See [`src/gguf/memory.rs`](src/gguf/memory.rs).
-- [ ] a keybinding (shift+l) to switch left/right pane ratio (configurable in config.yaml. 4 slots with defaults current/50/70/90)
+- [x] ~~a keybinding (shift+l) to switch left/right pane ratio (configurable in config.yaml. 4 slots with defaults current/50/70/90)~~ — done as **`Alt+L`** (Shift+L was already the Logs jump; Alt is the free view/layout namespace). Cycles `left_pane_ratios` (config, default `[65, 100, 50, 35, 0]` = left-pane width %, ≤5 slots, wide-mode only, session-only); `100`/`0` collapse the right pane / the list. See `body_split` in [`src/tui/render.rs`](src/tui/render.rs) + `App::cycle_left_pane_ratio`.
 - [x] lemond runs should show consistent values for unknown/empty columns.
 - [x] what happens when you try to delete a lemonade model?
 - [x] revisist path, status and badge row of different backend runs. see if they are useful and if we miss something thats more useful.
@@ -215,6 +215,8 @@ places.
 - [ ] CLI status should also show WEB UI URL.
 - [ ] Update website and main docs to refelect multiple backends supported
 - [ ] unable to favorite lemonade models and they dont appear in recents as well.
+- [x] ~~add a param field to model list TUI/CLI~~ — done: a `Params` column (parameter count `7B` / `235B` / `1.2T`) in the TUI Models list and `llamastash list`, from the GGUF header; the label formatter is now compact + accurate across the range. Arch column widened to 11 (fits `deepseek4` / `qwen3next`), Mode narrowed to 6.
+- [ ] add a backend field to model list TUI/CLI
 - [x] ~~The (model/server default) label for setting knobs should not wrap; cut off what doesn't fit and show `…`.~~ — Settings rows clip to the pane width with `…` (no `Wrap`); the running view and editable form now share one render path (`fmt::clip_line` is the shared primitive), so both truncate identically. (821c26b)
 - [x] ~~show a label (N) near the prest knob in settings to indicate how many presets are available for the current model. (N=0 if none)~~ — the Settings preset row renders `preset (N)` (count of effective named presets), `preset (0)` when none.
 

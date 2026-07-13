@@ -7,16 +7,16 @@
 │backend  NVIDIA · 1 GPU││running 1 (qwen-7b :41100)                                                       ││  ▀████▀  │
 └───────────────────────┘└─────────────────────────────────────────────────────────────────────────────────┘└──────────┘
 ┌ Models [3] · /:filter · ⏎:launch · Ctrl+s:stop · f:fav · p:path · u:url ───┐┌ Settings │ Logs │ Chat ────────────────┐
-│   Name                                      Arch     Quant   Ctx     Size  ││                                        │
+│   Name                                   Arch        Quant   Ctx     Size  ││                                        │
 │▶ Running                                                                   ││ qwen-7b                                │
-│ ● qwen-7b                                   qwen3    Q4_K    32k     4.2G  ││ /m/x/qwen-7b.gguf                      │
+│ ● qwen-7b                                qwen3       Q4_K    32k     4.2G  ││ /m/x/qwen-7b.gguf                      │
 │★ Favorites                                                                 ││                                        │
-│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ ID:L1  :41100  ● ready · 4.2G RAM · 31 │
+│ ★ mistral-7b                             llama       Q4_K    8.0k    4.0G  ││ ID:L1  :41100  ● ready · 4.2G RAM · 31 │
 │────────────────────────────────────────────────────────────────────────────││ ────────────────────────────────────── │
 │m/x                                                                         ││ ┌ Prompt ────────────────────────────┐ │
-│ ★ mistral-7b                                llama    Q4_K    8.0k    4.0G  ││ │Explain GGUF in one sentence        │ │
+│ ★ mistral-7b                             llama       Q4_K    8.0k    4.0G  ││ │Explain GGUF in one sentence        │ │
 │m/y                                                                         ││ └────────────────────────────────────┘ │
-│   phi-3                                     phi      Q4_K    8.0k    3.9G  ││ GGUF is a single-file container for    │
+│   phi-3                                  phi         Q4_K    8.0k    3.9G  ││ GGUF is a single-file container for    │
 │                                                                            ││ quantized model weights plus metadata. │
 │                                                                            ││                                        │
 │                                                                            ││                                        │

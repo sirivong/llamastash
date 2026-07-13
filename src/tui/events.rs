@@ -868,6 +868,8 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
       app.cycle_theme_prev();
       app.show_toast(format!("theme → {}", app.options.theme.canonical()));
     }
+    // No toast: the split visibly changes, so a toast would be redundant noise.
+    Action::CyclePaneRatio => app.cycle_left_pane_ratio(),
     Action::ToggleHelp => app.toggle_help(),
     Action::FocusList => {
       // When `e` staged an edit-for-launch picker over a running
@@ -2712,6 +2714,7 @@ pub async fn launch(
   keymap: crate::tui::keybindings::KeyMap,
   offline: bool,
   mouse_focus: bool,
+  left_pane_ratios: Vec<u16>,
   socket: &Path,
   daemon_opts: Option<crate::daemon::DaemonOptions>,
   daemon_start_error: Option<String>,
@@ -2722,6 +2725,7 @@ pub async fn launch(
     keymap,
     offline,
     mouse_focus,
+    left_pane_ratios,
   });
   // Startup auto-spawn refused (backend fail-fast precheck) — the TUI
   // runs daemon-less and the Daemon panel explains why. Cleared by

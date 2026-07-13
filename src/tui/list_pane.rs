@@ -35,6 +35,10 @@ use crate::tui::status_icons::{colour_for, glyph_for, SurfaceState};
 
 /// A row as it appears in the rendered list — table header, group
 /// header, or model row.
+// `Model` carries every column's data and dwarfs the other variants; these
+// rows are short-lived (rebuilt each render, dozens at most), so boxing the big
+// variant would add a per-row heap allocation for no real memory win.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListRow {
   /// Always-on column-label row pinned to the top of the list.
@@ -61,6 +65,9 @@ pub enum ListRow {
     /// Architecture badge (e.g. `llama`, `qwen3`); empty when
     /// metadata is unavailable.
     arch: String,
+    /// Parameter-count label (e.g. `7B`, `13B`); empty when the
+    /// count is unknown or too small to bucket.
+    params: String,
     /// Quantisation badge (e.g. `Q4_K`, `Q8_0`).
     quant: String,
     /// Native context length in tokens, when known.
@@ -316,6 +323,7 @@ fn running_row_stub(launch: &RunningLaunchRow) -> ListRow {
     // keeps the full name for synthetic paths and still stems real GGUF files.
     name: crate::util::paths::model_display_name(&launch.path),
     arch: String::new(),
+    params: String::new(),
     quant: String::new(),
     native_ctx: None,
     weights_bytes: None,
@@ -357,15 +365,23 @@ fn model_row(
   device: Option<String>,
   launch_id: Option<String>,
 ) -> ListRow {
-  let (arch, quant, native_ctx, mode_hint, cached_weights_bytes) = match &m.metadata {
+  let (arch, params, quant, native_ctx, mode_hint, cached_weights_bytes) = match &m.metadata {
     Some(md) => (
       md.arch.clone().unwrap_or_default(),
+      md.parameter_label.clone().unwrap_or_default(),
       md.quant.label().to_string(),
       md.native_ctx,
       mode_hint_label(md.mode_hint),
       md.weights_bytes,
     ),
-    None => (String::new(), String::new(), None, "unknown".into(), None),
+    None => (
+      String::new(),
+      String::new(),
+      String::new(),
+      None,
+      "unknown".into(),
+      None,
+    ),
   };
   // Same shard-aware on-disk total the CLI's `list` and `show`
   // surface use. Reading from disk every refresh keeps the value
@@ -377,6 +393,7 @@ fn model_row(
     path: m.path.clone(),
     name: display_name(m),
     arch,
+    params,
     quant,
     native_ctx,
     weights_bytes,
@@ -465,6 +482,7 @@ const PREFERRED_NAME_W: usize = 33;
 enum ColumnId {
   Device,
   Arch,
+  Param,
   Quant,
   Ctx,
   Size,
@@ -500,6 +518,9 @@ struct Column {
 ///   as `Port` so they drop together once the budget tightens.
 /// - `Port` (50): only meaningful for the small subset of running
 ///   rows; the marker glyph already encodes "this is running".
+/// - `Param` (60): parameter-count label; a nice-to-have secondary
+///   fit signal (`Size` already carries the real footprint), so it
+///   is the first column to drop under width pressure.
 ///
 /// Source order is the display order. Picker reorders by rank only
 /// for the visibility decision.
@@ -507,8 +528,18 @@ const COLUMNS: &[Column] = &[
   Column {
     id: ColumnId::Arch,
     label: "Arch",
-    width: 8,
+    // Fits the longer arch ids (`deepseek4`, `qwen3next`, `starcoder2`,
+    // `granitemoe`) without truncation.
+    width: 11,
     rank: 40,
+  },
+  Column {
+    id: ColumnId::Param,
+    label: "Params",
+    // Header "Params" (6) and the widest values (`235B`, `1.2T`) both
+    // fit; the extra cell keeps a gap before the next column.
+    width: 7,
+    rank: 60,
   },
   Column {
     id: ColumnId::Quant,
@@ -531,7 +562,9 @@ const COLUMNS: &[Column] = &[
   Column {
     id: ColumnId::Mode,
     label: "Mode",
-    width: 10,
+    // Sized to fit `rerank` (the label that must stay whole); `embedding`
+    // truncates with an ellipsis, which is fine for the secondary signal.
+    width: 6,
     rank: 50,
   },
   // `:port` for a u16 maxes at 6 cells (`:65535`); the column
@@ -986,6 +1019,7 @@ fn marker_span(state: SurfaceState, favorite: bool, palette: &Palette) -> Span<'
 fn column_value(id: ColumnId, model: &ListRow) -> String {
   let ListRow::Model {
     arch,
+    params,
     quant,
     native_ctx,
     weights_bytes,
@@ -1005,6 +1039,7 @@ fn column_value(id: ColumnId, model: &ListRow) -> String {
   match id {
     ColumnId::Device => crate::tui::fmt::list_cell(device.as_deref(), dash),
     ColumnId::Arch => crate::tui::fmt::list_cell(Some(arch), dash),
+    ColumnId::Param => crate::tui::fmt::list_cell(Some(params), dash),
     ColumnId::Quant => crate::tui::fmt::list_cell(Some(quant), dash),
     ColumnId::Ctx => native_ctx.map(format_tokens).unwrap_or_else(|| dash.into()),
     ColumnId::Size => weights_bytes

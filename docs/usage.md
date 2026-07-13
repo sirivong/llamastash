@@ -81,6 +81,8 @@ mouse_focus: false # Opt into mouse capture for click-to-focus / click-to-tab. D
 
 ascii_glyphs: false # Render the TUI with the 7-bit ASCII glyph fallback (status dots, severity markers, box borders) for fonts that show the Unicode set as tofu. `LLAMASTASH_ASCII=1` wins over this.
 
+left_pane_ratios: [65, 100, 50, 35, 0] # Left (Models list) width % that `Alt+L` cycles through in wide mode; the right pane takes the remainder. 100 hides the right pane, 0 hides the list. Slot 0 is the startup default; the pick is session-only. At most 5 slots (extras ignored), each clamped 0..=100.
+
 proxy: # OpenAI-compat proxy router. See §"Proxy
   enabled: true # (OpenAI-compatible listener)" below for
   ollama_compat:
@@ -850,6 +852,7 @@ These are the defaults. Override any binding via the `keybindings:` block in `co
 | `Enter`                                       | Open launch picker on focused model                                                                                                                                                                      |
 | `u` / `c` / `p`                               | Yank URL / curl / model path. `y` is a vi-style alias for `c`.                                                                                                                                           |
 | `t` / `Shift+T`                               | Cycle theme forward / backward                                                                                                                                                                           |
+| `Alt+L` (`⌥L` on macOS)                       | Cycle the left/right pane split through `left_pane_ratios` (wide mode; session-only). `100` hides the right pane, `0` hides the list.                                                                    |
 | `Tab` / `Shift+Tab`                           | Move focus across panes (`h` / `l` do the same — Left/Right arrows are intentionally unbound on Models to avoid an asymmetric pane-jump)                                                                 |
 | `Shift+M` / `Shift+L` / `Shift+C` / `Shift+S` | Jump focus to Models / Logs / Chat / Settings respectively. `L` and `C` only fire when the focused model is running.                                                                                     |
 | `Shift+P`                                     | Open the HuggingFace pull dialog (Models list focus only — search + sort + paginate, download via the pinned status strip). "P" for Pull.                                                                |
