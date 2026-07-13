@@ -41,24 +41,6 @@ pub fn umbrella_launch_id() -> LaunchId {
   LaunchId("lemonade-umbrella".to_string())
 }
 
-/// Synthetic launch id for one *delegated* Lemonade model — a model made
-/// resident in the shared umbrella, not a supervised process of its own.
-/// `status` emits one row per resident model under this id so clients
-/// (TUI list pane, `llamastash list`) see the model itself; `stop_model`
-/// recognizes the prefix and unloads from the umbrella instead of
-/// killing a child. Distinct from [`umbrella_launch_id`] by the `:`.
-pub fn delegated_launch_id(name: &str) -> LaunchId {
-  LaunchId(format!("lemonade:{name}"))
-}
-
-/// Inverse of [`delegated_launch_id`]: the registry model name, or `None`
-/// when `id` isn't a delegated-lemonade launch id. Takes the raw string so
-/// both the daemon ([`LaunchId`]) and the TUI (plain `String` rows) share
-/// the one parser.
-pub fn delegated_model_name(id: &str) -> Option<&str> {
-  id.strip_prefix("lemonade:")
-}
-
 /// Synthetic [`ModelId`] for the umbrella. It is not a GGUF model, but the
 /// supervisor keys every [`ManagedModel`] by `ModelId`; using the `lemond`
 /// binary path keeps status output legible, and a fixed sentinel header

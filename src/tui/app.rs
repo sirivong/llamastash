@@ -1860,8 +1860,10 @@ impl App {
     // (Chat / Embed / Rerank) stays — requests ride the umbrella's
     // OpenAI-compat port directly — and Logs tails the shared `lemond`
     // log. A model with no mode surface (e.g. Whisper transcription,
-    // hint `Unknown`) gets Logs alone.
-    if crate::backend::lemonade::delegated_model_name(&managed.launch_id).is_some() {
+    // hint `Unknown`) gets Logs alone. Keys on the resolved `backend`
+    // (the umbrella row is already dropped at ingest), since the launch id
+    // is now a plain `L#` shared with every other backend.
+    if managed.backend.as_deref() == Some(crate::backend::lemonade::LEMONADE_BACKEND_ID) {
       if managed.state != SurfaceState::Ready {
         return vec![RightTab::Logs];
       }
@@ -2568,7 +2570,7 @@ mod tests {
           "backend": "lemonade",
         },
         {
-          "launch_id": "lemonade:Llama-3.1-8B",
+          "launch_id": "L1",
           "id": {"path": "lemonade://Llama-3.1-8B", "header_blake3": "00".repeat(32)},
           "port": 13305,
           "state": {"state": "ready"},
@@ -2579,11 +2581,7 @@ mod tests {
     });
     app.ingest_status(&body);
     let ids: Vec<&str> = app.managed.iter().map(|m| m.launch_id.as_str()).collect();
-    assert_eq!(
-      ids,
-      vec!["lemonade:Llama-3.1-8B"],
-      "umbrella row must be hidden"
-    );
+    assert_eq!(ids, vec!["L1"], "umbrella row must be hidden");
   }
 
   #[test]
@@ -3256,23 +3254,25 @@ mod tests {
     app.models = vec![chat_model, whisper];
     app.managed = vec![
       ManagedRow {
-        launch_id: "lemonade:qwen-FLM".into(),
+        launch_id: "L1".into(),
         path: PathBuf::from("lemonade://qwen-FLM"),
         port: 13305,
         state: SurfaceState::Ready,
         device: None,
         rss_bytes: None,
         cpu_pct: None,
+        backend: Some(crate::backend::lemonade::LEMONADE_BACKEND_ID.into()),
         ..Default::default()
       },
       ManagedRow {
-        launch_id: "lemonade:Whisper-Tiny".into(),
+        launch_id: "L2".into(),
         path: PathBuf::from("lemonade://Whisper-Tiny"),
         port: 13305,
         state: SurfaceState::Ready,
         device: None,
         rss_bytes: None,
         cpu_pct: None,
+        backend: Some(crate::backend::lemonade::LEMONADE_BACKEND_ID.into()),
         ..Default::default()
       },
     ];

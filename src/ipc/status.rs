@@ -144,6 +144,12 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
       let Some(backend_id) = running_snap.lemonade_backend_id() else {
         continue;
       };
+      // The `L#` stamped at launch (delegated rows have no supervisor to hold
+      // it). A lemonade snapshot without one is an unreachable leftover — skip
+      // it rather than emit a row the client can't stop.
+      let Some(launch_id) = running_snap.launch_id.clone() else {
+        continue;
+      };
       let state_obj = match ctx.supervisors.delegated_state(&backend_id.name).await {
         Some(s) => flatten_state(&s),
         None => ustate_obj.clone(),
@@ -171,7 +177,7 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
         &preset_store,
       );
       models.push(json!({
-        "launch_id": crate::backend::lemonade::delegated_launch_id(&backend_id.name),
+        "launch_id": launch_id,
         "id": synthetic_id,
         "port": running_snap.port,
         "mode": running_snap.params.mode.label(),
@@ -521,10 +527,12 @@ mod tests {
   }
 
   /// A delegated-lemonade snapshot the way `start_delegated_lemonade`
-  /// persists one: Backend identity + the synthetic `lemonade://` path.
+  /// persists one: Backend identity + the synthetic `lemonade://` path +
+  /// the registry-assigned `L#` handle.
   fn lemonade_running_snapshot(
     name: &str,
     port: u16,
+    launch_id: &str,
   ) -> crate::daemon::state_store::RunningSnapshot {
     crate::daemon::state_store::RunningSnapshot {
       id: crate::backend::identity::ModelIdentity::Backend(
@@ -536,6 +544,7 @@ mod tests {
       pid: 0,
       port,
       started_at: 0,
+      launch_id: Some(crate::daemon::registry::LaunchId(launch_id.to_string())),
       params: LaunchParams::new(
         PathBuf::from(format!("lemonade://{name}")),
         LaunchMode::Chat,
@@ -704,16 +713,18 @@ mod tests {
     // up → rows emitted) is covered in `lemonade_umbrella_test.rs`.
     let c = ctx();
     c.state
-      .mutate(|s| s.running.push(lemonade_running_snapshot("Qwen-X", 13305)))
+      .mutate(|s| {
+        s.running
+          .push(lemonade_running_snapshot("Qwen-X", 13305, "L1"))
+      })
       .await;
     let resp = dispatch_request(&c, Request::new(1, "status", None)).await;
     let body = resp.result.expect("status result");
     let models = body["models"].as_array().expect("models array");
     assert!(
-      !models.iter().any(|m| m["launch_id"]
-        .as_str()
-        .unwrap_or("")
-        .starts_with("lemonade:")),
+      !models
+        .iter()
+        .any(|m| m["backend"] == crate::backend::lemonade::LEMONADE_BACKEND_ID),
       "no delegated rows without a registered umbrella: {models:?}"
     );
   }

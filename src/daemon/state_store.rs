@@ -22,6 +22,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::identity::ModelIdentity;
+use crate::daemon::registry::LaunchId;
 use crate::launch::favorites::Favorites;
 use crate::launch::params::LaunchParams;
 use crate::launch::presets::PresetStore;
@@ -167,6 +168,16 @@ pub struct RunningSnapshot {
   /// transitioned the model to Ready. Serialised as seconds so the
   /// JSON stays human-readable.
   pub started_at: u64,
+  /// The `L#` launch handle assigned by [`crate::daemon::registry::SupervisorRegistry::next_id`].
+  /// Only stamped on **delegated** (Lemonade) rows: they have no supervisor of
+  /// their own, so the snapshot is the sole home for their launch id — `status`
+  /// reads it here and `stop_model` reverse-maps it to the umbrella model name.
+  /// Process launches key their id off the live supervisor map instead, so this
+  /// stays `None` for them (and is omitted from `state.json`, keeping those rows
+  /// byte-stable). The boot sweep clears `running`, so a persisted id never
+  /// survives a restart to collide with the fresh counter.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub launch_id: Option<LaunchId>,
   pub params: LaunchParams,
   /// What `--fit` actually chose, read from the child's `/props` once
   /// on Ready. Empty for adopted/external/Lemonade rows and until
@@ -339,6 +350,7 @@ mod tests {
       pid: 1234,
       port: 41100,
       started_at: 1_700_000_000,
+      launch_id: None,
       params: fake_params("/m/a.gguf"),
       actuals: Default::default(),
       resolved_backend: "llamacpp".to_string(),
@@ -592,6 +604,7 @@ mod tests {
       pid: 4321,
       port: 9100,
       started_at: 1_700_000_001,
+      launch_id: None,
       params: fake_params("/unused"),
       actuals: Default::default(),
       resolved_backend: "llamacpp".to_string(),

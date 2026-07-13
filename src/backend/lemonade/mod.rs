@@ -16,6 +16,4 @@ pub use backend::{
   LEMONADE_PATH_SCHEME,
 };
 pub use client::{LemonadeClient, LemonadeError, LoadOptions, ModelEntry};
-pub use orchestrate::{
-  delegated_launch_id, delegated_model_name, ensure_umbrella, umbrella_launch_id,
-};
+pub use orchestrate::{ensure_umbrella, umbrella_launch_id};

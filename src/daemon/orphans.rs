@@ -469,6 +469,7 @@ mod tests {
       pid,
       port,
       started_at: 1_700_000_000,
+      launch_id: None,
       params: LaunchParams::new(PathBuf::from(path), LaunchMode::Chat),
       actuals: Default::default(),
       resolved_backend: "llamacpp".to_string(),

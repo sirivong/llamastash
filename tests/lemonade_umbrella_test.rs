@@ -20,7 +20,7 @@ use llamastash::backend::{Backend, LaunchPlan};
 use llamastash::config::loader::{LemonadeConfig, PortRange};
 use llamastash::daemon::context::{LaunchEnv, MethodContext};
 use llamastash::daemon::probe::ProbeOptions;
-use llamastash::daemon::registry::SupervisorRegistry;
+use llamastash::daemon::registry::{LaunchId, SupervisorRegistry};
 use llamastash::daemon::shutdown::ShutdownToken;
 use llamastash::daemon::state_store::RunningSnapshot;
 use llamastash::daemon::supervisor::{ManagedModel, ManagedState};
@@ -202,17 +202,28 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
       false,
     );
 
+  // Delegated rows now carry a plain `L#` launch id (shared with every other
+  // backend), so locate them by their synthetic `lemonade://<name>` path — the
+  // stable per-model handle — rather than a name-encoded id.
   let row_state = |body: &serde_json::Value, name: &str| -> Option<(String, Option<String>)> {
     body["models"].as_array().and_then(|models| {
       models
         .iter()
-        .find(|m| m["launch_id"] == format!("lemonade:{name}"))
+        .find(|m| m["id"]["path"] == format!("lemonade://{name}"))
         .map(|m| {
           (
             m["state"]["state"].as_str().unwrap_or_default().to_string(),
             m["state"]["cause"].as_str().map(str::to_string),
           )
         })
+    })
+  };
+  let launch_id_of = |body: &serde_json::Value, name: &str| -> Option<String> {
+    body["models"].as_array().and_then(|models| {
+      models
+        .iter()
+        .find(|m| m["id"]["path"] == format!("lemonade://{name}"))
+        .and_then(|m| m["launch_id"].as_str().map(str::to_string))
     })
   };
   let status = |ctx: &MethodContext, id: i64| {
@@ -239,7 +250,13 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
   .await;
   let elapsed = started.elapsed();
   let body = resp.result.expect("start_model result");
-  assert_eq!(body["launch_id"], umbrella_launch_id().as_str());
+  // A delegated launch returns the *model's* own `L#` handle (drawn from the
+  // same registry counter as any llama.cpp / ds4 launch), not the umbrella id.
+  let slow_launch_id = body["launch_id"].as_str().expect("launch_id string");
+  assert!(
+    slow_launch_id.starts_with('L') && slow_launch_id != umbrella_launch_id().as_str(),
+    "delegated start returns the model's L# handle, got {slow_launch_id}"
+  );
   assert!(
     elapsed < Duration::from_millis(1200),
     "start_model must not block on the preload (took {elapsed:?})"
@@ -297,14 +314,12 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
     "error row must carry lemond's cause"
   );
 
-  // The failed row is still clearable by its delegated id.
+  // The failed row is still clearable by its `L#` launch id.
+  let body = status(&ctx, 6).await;
+  let broken_id = launch_id_of(&body, "Broken-fail").expect("failed row carries a launch id");
   let resp = dispatch_request(
     &ctx,
-    Request::new(
-      6,
-      "stop_model",
-      Some(json!({"launch_id": "lemonade:Broken-fail"})),
-    ),
+    Request::new(7, "stop_model", Some(json!({"launch_id": broken_id}))),
   )
   .await;
   resp.result.expect("failed delegated row must be stoppable");
@@ -353,6 +368,9 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
         pid: 0,
         port,
         started_at: 0,
+        // The `L#` `start_delegated_lemonade` would have stamped from the
+        // registry counter — the delegated row's sole home for its handle.
+        launch_id: Some(LaunchId("L1".to_string())),
         params: LaunchParams::new(
           PathBuf::from(format!("lemonade://{name}")),
           LaunchMode::Chat,
@@ -364,28 +382,25 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
     .await;
 
   // `status` projects the delegated row: catalog-matching path, the
-  // umbrella's port, state mirrored from the (Ready) umbrella.
+  // umbrella's port, state mirrored from the (Ready) umbrella, and the
+  // plain `L#` launch id.
   let resp = dispatch_request(&ctx, Request::new(1, "status", None)).await;
   let body = resp.result.expect("status result");
   let models = body["models"].as_array().expect("models array");
   let row = models
     .iter()
-    .find(|m| m["launch_id"] == format!("lemonade:{name}"))
+    .find(|m| m["id"]["path"] == format!("lemonade://{name}"))
     .expect("delegated lemonade row must be emitted");
-  assert_eq!(row["id"]["path"], format!("lemonade://{name}"));
+  assert_eq!(row["launch_id"], "L1");
   assert_eq!(row["port"], json!(port));
   assert_eq!(row["state"]["state"], "ready");
   assert_eq!(row["mode"], "chat");
 
-  // Stop via the delegated id: the umbrella unloads the model (fake_lemond
-  // clears its resident slot) and the row disappears; the umbrella row stays.
+  // Stop via the `L#` id: the umbrella unloads the model (fake_lemond clears
+  // its resident slot) and the row disappears; the umbrella row stays.
   let resp = dispatch_request(
     &ctx,
-    Request::new(
-      2,
-      "stop_model",
-      Some(json!({"launch_id": format!("lemonade:{name}")})),
-    ),
+    Request::new(2, "stop_model", Some(json!({"launch_id": "L1"}))),
   )
   .await;
   let stop_body = resp.result.expect("stop_model result");
@@ -401,7 +416,7 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
   assert!(
     !models
       .iter()
-      .any(|m| m["launch_id"] == format!("lemonade:{name}")),
+      .any(|m| m["id"]["path"] == format!("lemonade://{name}")),
     "stopped delegated row must drop out of status"
   );
   let umbrella_row = models
@@ -419,11 +434,7 @@ async fn status_projects_delegated_models_and_stop_unloads_them() {
   // A second stop of the same id is an InvalidParams error (unknown row).
   let resp = dispatch_request(
     &ctx,
-    Request::new(
-      4,
-      "stop_model",
-      Some(json!({"launch_id": format!("lemonade:{name}")})),
-    ),
+    Request::new(4, "stop_model", Some(json!({"launch_id": "L1"}))),
   )
   .await;
   assert!(

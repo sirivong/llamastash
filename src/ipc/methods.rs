@@ -169,9 +169,11 @@ async fn stop_model_handler(
   let parsed: StopParams = parse_params(params)?;
   check_grace_secs(parsed.grace_secs)?;
   // A delegated Lemonade model is not a supervised child — "stopping" it
-  // means unloading it from the shared umbrella, which keeps running.
-  if let Some(name) = crate::backend::lemonade::delegated_model_name(parsed.launch_id.as_str()) {
-    return stop_delegated_lemonade(ctx, &parsed.launch_id, name).await;
+  // means unloading it from the shared umbrella, which keeps running. The
+  // `L#` → umbrella-model-name binding lives on the running snapshot (delegated
+  // rows have no supervisor to hold it), so reverse-map it there.
+  if let Some(name) = delegated_name_for(ctx, &parsed.launch_id).await {
+    return stop_delegated_lemonade(ctx, &parsed.launch_id, &name).await;
   }
   let model = ctx
     .supervisors
@@ -210,6 +212,22 @@ async fn stop_model_handler(
     "launch_id": parsed.launch_id,
     "state": flatten_state(&final_state),
   }))
+}
+
+/// The umbrella model name behind a delegated Lemonade launch id, or `None`
+/// when `launch_id` isn't a delegated row. Delegated models have no supervisor
+/// of their own, so the `L#` → name binding is stamped on the running snapshot
+/// at launch; both `stop_model` and `logs_tail` reverse-map through here so the
+/// scan can't drift between them.
+async fn delegated_name_for(ctx: &MethodContext, launch_id: &LaunchId) -> Option<String> {
+  ctx
+    .state
+    .snapshot()
+    .await
+    .running
+    .into_iter()
+    .find(|r| r.launch_id.as_ref() == Some(launch_id))
+    .and_then(|r| r.lemonade_backend_id().map(|b| b.name.clone()))
 }
 
 /// Stop one delegated Lemonade model: best-effort unload from the shared
@@ -514,9 +532,10 @@ async fn logs_tail_handler(
   let parsed: LogsTailParams = parse_params(params)?;
   // A delegated Lemonade model has no process of its own — its log *is*
   // the shared umbrella's log, so tail that one.
-  let lookup_id = match crate::backend::lemonade::delegated_model_name(parsed.launch_id.as_str()) {
-    Some(_) => crate::backend::lemonade::umbrella_launch_id(),
-    None => parsed.launch_id.clone(),
+  let lookup_id = if delegated_name_for(ctx, &parsed.launch_id).await.is_some() {
+    crate::backend::lemonade::umbrella_launch_id()
+  } else {
+    parsed.launch_id.clone()
   };
   let model = ctx.supervisors.get(&lookup_id).await.ok_or_else(|| {
     ErrorObject::new(
@@ -1197,10 +1216,12 @@ mod tests {
   }
 
   /// A delegated-lemonade snapshot the way `start_delegated_lemonade`
-  /// persists one: Backend identity + the synthetic `lemonade://` path.
+  /// persists one: Backend identity + the synthetic `lemonade://` path +
+  /// the registry-assigned `L#` handle.
   fn lemonade_running_snapshot(
     name: &str,
     port: u16,
+    launch_id: &str,
   ) -> crate::daemon::state_store::RunningSnapshot {
     crate::daemon::state_store::RunningSnapshot {
       id: crate::backend::identity::ModelIdentity::Backend(
@@ -1212,6 +1233,7 @@ mod tests {
       pid: 0,
       port,
       started_at: 0,
+      launch_id: Some(crate::daemon::registry::LaunchId(launch_id.to_string())),
       resolved_backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
       params: LaunchParams::new(
         PathBuf::from(format!("lemonade://{name}")),
@@ -1228,15 +1250,14 @@ mod tests {
     // bookkeeping removal is the contract.
     let c = ctx();
     c.state
-      .mutate(|s| s.running.push(lemonade_running_snapshot("Qwen-X", 13305)))
+      .mutate(|s| {
+        s.running
+          .push(lemonade_running_snapshot("Qwen-X", 13305, "L1"))
+      })
       .await;
     let resp = dispatch_request(
       &c,
-      Request::new(
-        1,
-        "stop_model",
-        Some(json!({"launch_id": "lemonade:Qwen-X"})),
-      ),
+      Request::new(1, "stop_model", Some(json!({"launch_id": "L1"}))),
     )
     .await;
     let body = resp.result.expect("delegated stop must succeed");
@@ -1249,20 +1270,16 @@ mod tests {
       .iter()
       .any(|r| r.lemonade_backend_id().is_some());
     assert!(!still_there, "snapshot must be dropped");
-    // Second stop: the row is unknown now — same error a bogus
-    // supervised launch_id gets.
+    // Second stop: the row is unknown now — the snapshot is gone, so it
+    // falls through to the supervisor path and errors like a bogus id.
     let second = dispatch_request(
       &c,
-      Request::new(
-        2,
-        "stop_model",
-        Some(json!({"launch_id": "lemonade:Qwen-X"})),
-      ),
+      Request::new(2, "stop_model", Some(json!({"launch_id": "L1"}))),
     )
     .await;
     let err = second.error.expect("double-stop must error");
     assert_eq!(err.code, ErrorCode::InvalidParams.as_i32());
-    assert!(err.message.contains("lemonade:Qwen-X"));
+    assert!(err.message.contains("L1"));
   }
 
   #[tokio::test]

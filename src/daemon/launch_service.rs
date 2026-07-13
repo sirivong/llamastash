@@ -918,6 +918,9 @@ pub(crate) async fn compose_and_spawn(
         pid,
         port,
         started_at,
+        // Process launches key their L# off the live supervisor map; the
+        // snapshot doesn't carry it (stays `None`, omitted from `state.json`).
+        launch_id: None,
         params: launch_params.clone(),
         actuals: Default::default(),
         resolved_backend: resolved_backend_id.clone(),
@@ -1021,7 +1024,7 @@ async fn start_delegated_lemonade(
   log_path: PathBuf,
   params: LaunchParams,
 ) -> Result<StartedLaunch, ErrorObject> {
-  use crate::backend::lemonade::{ensure_umbrella, umbrella_launch_id, LemonadeClient};
+  use crate::backend::lemonade::{ensure_umbrella, LemonadeClient};
 
   // The preload must not POST `/api/v1/load` until the umbrella's HTTP
   // server is actually accepting connections; bound the readiness wait by
@@ -1048,6 +1051,14 @@ async fn start_delegated_lemonade(
   // An already-running umbrella keeps its own port; trust the handle over the
   // requested `umbrella_port` so a reused umbrella routes to the right place.
   let serving_port = umbrella.port();
+
+  // One id source for every backend: draw the delegated model's `L#` from the
+  // same registry counter the process path uses (`next_id`), so a Lemonade row
+  // reads `L3` like any llama.cpp / ds4 launch — no per-backend id scheme. The
+  // model name stays the umbrella's internal load/unload key; the L# is the
+  // user-facing handle, stamped on the snapshot below (delegated models have no
+  // supervisor to hold it) and reverse-mapped to the name on stop.
+  let launch_id = ctx.supervisors.next_id();
 
   // Preload the model so an explicit launch makes it resident (chat would
   // autoload too), forwarding the launch params lemond honors: `ctx_size`
@@ -1126,6 +1137,7 @@ async fn start_delegated_lemonade(
         pid,
         port: serving_port,
         started_at,
+        launch_id: Some(launch_id.clone()),
         params: params.clone(),
         actuals: Default::default(),
         resolved_backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
@@ -1134,7 +1146,9 @@ async fn start_delegated_lemonade(
     .await;
 
   Ok(StartedLaunch {
-    launch_id: umbrella_launch_id(),
+    // The model's own `L#` (not the umbrella's id) — the handle the client
+    // shows and later stops by.
+    launch_id,
     model_id: id,
     port: serving_port,
     model: umbrella,

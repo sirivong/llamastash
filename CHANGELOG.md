@@ -15,7 +15,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 - **Lemonade is now default-on when the `lemond` binary resolves** (matching ds4), instead of opt-in/off-by-default. If `lemond` is on `PATH` (or `lemonade.binary` points at it) the daemon runs Lemonade discovery + umbrella unless `lemonade.enabled: false`; `--lemonade` / `LLAMASTASH_LEMONADE=1` still force it on. Zero footprint when the binary is absent. `lemonade.enabled` is now tri-state (unset = auto / `true` = force on / `false` = force off).
 - The running-model header shows the resolved context window for every backend (`… · 16k ctx · …`), omitted when unknown.
-- Lemonade running rows are tidier: a `lemonade` backend badge, the shared umbrella hidden from the running list (its RAM/CPU/port surface on the model rows behind a `*` shared-marker — the help Legend explains it), the synthetic `lemonade://` path row dropped, and deleting a registry model refused with guidance (it is managed by Lemonade, not a local file).
+- Lemonade running rows are tidier: a `lemonade` backend badge, the shared umbrella hidden from the running list (its RAM/CPU/port surface on the model rows behind a `*` shared-marker — the help Legend explains it), the synthetic `lemonade://` path row dropped, and deleting a registry model refused with guidance (it is managed by Lemonade, not a local file). Lemonade models now use the same `L#` launch id as every other backend (was `lemonade:<name>`), so `stop` / `logs` take one id scheme across llama.cpp / ds4 / Lemonade.
 
 ### Fixed
 

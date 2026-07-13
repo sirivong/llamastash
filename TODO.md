@@ -203,6 +203,16 @@ places.
   - [x] ~~`/v1/responses` proxy forwarding~~ — done: llama-server and ds4-server both speak it, so the proxy byte-pipes `/v1/responses` + `/v1/responses/input_tokens` like the other `/v1` routes. See [`src/proxy/router.rs`](src/proxy/router.rs).
   - [x] ~~deepseek4 KV-cache geometry in the admission demand model~~ — done: `deepseek4_kv_bytes` models the two-tier cache from the header (`attention.compress_ratios` + `key_length`), tracking reality (~0.5 GiB at 16k, ~11 GiB at 1M for Flash) instead of the naive GQA over-count (~86 GiB at 1M); the "KV demand not modeled" advisory is dropped. See [`src/gguf/memory.rs`](src/gguf/memory.rs).
 - [ ] a keybinding (shift+l) to switch left/right pane ratio (configurable in config.yaml. 4 slots with defaults current/50/70/90)
+- [x] lemond runs should show consistent values for unknown/empty columns.
+- [x] what happens when you try to delete a lemonade model?
+- [x] revisist path, status and badge row of different backend runs. see if they are useful and if we miss something thats more useful.
+- [x] are curl url for lemonade runs valid? why is lemond having a url?
+- [x] is 'serves as' for ds4 valid? what does it actually mean now? curl URL says otherwise and works.
+- [x] lemonade-umbrella shows badge only when a lemonade model is running.
+- [ ] when lemond is stopped what happens to models that were run via it, it now seems to show them but will they work?
+- [x] ~~why does lemond runs get a special ID instead of L1, L2 etc~~ — done: every backend now draws its launch id from the one `registry::next_id()` counter (`L#`); the `lemonade:<name>` scheme is deleted. Delegated (Lemonade) models stamp the `L#` on their `RunningSnapshot` (no supervisor to hold it) and `stop`/`logs` reverse-map it to the umbrella model name. See [`src/daemon/launch_service.rs`](src/daemon/launch_service.rs) `start_delegated_lemonade` + [`src/ipc/methods.rs`](src/ipc/methods.rs) `delegated_name_for`.
+- [ ] CLI 'status' shows 'backends llamacpp ✓ installed cpu, rocm lemonade ✓ installed cpu, npu umbrella: running ds4 ✓ installed cpu' the cpu/rocm/npu etc labels doesnt seem accurate. how are these derived?
+- [ ] CLI status should also show WEB UI URL.
 - [ ] Update website and main docs to refelect multiple backends supported
 - [x] ~~The (model/server default) label for setting knobs should not wrap; cut off what doesn't fit and show `…`.~~ — Settings rows clip to the pane width with `…` (no `Wrap`); the running view and editable form now share one render path (`fmt::clip_line` is the shared primitive), so both truncate identically. (821c26b)
 - [x] ~~show a label (N) near the prest knob in settings to indicate how many presets are available for the current model. (N=0 if none)~~ — the Settings preset row renders `preset (N)` (count of effective named presets), `preset (0)` when none.

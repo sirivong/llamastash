@@ -299,6 +299,7 @@ async fn idle_lemonade_model_is_unloaded_but_umbrella_stays_up() {
           pid: 0,
           port,
           started_at: 0,
+          launch_id: None,
           params: LaunchParams::new(
             PathBuf::from("lemonade://Qwen2.5-0.5B-Instruct"),
             LaunchMode::Chat,
