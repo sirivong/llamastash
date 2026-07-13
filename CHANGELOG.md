@@ -4,6 +4,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Fixed
+
+- `init`-generated dev-tool configs now authenticate against an auth-enforced proxy: they carry the resolved `proxy.api_key` (honoring the `LLAMASTASH_PROXY_API_KEY` override) instead of the `llamastash` stub, and OpenCode's `apiKey` moves inside `options` — where the `@ai-sdk/openai-compatible` SDK actually reads it, so a top-level one no longer gets silently ignored. `env.sh` / `claude-code.sh` tighten to `0o600` since they can now hold the real bearer token. The env override + blank-normalization now resolve through one shared `ProxyConfig::effective_api_key`, shared by the daemon and the init writers.
+
 ## [0.0.6] — 2026-07-13
 
 ### Added

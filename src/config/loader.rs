@@ -356,6 +356,30 @@ impl ProxyConfig {
     self.api_key.is_some()
   }
 
+  /// The bearer key actually in force for this process, and the single
+  /// resolver for it: the `LLAMASTASH_PROXY_API_KEY` env override
+  /// (trimmed, non-empty) wins over the configured `api_key`; a
+  /// blank/whitespace value on either side reads as "no key" (`None` —
+  /// the keyless loopback default). The daemon folds this into
+  /// `opts.proxy.api_key` at bind time so `auth_enforced()`,
+  /// `ProxyAuth`, and the fail-closed backstop all see one value; the
+  /// init wizard's external-tool writers read it directly so their
+  /// generated configs carry exactly what the proxy enforces.
+  pub fn effective_api_key(&self) -> Option<String> {
+    if let Some(raw) = std::env::var_os("LLAMASTASH_PROXY_API_KEY") {
+      let key = raw.to_string_lossy().trim().to_string();
+      if !key.is_empty() {
+        return Some(key);
+      }
+    }
+    self
+      .api_key
+      .as_deref()
+      .map(str::trim)
+      .filter(|k| !k.is_empty())
+      .map(str::to_string)
+  }
+
   fn default_header_read_timeout_secs() -> u64 {
     30
   }
@@ -2064,5 +2088,48 @@ proxy:
       "warning should mention non-regular file, got: {warning}"
     );
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
+  }
+
+  #[test]
+  fn effective_api_key_resolves_env_over_config_blank_as_none() {
+    // Shares the crate env mutex with the daemon's
+    // LLAMASTASH_PROXY_API_KEY tests so they don't race on the var.
+    let _env = crate::cli::test_lock::serialize();
+    let saved = std::env::var_os("LLAMASTASH_PROXY_API_KEY");
+    std::env::remove_var("LLAMASTASH_PROXY_API_KEY");
+
+    let mut proxy = ProxyConfig {
+      api_key: Some("sk-llamastash-cfg".into()),
+      ..ProxyConfig::default()
+    };
+    // Configured key, no env override → the config key.
+    assert_eq!(
+      proxy.effective_api_key().as_deref(),
+      Some("sk-llamastash-cfg")
+    );
+    // Blank / absent config key → no auth.
+    proxy.api_key = Some("   ".into());
+    assert_eq!(proxy.effective_api_key(), None);
+    proxy.api_key = None;
+    assert_eq!(proxy.effective_api_key(), None);
+
+    // Env override wins over config and is trimmed.
+    proxy.api_key = Some("sk-llamastash-cfg".into());
+    std::env::set_var("LLAMASTASH_PROXY_API_KEY", "  sk-llamastash-env  ");
+    assert_eq!(
+      proxy.effective_api_key().as_deref(),
+      Some("sk-llamastash-env")
+    );
+    // A blank env override is ignored → falls back to config.
+    std::env::set_var("LLAMASTASH_PROXY_API_KEY", "   ");
+    assert_eq!(
+      proxy.effective_api_key().as_deref(),
+      Some("sk-llamastash-cfg")
+    );
+
+    match saved {
+      Some(v) => std::env::set_var("LLAMASTASH_PROXY_API_KEY", v),
+      None => std::env::remove_var("LLAMASTASH_PROXY_API_KEY"),
+    }
   }
 }

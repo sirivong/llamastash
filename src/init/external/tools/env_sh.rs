@@ -17,9 +17,9 @@
 //! separate so a user can opt into one without the other, and so the
 //! Claude Code env never lands in that tool's global settings.
 //!
-//! Mode is `0o644` (not `0o600`) — no secrets are stored; the
-//! "api key" is the literal stub `llamastash`. Group/world-read
-//! lets multi-user shells pick it up if the user opts in.
+//! Mode is `0o600` — when the proxy enforces auth this file carries
+//! the real bearer token (`OPENAI_API_KEY` / `LLAMASTASH_API_KEY`),
+//! a secret, so it stays user-only-readable rather than group/world.
 
 use std::path::PathBuf;
 
@@ -39,9 +39,6 @@ impl ToolPatcher for EnvSh {
   }
   fn format(&self) -> Format {
     Format::Raw
-  }
-  fn unix_mode(&self) -> u32 {
-    0o644
   }
   fn build_additions(&self, _ctx: &PatchContext) -> serde_json::Value {
     // Unused for Format::Raw — present to satisfy the trait.
@@ -100,13 +97,13 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn unix_mode_is_644_not_600() {
+  fn unix_mode_is_600_may_hold_a_secret() {
     use std::os::unix::fs::PermissionsExt;
     let dir = crate::util::test_temp::unique_temp_dir("env-sh-mode");
     let path = dir.join("env.sh");
     apply(&EnvSh, &ctx(), Some(path.clone())).expect("apply");
     let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o644);
+    assert_eq!(mode, 0o600);
     std::fs::remove_dir_all(&dir).ok();
   }
 

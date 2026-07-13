@@ -644,31 +644,16 @@ pub(crate) fn build_options(
   // path and the daemon backstop both read the resolved value.
   let env_insecure = env_flag_truthy("LLAMASTASH_PROXY_INSECURE_NO_AUTH");
   opts.proxy.insecure_no_auth = opts.proxy.insecure_no_auth || insecure_no_auth_cli || env_insecure;
-  // Proxy API key env override: `LLAMASTASH_PROXY_API_KEY` wins over
-  // the config value for this process and is never written back to
-  // disk (containers / secret managers). An empty/blank value is
-  // ignored so a stray `export` doesn't accidentally enable auth.
-  if let Some(raw) = std::env::var_os("LLAMASTASH_PROXY_API_KEY") {
-    let key = raw.to_string_lossy().trim().to_string();
-    if !key.is_empty() {
-      opts.proxy.api_key = Some(key);
-    }
-  }
-  // Normalize a blank / whitespace-only `api_key` (e.g. `proxy.api_key:
-  // ""` hand-edited into config) to `None`. Without this the
-  // fail-closed backstop (`api_key.is_none()`) and the auth layer
-  // (`ProxyAuth` treats a blank key as no auth) would disagree, and a
-  // blank key on a non-loopback host would bind an *unauthenticated*
-  // LAN proxy while skipping the refusal. Treating blank as "no key"
-  // makes the backstop refuse (or the CLI provision a real key).
-  if opts
-    .proxy
-    .api_key
-    .as_deref()
-    .is_some_and(|k| k.trim().is_empty())
-  {
-    opts.proxy.api_key = None;
-  }
+  // Proxy API key: fold the `LLAMASTASH_PROXY_API_KEY` env override
+  // (wins over config, never written back to disk — containers /
+  // secret managers) and blank-normalization into one resolved value
+  // via `ProxyConfig::effective_api_key`, the shared resolver the init
+  // wizard's external-tool writers also read. Blank on either side →
+  // `None` is load-bearing: it makes the fail-closed backstop refuse
+  // (or the CLI provision a real key) instead of binding an
+  // *unauthenticated* LAN proxy while `ProxyAuth` treats the blank key
+  // as no auth and skips the refusal.
+  opts.proxy.api_key = opts.proxy.effective_api_key();
   // Ollama-compat: OR of (config field, `--ollama-compat` CLI flag,
   // `LLAMASTASH_OLLAMA_COMPAT` env var). Any one of the three enables
   // the mode — clearing it requires unsetting all three. The env var

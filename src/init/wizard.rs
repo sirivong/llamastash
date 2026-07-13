@@ -1223,7 +1223,14 @@ async fn run_integrations_step(
 ) -> Result<Option<IntegrationsSummary>, CliExit> {
   let proxy_port = config.proxy.effective_port();
   let proxy_base_url = format!("http://127.0.0.1:{proxy_port}/v1");
-  let api_key = "llamastash".to_string();
+  // External tool configs must carry the proxy's real bearer token when
+  // auth is enforced, or every request 401s. Fall back to the
+  // `llamastash` stub on the keyless loopback default — clients that
+  // require a non-empty key still boot, and the keyless proxy ignores it.
+  let api_key = config
+    .proxy
+    .effective_api_key()
+    .unwrap_or_else(|| "llamastash".to_string());
   // Find the GGUF in the downloaded file set — `.gitattributes` /
   // `README.md` / etc. are also present and would otherwise win
   // `files.first()`. Multi-shard GGUFs (`foo-00001-of-00002.gguf`)

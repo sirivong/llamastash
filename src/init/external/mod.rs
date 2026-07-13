@@ -46,9 +46,10 @@ pub enum Format {
 /// `proxy_base_url` is the OpenAI-compat endpoint llamastash serves
 /// (e.g. `http://127.0.0.1:11435/v1`); each tool's `baseURL` /
 /// `api_url` / `apiBase` / `openai-api-base` field maps to it
-/// verbatim. `api_key` is a non-secret stub — llama.cpp's
-/// llama-server ignores Authorization; we still set one so clients
-/// that *require* a non-empty key in their config don't refuse to
+/// verbatim. `api_key` is the proxy's resolved bearer token when auth
+/// is enforced (a real secret — writers that embed it literally use
+/// mode `0o600`), or the `llamastash` stub on the keyless loopback
+/// default so clients that *require* a non-empty key don't refuse to
 /// boot.
 ///
 /// `is_embed`: the model is an embedding model (nomic-embed,
@@ -114,10 +115,10 @@ pub trait ToolPatcher: Send + Sync {
     None
   }
   /// Unix mode for the on-disk file. Defaults to `0o600` — these
-  /// files may carry user-controllable api-key stubs and live in
-  /// `$HOME`; group/world read isn't useful. Tools that prefer
-  /// 0o644 can override (e.g. [`tools::env_sh`] which contains no
-  /// secrets and may be sourced from group shells).
+  /// files may carry the proxy's real bearer token (embedded literally,
+  /// or exported into a sourceable shell var by the `env.sh` /
+  /// `claude-code.sh` writers) and live in `$HOME`, so group/world
+  /// read isn't useful.
   fn unix_mode(&self) -> u32 {
     0o600
   }

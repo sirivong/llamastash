@@ -486,7 +486,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:11435 \
 
 - **Set both model vars** to a discovered model name (not a `claude-*` name) so Claude Code's main and background calls both resolve through the proxy.
 - **`llamastash init` writes these for you.** Its **Claude Code** integration drops a sourceable `~/.config/llamastash/claude-code.sh` with the `ANTHROPIC_*` exports (separate from the OpenAI `env.sh`); `source ~/.config/llamastash/claude-code.sh && claude` opts Claude Code into the proxy **for that shell only**. It deliberately does *not* write Claude Code's global `~/.claude/settings.json` (whose `env` block applies to every session) — so bare `claude` keeps using your real Anthropic models.
-- **Auth.** Anthropic clients send the key in the `x-api-key` header; the proxy accepts it alongside `Authorization: Bearer` and browser `Basic`. On the keyless loopback default no key is needed (the token value is ignored, but Claude Code still wants one set).
+- **Auth.** Anthropic clients send the key in the `x-api-key` header; the proxy accepts it alongside `Authorization: Bearer` and browser `Basic`. On the keyless loopback default no key is needed (the token value is ignored, but Claude Code still wants one set). When you set `proxy.api_key` (or `LLAMASTASH_PROXY_API_KEY`), auth is enforced and `init`'s generated `env.sh` / `claude-code.sh` carry that real key (mode `0o600`) — so a client only authenticates once the script is sourced into its environment.
 - **Tool calling** needs the backend launched with `--jinja`, which is on by default (`jinja: true` in `config.yaml`; the reasoning toggle also forces it). Set `jinja: false` only if you don't need tool use. Basic chat / streaming work either way. Some model templates (e.g. certain Qwen GGUFs) fail llama-server's tool-parser generation with `System message must be at the beginning`; override with `start <model> -- --chat-template-file <tool-compatible.jinja>` (or the crude `--chat-template chatml`), or use a GGUF whose template is tool-compatible.
 - Compatibility is best-effort (it's llama-server's translation, not a full Anthropic spec implementation) — verify your client end-to-end.
 
@@ -598,6 +598,48 @@ check `llamastash status --json | jq -r .proxy.listen` first.
 The model keys must match what you send in `body.model`; llamastash
 will resolve that name against the catalog and auto-start the target if
 needed.
+
+##### Auto-populating the model list (avoid hand-listing)
+
+Maintaining that `models` map by hand is the tedious part. Two ways to skip it:
+
+**Generate it from `llamastash list --json`.** OpenCode has no native
+`/v1/models` auto-discovery yet, and the proxy's `/v1/models` stays
+OpenAI-standard (`id` / `object` / `created` / `owned_by`) with **no
+capability field**, so nothing downstream can tell a chat model from an
+embedding or reranker off that endpoint alone. `list --json` *does* carry a
+per-model `mode_hint`, so generate the block from it and filter to just the
+chat models:
+
+```bash
+BASE="http://$(llamastash status --json | jq -r .proxy.listen)/v1"
+llamastash list --json | jq --arg base "$BASE" '{
+  provider: { llamastash: {
+    npm: "@ai-sdk/openai-compatible",
+    name: "llamastash (local)",
+    options: { baseURL: $base },
+    models: ( .models
+      | map(select(.mode_hint == "chat"))
+      | map({ (.name | sub("\\.gguf$"; "")):
+              { name: (.name | sub("\\.gguf$"; "")),
+                limit: { context: .native_ctx } } })
+      | add )
+  }}}'
+```
+
+The `.gguf` suffix is stripped so the keys match the ids the proxy advertises
+on `/v1/models` (what `body.model` resolves against). Pipe the output into
+`~/.config/opencode/opencode.json` (or `jq`-merge it into an existing file),
+and re-run when your catalog changes — an alias or a `make` target keeps it a
+one-liner. On an auth-enforced proxy add your `proxy.api_key` as `apiKey`
+**inside `options`** (see the auth note below).
+
+**Or discover dynamically.** The third-party
+[`opencode-models-discovery`](https://github.com/yuhp/opencode-models-discovery)
+plugin queries `/v1/models` at OpenCode startup, so new models appear without a
+re-run. Because `/v1/models` has no type field, it can only separate chat from
+embed/rerank by **name pattern** (`excludeBy` on ids like `embed` / `rerank` /
+`whisper`), not the exact `mode_hint` the generator above uses.
 
 > **Auth posture.** On the default loopback bind the proxy has **no authentication** — the threat model is "same machine, any UID can issue requests," so don't run llamastash on a shared host. Exposing it on the LAN ([LAN access](#lan-access-opt-in-behind-a-key)) requires a bearer key, which llamastash auto-provisions and enforces; the daemon refuses a non-loopback bind with no key unless you pass `--insecure-no-auth`. TLS is still a deferred follow-up, so LAN mode is plaintext (trusted network or reverse proxy). The control plane and `llama-server` children always stay loopback regardless.
 

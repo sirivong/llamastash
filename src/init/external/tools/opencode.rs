@@ -6,9 +6,15 @@
 //! live under `provider.<id>` with `npm`, `name`, `options.baseURL`,
 //! and a `models` map.
 //!
-//! API key: rendered as the `{env:LLAMASTASH_API_KEY}` reference so
-//! the literal value never lands on disk — the env-var hop costs
-//! nothing because llama-server ignores Authorization anyway.
+//! API key: goes **inside `options`** — that's the object opencode
+//! hands to the `@ai-sdk/openai-compatible` SDK constructor, so a
+//! top-level `apiKey` is silently ignored and the SDK throws "missing
+//! or invalid API key" against an auth-enforced proxy. Rendered as the
+//! `{env:LLAMASTASH_API_KEY}` reference so the literal token never
+//! lands on disk; that var is set by the sibling `env.sh` integration
+//! (which carries the real bearer key when the proxy enforces auth), so
+//! the opencode integration needs `env.sh` sourced — or
+//! `LLAMASTASH_API_KEY` otherwise exported — to authenticate.
 
 use std::path::PathBuf;
 
@@ -55,8 +61,8 @@ impl ToolPatcher for OpenCode {
           "name": "LlamaStash",
           "options": {
             "baseURL": ctx.proxy_base_url,
+            "apiKey": "{env:LLAMASTASH_API_KEY}",
           },
-          "apiKey": "{env:LLAMASTASH_API_KEY}",
           "models": models,
         }
       }
@@ -125,12 +131,20 @@ mod tests {
   }
 
   #[test]
-  fn api_key_renders_as_env_reference_not_literal() {
+  fn api_key_renders_as_env_reference_inside_options() {
+    // Regression: opencode passes `options` verbatim to the
+    // `@ai-sdk/openai-compatible` constructor, so the key MUST live
+    // there. A top-level `apiKey` is ignored and the SDK throws
+    // "missing or invalid API key" against an auth-enforced proxy.
     let ctx = ctx();
     let v = OpenCode.build_additions(&ctx);
     assert_eq!(
-      v["provider"]["llamastash"]["apiKey"],
+      v["provider"]["llamastash"]["options"]["apiKey"],
       "{env:LLAMASTASH_API_KEY}"
+    );
+    assert!(
+      v["provider"]["llamastash"]["apiKey"].is_null(),
+      "apiKey must not sit at the provider top level"
     );
   }
 
@@ -173,7 +187,7 @@ mod tests {
     let path = dir.join("opencode.json");
     std::fs::write(
       &path,
-      r#"{"provider":{"llamastash":{"npm":"@ai-sdk/openai-compatible","name":"LlamaStash","options":{"baseURL":"http://127.0.0.1:99999/v1"},"apiKey":"{env:LLAMASTASH_API_KEY}","models":{"qwen3-coder-30b":{"name":"qwen3-coder-30b"}}}}}"#,
+      r#"{"provider":{"llamastash":{"npm":"@ai-sdk/openai-compatible","name":"LlamaStash","options":{"baseURL":"http://127.0.0.1:99999/v1","apiKey":"{env:LLAMASTASH_API_KEY}"},"models":{"qwen3-coder-30b":{"name":"qwen3-coder-30b"}}}}}"#,
     )
     .unwrap();
     let out = dry_run(&OpenCode, &ctx(), Some(path)).expect("dry_run");
