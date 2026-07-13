@@ -4,9 +4,11 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+## [0.0.6] — 2026-07-13
+
 ### Added
 
-- **ds4 (DwarfStar) backend — experimental** (new, validated on a single Strix Halo / ROCm host; behaviour and config may change — llama.cpp stays the stable default). For DeepSeek-V4 GGUFs — runs antirez's `ds4-server` for the Flash/PRO models, auto-routing a compatible GGUF to it when the binary resolves and falling back to llama.cpp otherwise (never a refusal). Default-on when found; enable/force via `[ds4]` config, `--ds4`, or `LLAMASTASH_DS4=1`. Six ds4-native launch knobs, a `ds4_unavailable` doctor advisory, and a `status.backends` ds4 row. When a ds4 model won't fit RAM the launcher now **auto-enables SSD streaming** so it loads from disk instead of OOM-killing mid-load. The TUI marks ds4-routed models with a `ds4` badge in the right pane and lists the ds4 native knobs (not the llama.cpp set) in the running view. See `docs/usage.md#ds4-backend`.
+- **ds4 (DwarfStar) backend — experimental** (new, validated on a single Strix Halo / ROCm host; behaviour and config may change — llama.cpp stays the stable default). For DeepSeek-V4 GGUFs — runs antirez's `ds4-server` for the Flash/PRO models, auto-routing a compatible GGUF to it when the binary resolves and falling back to llama.cpp otherwise (never a refusal). Default-on when found; enable/force via `[ds4]` config, `--ds4`, or `LLAMASTASH_DS4=1`. Six ds4-native launch knobs, a `ds4_unavailable` doctor advisory, and a `status.backends` ds4 row. When a ds4 model won't fit RAM the launcher now **auto-enables SSD streaming** so it loads from disk instead of OOM-killing mid-load. The TUI marks ds4-routed models with a `ds4` badge in the right pane and lists the ds4 native knobs (not the llama.cpp set) in the running view. `pull`'s per-file size cap is raised to 512 GiB to accommodate the multi-hundred-GB single-file DeepSeek-V4 GGUFs. See `docs/usage.md#ds4-backend`.
 - Proxy forwards the OpenAI **Responses API** (`/v1/responses` + `/v1/responses/input_tokens`) — both the llama.cpp and ds4 backends speak it, so agents on the Responses surface attach through the one stable proxy URL.
 - Context-length quick-picks extend to 1 Mi and are gated per model to its trained window — the ctx cycle never offers a context larger than the model supports (type a custom value for anything off the ladder).
 - A model's `default:` preset is now its standing launch config and **auto-applies** — on a plain `start <model>` (no `--preset`) and on proxy auto-start, not just as a TUI cycle hint. Resolved server-side as a new precedence layer (`your flags > default preset > last-used > arch defaults > fit`). `default: auto` launches pure fit; `start --preset auto` is the clean per-launch "ignore last-used + default" gesture. The TUI cycle drops the separate `[default]` stop, marks whichever stop is the default with `(default)` and opens on it, and the preset row shows the available count (`preset (N)`). See `docs/plans/2026-06-30-001-feat-default-preset-resolver-layer-plan.md`.
@@ -32,7 +34,11 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 - Model-list columns render one consistent placeholder for empty/unknown values — `—` in the TUI, `?` in the CLI — instead of a mix of blank / `Unknown` / `unknown` (e.g. registry-served Lemonade models with no GGUF header).
 - The TUI `c` (copy curl) targets the port-stable proxy when it is auth-free (falling back to the backend port when the proxy requires a key), so a pasted command survives relaunches and works for every backend; `u` still copies the raw backend URL.
 - A Lemonade model whose `lemond` umbrella dies out-of-band (crash / external kill) no longer lingers as a green `ready` ghost in `status` and the TUI `▶ Running` group; the row now reflects the umbrella's real state (`stopped` / `error`), so it reads as dead and can be stopped.
-- A Lemonade model with a dotted registry name (e.g. `qwen3.5-4b-FLM`) keeps its full name in every TUI state; it used to truncate to `qwen3` while loading / errored / stopping, when the name fell back to a `file_stem` that mistook `.5-4b-FLM` for a file extension. Name derivation now runs through one shared resolver (catalog label, else a scheme-aware path fallback) across the list, header, and info surfaces.
+- A Lemonade model with a dotted registry name (e.g. `qwen3.5-4b-FLM`) keeps its full name in every TUI state; it used to truncate to `qwen3` while loading / errored / stopping, when the name fell back to a `file_stem` that mistook `.5-4b-FLM` for a file extension. Name derivation now runs through one shared resolver (catalog label, else a scheme-aware path fallback) across the list, header, info, and `favorites list --json` surfaces.
+
+### Security
+
+- Bumped `anyhow` to 1.0.103 to patch RUSTSEC-2026-0190 (an `Error::downcast_mut()` unsoundness). Lockfile-only.
 
 ## [0.0.5] — 2026-06-25
 
