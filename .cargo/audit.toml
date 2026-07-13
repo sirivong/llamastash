@@ -1,0 +1,17 @@
+# cargo-audit configuration. See https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# Ignored advisories are transitive and non-applicable in this build; each
+# entry names why and what would clear it. Revisit on dependency bumps.
+
+[advisories]
+ignore = [
+  # quick-xml <0.41 (RUSTSEC-2026-0194 quadratic-attribute-scan,
+  # RUSTSEC-2026-0195 namespace-alloc DoS). Pulled ONLY by wayland-scanner,
+  # a build-time proc-macro that parses trusted, local Wayland protocol XML
+  # during codegen — not attacker-controlled runtime input, so neither DoS
+  # vector applies. quick-xml 0.41 is a breaking 0.x bump; no released
+  # wayland-scanner / wl-clipboard-rs / arboard depends on it yet. Drop these
+  # once that chain updates.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
