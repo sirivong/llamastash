@@ -213,10 +213,11 @@ pub fn favorites_json(rows: &[Value]) -> Value {
     .iter()
     .map(|r| {
       let path = row_path(r).unwrap_or("");
-      let name = std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+      // Scheme-aware: a `lemonade://` synthetic path keeps its full registry
+      // name (dotted names like `qwen3.5-4b-FLM` must not stem to `qwen3`);
+      // real GGUF files still drop the extension. Same resolver the TUI and
+      // `last-params` use, so the name is consistent across every surface.
+      let name = crate::util::paths::model_display_name(std::path::Path::new(path));
       serde_json::json!({
         "name": name,
         "path": path,
@@ -1641,5 +1642,20 @@ mod tests {
       s.contains("unbound") && s.contains("permission denied"),
       "expected unbound row with cause: {s:?}"
     );
+  }
+
+  #[test]
+  fn favorites_json_keeps_dotted_lemonade_name_but_stems_gguf() {
+    let rows = vec![
+      serde_json::json!({"id": {"path": "lemonade://qwen3.5-4b-FLM"}}),
+      serde_json::json!({"id": {"path": "/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf"}}),
+    ];
+    let out = favorites_json(&rows);
+    let favs = out["favorites"].as_array().unwrap();
+    // Regression: a dotted registry name must not stem to `qwen3`.
+    assert_eq!(favs[0]["name"], "qwen3.5-4b-FLM");
+    assert_eq!(favs[0]["path"], "lemonade://qwen3.5-4b-FLM");
+    // Real GGUF files still drop the extension (byte-stable with the old path).
+    assert_eq!(favs[1]["name"], "Llama-3.2-1B-Instruct-Q4_K_M");
   }
 }
