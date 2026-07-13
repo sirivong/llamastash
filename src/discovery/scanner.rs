@@ -490,6 +490,7 @@ async fn parse_into_model(
     if let Some(hit) = c.get(&path, mtime, size).await {
       let mut hit_metadata = hit.metadata;
       apply_split_total_weights(&mut hit_metadata, &path, &siblings).await;
+      apply_split_total_parameters(&mut hit_metadata, &path, &siblings).await;
       return DiscoveredModel {
         path,
         parent,
@@ -545,6 +546,7 @@ async fn parse_into_model(
   }
   let mut metadata = cached.metadata;
   apply_split_total_weights(&mut metadata, &path, &siblings).await;
+  apply_split_total_parameters(&mut metadata, &path, &siblings).await;
   DiscoveredModel {
     path,
     parent,
@@ -590,6 +592,50 @@ async fn apply_split_total_weights(
   .unwrap_or(0);
   if total > 0 {
     meta.weights_bytes = Some(total);
+  }
+}
+
+/// For split-GGUF entries, replace the shard-1-only parameter count with
+/// the sum across every shard. `summarise_metadata` only parses the
+/// canonical shard, so a tensor-summed count (no explicit
+/// `general.parameter_count` in the header) covers one shard — a 2-shard
+/// 80B model was reporting ~56B in the `Params` column of `list` / `show`.
+/// Mirrors [`apply_split_total_weights`], but tensor element counts aren't
+/// derivable from file size, so each sibling's tensor table is read.
+/// Skipped when the header declares an explicit count (already the
+/// whole-model figure) or when `siblings` is empty.
+async fn apply_split_total_parameters(
+  metadata: &mut Option<ModelMetadata>,
+  path: &Path,
+  siblings: &[PathBuf],
+) {
+  if siblings.is_empty() {
+    return;
+  }
+  let Some(meta) = metadata.as_mut() else {
+    return;
+  };
+  let primary = path.to_path_buf();
+  let sibling_paths: Vec<PathBuf> = siblings.to_vec();
+  let summed = tokio::task::spawn_blocking(move || {
+    let read = read_path(&primary, HeaderReadOptions::default()).ok()?;
+    // An explicit count is model-level, so summing shards would double it.
+    if crate::gguf::metadata::explicit_parameter_count(&read.header).is_some() {
+      return None;
+    }
+    let mut total = crate::gguf::metadata::tensor_param_sum(&read.header);
+    for s in &sibling_paths {
+      if let Ok(sr) = read_path(s, HeaderReadOptions::default()) {
+        total = total.saturating_add(crate::gguf::metadata::tensor_param_sum(&sr.header));
+      }
+    }
+    Some(total)
+  })
+  .await
+  .unwrap_or(None);
+  if let Some(total) = summed.filter(|t| *t > 0) {
+    meta.total_parameters = Some(total);
+    meta.parameter_label = crate::gguf::metadata::label_for_param_count(total);
   }
 }
 
@@ -839,6 +885,38 @@ mod tests {
       per_shard * 2,
       "split weights_bytes must equal sum of every shard's on-disk size"
     );
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn split_shards_sum_parameter_count() {
+    // Regression: a multi-shard set reported only shard 1's tensor
+    // sum as the parameter count, so an 80B model showed ~56B in the
+    // `Params` column of `list` / `show`. With no explicit
+    // `general.parameter_count` in the header, the scanner now sums
+    // every shard's tensor elements into `total_parameters`.
+    use crate::gguf::test_fixtures::FixtureBuilder;
+    let dir = temp_dir("split-params");
+    // 1M params per shard (1000×1000 weight), no explicit count key.
+    let shard = FixtureBuilder::new()
+      .with_arch("qwen3")
+      .with_tensor("token_embd.weight", &[1000, 1000], 0)
+      .build();
+    fs::write(dir.join("m-00001-of-00002.gguf"), &shard).unwrap();
+    fs::write(dir.join("m-00002-of-00002.gguf"), &shard).unwrap();
+    let roots = vec![ScanRoot {
+      path: dir.clone(),
+      source: ModelSource::UserPath,
+    }];
+    let mut rx = scan(roots, ScanOptions::default());
+    let m = rx.recv().await.expect("one grouped entry");
+    let md = m.metadata.as_ref().expect("metadata present");
+    assert_eq!(
+      md.total_parameters,
+      Some(2_000_000),
+      "split parameter count must sum every shard's tensor elements"
+    );
+    assert_eq!(md.parameter_label.as_deref(), Some("2M"));
     fs::remove_dir_all(&dir).ok();
   }
 

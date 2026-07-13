@@ -305,7 +305,7 @@ pub fn summarise(header: &GgufHeader) -> ModelMetadata {
     .map(str::to_string);
   let tokenizer_kind = header.string(&["tokenizer.ggml.model"]).map(str::to_string);
 
-  let total_parameters = parameter_count(header, arch_key);
+  let total_parameters = parameter_count(header);
   let parameter_label = total_parameters.and_then(label_for_param_count);
 
   // Prefer the file's declared quant family (`general.file_type`, the value
@@ -341,47 +341,62 @@ pub fn summarise(header: &GgufHeader) -> ModelMetadata {
   }
 }
 
-/// Parameter count: prefer `general.parameter_count` (explicit), then sum
-/// of element counts across "weight" tensors as a fallback.
-fn parameter_count(header: &GgufHeader, arch: Option<&str>) -> Option<u64> {
+/// Parameter count: prefer an explicit model-level count, else sum the
+/// element counts of the "weight"/"bias" tensors present in this header.
+/// The tensor sum is per-file, so for a split GGUF it covers only the
+/// parsed shard — the scanner aggregates the rest across siblings.
+fn parameter_count(header: &GgufHeader) -> Option<u64> {
+  if let Some(p) = explicit_parameter_count(header) {
+    return Some(p);
+  }
+  let summed = tensor_param_sum(header);
+  (summed > 0).then_some(summed)
+}
+
+/// The explicit model-level parameter count a GGUF may declare
+/// (`general.parameter_count`, or the arch-prefixed variant). `None` when
+/// the header carries no such key — the count then comes from
+/// [`tensor_param_sum`], which is per-shard for a split GGUF and so must
+/// be aggregated across shards, whereas an explicit count is already the
+/// whole-model figure.
+pub(crate) fn explicit_parameter_count(header: &GgufHeader) -> Option<u64> {
   if let Some(p) = header.u64(&["general.parameter_count"]) {
     return Some(p);
   }
-  // Architecture-prefixed variants seen in some GGUFs.
-  if let Some(a) = arch {
-    if let Some(p) = header.u64(&[format!("{a}.parameter_count")]) {
-      return Some(p);
-    }
-  }
-  let summed: u64 = header
+  let arch = header.string(&["general.architecture"]);
+  arch.and_then(|a| header.u64(&[format!("{a}.parameter_count")]))
+}
+
+/// Sum the element counts of the "weight"/"bias" tensors in one header.
+/// The fallback parameter estimate when no explicit count is declared,
+/// and the per-shard contribution the scanner sums across a split
+/// model's shards.
+pub(crate) fn tensor_param_sum(header: &GgufHeader) -> u64 {
+  header
     .tensors
     .iter()
     .filter(|t| t.name.ends_with(".weight") || t.name.ends_with(".bias"))
     .map(|t| t.n_elements())
-    .fold(0u64, u64::saturating_add);
-  if summed == 0 {
-    None
-  } else {
-    Some(summed)
-  }
+    .fold(0u64, u64::saturating_add)
 }
 
 /// Format a raw parameter count as a compact, accurate label:
-/// `6_900_000_000` → `6.9B`, `8_030_000_000` → `8B`,
-/// `235_000_000_000` → `235B`, `671_000_000_000` → `671B`,
-/// `1_200_000_000_000` → `1.2T`. Values at/above 100 drop the
-/// decimal, and a trailing `.0` is trimmed so `7.0B` reads as `7B`.
-/// Returns `None` below 100M, where a tensor-summed count is too
-/// noisy to label confidently.
-fn label_for_param_count(count: u64) -> Option<String> {
-  const M: u64 = 1_000_000;
-  if count < 100 * M {
+/// `22_700_000` → `22.7M`, `124_000_000` → `124M`, `6_900_000_000` → `6.9B`,
+/// `8_030_000_000` → `8B`, `284_334_567_511` → `284B`,
+/// `1_200_000_000_000` → `1.2T`. A value at/above 100 in its unit drops the
+/// decimal, and a trailing `.0` is trimmed so `7.0B` reads as `7B`. `None`
+/// only for a zero count (the caller already suppresses a zero tensor sum).
+pub(crate) fn label_for_param_count(count: u64) -> Option<String> {
+  if count == 0 {
     return None;
   }
-  let (value, unit) = if count >= 1_000_000 * M {
-    (count as f64 / 1e12, "T")
+  let n = count as f64;
+  let (value, unit) = if n >= 1e12 {
+    (n / 1e12, "T")
+  } else if n >= 1e9 {
+    (n / 1e9, "B")
   } else {
-    (count as f64 / 1e9, "B")
+    (n / 1e6, "M")
   };
   let label = if value >= 100.0 {
     format!("{value:.0}{unit}")
@@ -733,8 +748,11 @@ mod tests {
       label_for_param_count(1_200_000_000_000).as_deref(),
       Some("1.2T")
     );
-    // Below 100M is too noisy to label.
-    assert_eq!(label_for_param_count(50_000_000), None);
+    // Small (embedding) models label in millions instead of `?`.
+    assert_eq!(label_for_param_count(22_700_000).as_deref(), Some("22.7M"));
+    assert_eq!(label_for_param_count(124_000_000).as_deref(), Some("124M"));
+    // Only a zero count is unlabelable.
+    assert_eq!(label_for_param_count(0), None);
   }
 
   #[test]
