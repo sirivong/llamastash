@@ -77,6 +77,10 @@ pub enum ListRow {
     weights_bytes: Option<u64>,
     /// Mode hint surfaced at discovery time.
     mode_hint: String,
+    /// Backend the model routes to (`llamacpp` / `lemonade` / `ds4`) — the
+    /// daemon's prediction for idle rows, the resolved value for running rows.
+    /// Empty when unknown. Only rendered on multi-backend hosts.
+    backend: String,
     /// Whether this row is favorited (drives the `★` glyph).
     favorite: bool,
     state: SurfaceState,
@@ -129,6 +133,9 @@ pub struct RowInputs<'a> {
   pub model_ports: &'a BTreeMap<PathBuf, u16>,
   pub running: &'a [RunningLaunchRow],
   pub recent_paths: &'a [PathBuf],
+  /// The daemon's per-model backend prediction, for the Backend column on
+  /// idle catalog rows (running rows use their resolved backend instead).
+  pub backend_by_path: &'a BTreeMap<PathBuf, String>,
 }
 
 /// One active managed launch the `▶ Running` group should render.
@@ -142,6 +149,10 @@ pub struct RunningLaunchRow {
   pub state: SurfaceState,
   /// Launch device selector (`CUDA0`, `Vulkan1`, etc.) when set.
   pub device: Option<String>,
+  /// The backend the launch resolved to (`llamacpp` / `lemonade` / `ds4`),
+  /// for the Backend column — the honest resolved value, which can differ from
+  /// the catalog prediction under a `--backend` override.
+  pub backend: Option<String>,
 }
 
 /// Group `models` into:
@@ -160,6 +171,10 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
   if inputs.models.is_empty() {
     return Vec::new();
   }
+  // The daemon's predicted backend for an idle catalog row (running rows carry
+  // their resolved backend instead). One lookup, reused by every idle group.
+  let backend_for =
+    |p: &std::path::Path| inputs.backend_by_path.get(p).cloned().unwrap_or_default();
   let mut rows: Vec<ListRow> = Vec::with_capacity(inputs.models.len() + inputs.running.len() + 6);
   rows.push(ListRow::TableHeader);
 
@@ -217,6 +232,7 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
         inputs.model_ports.get(&m.path).copied(),
         None,
         None,
+        backend_for(&m.path),
       ));
     }
   }
@@ -258,6 +274,7 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
         inputs.model_ports.get(&m.path).copied(),
         None,
         None,
+        backend_for(&m.path),
       ));
     }
     // Visual separator between favorites and folder groups —
@@ -286,6 +303,7 @@ pub fn build_rows(inputs: RowInputs<'_>) -> Vec<ListRow> {
         inputs.model_ports.get(&m.path).copied(),
         None,
         None,
+        backend_for(&m.path),
       ));
     }
   }
@@ -301,6 +319,8 @@ fn running_row(m: &DiscoveredModel, launch: &RunningLaunchRow) -> ListRow {
     Some(launch.port),
     launch.device.clone(),
     Some(launch.launch_id.clone()),
+    // Running rows show the *resolved* backend, not the catalog prediction.
+    launch.backend.clone().unwrap_or_default(),
   );
   // The favorite glyph drops on Running rows so two launches of the
   // same favorited model don't both wear a star — the original star
@@ -328,6 +348,7 @@ fn running_row_stub(launch: &RunningLaunchRow) -> ListRow {
     native_ctx: None,
     weights_bytes: None,
     mode_hint: "unknown".into(),
+    backend: launch.backend.clone().unwrap_or_default(),
     favorite: false,
     state: launch.state,
     port: Some(launch.port),
@@ -364,6 +385,7 @@ fn model_row(
   port: Option<u16>,
   device: Option<String>,
   launch_id: Option<String>,
+  backend: String,
 ) -> ListRow {
   let (arch, params, quant, native_ctx, mode_hint, cached_weights_bytes) = match &m.metadata {
     Some(md) => (
@@ -398,6 +420,7 @@ fn model_row(
     native_ctx,
     weights_bytes,
     mode_hint,
+    backend,
     favorite,
     state,
     port,
@@ -486,6 +509,7 @@ enum ColumnId {
   Quant,
   Ctx,
   Size,
+  Backend,
   Mode,
   Port,
 }
@@ -559,6 +583,14 @@ const COLUMNS: &[Column] = &[
     width: 6,
     rank: 10,
   },
+  // Multi-backend hosts only (gated like Device). `llamacpp` (8) is the widest
+  // label; low priority (rank 55), so it yields width right after Params.
+  Column {
+    id: ColumnId::Backend,
+    label: "Backend",
+    width: 8,
+    rank: 55,
+  },
   Column {
     id: ColumnId::Mode,
     label: "Mode",
@@ -614,7 +646,7 @@ struct ColumnLayout {
 /// primary signal (the name) stays readable, and the cells that
 /// would otherwise be spent on a redundant Mode column fund a
 /// usable Name column instead.
-fn layout_columns(content_w: usize, show_device: bool) -> ColumnLayout {
+fn layout_columns(content_w: usize, show_device: bool, show_backend: bool) -> ColumnLayout {
   let reserved_for_name = if content_w >= MARKER_W + PREFERRED_NAME_W {
     PREFERRED_NAME_W
   } else {
@@ -629,6 +661,7 @@ fn layout_columns(content_w: usize, show_device: bool) -> ColumnLayout {
     .iter()
     .enumerate()
     .filter(|(_, c)| show_device || c.id != ColumnId::Device)
+    .filter(|(_, c)| show_backend || c.id != ColumnId::Backend)
     .collect();
   by_rank.sort_by_key(|(_, c)| c.rank);
 
@@ -748,6 +781,9 @@ pub struct RenderInputs<'a> {
   /// When `false` the Device column is omitted entirely so single-GPU
   /// users aren't shown a column that can never carry a choice.
   pub show_device: bool,
+  /// Whether more than one backend is in play. When `false` the Backend
+  /// column is omitted (a single-backend host would show all `llamacpp`).
+  pub show_backend: bool,
 }
 
 /// Render `rows` into the supplied area using the active palette.
@@ -758,7 +794,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, palette: &Palette, input: Rende
   // so columns stay column-aligned).
   let inner_w = area.width.saturating_sub(2) as usize;
   let content_w = inner_w.saturating_sub(HIGHLIGHT_GUTTER);
-  let layout = layout_columns(content_w, input.show_device);
+  let layout = layout_columns(content_w, input.show_device, input.show_backend);
 
   let rows = input.rows;
   let safe_selected = if rows.is_empty() {
@@ -1024,6 +1060,7 @@ fn column_value(id: ColumnId, model: &ListRow) -> String {
     native_ctx,
     weights_bytes,
     mode_hint,
+    backend,
     port,
     device,
     ..
@@ -1045,6 +1082,7 @@ fn column_value(id: ColumnId, model: &ListRow) -> String {
     ColumnId::Size => weights_bytes
       .map(format_bytes)
       .unwrap_or_else(|| dash.into()),
+    ColumnId::Backend => crate::tui::fmt::list_cell(Some(backend), dash),
     ColumnId::Mode => crate::tui::fmt::list_cell(Some(mode_hint), dash),
     ColumnId::Port => port.map(|p| format!(":{p}")).unwrap_or_else(|| dash.into()),
   }
@@ -1179,6 +1217,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     assert_eq!(rows.first(), Some(&ListRow::TableHeader));
   }
@@ -1196,6 +1235,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     assert!(rows.is_empty(), "no models → no rows at all");
   }
@@ -1218,6 +1258,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     assert!(
       !rows
@@ -1239,6 +1280,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     // Row 0 is the table header; row 1 should be the favorites group.
     assert_eq!(rows[0], ListRow::TableHeader);
@@ -1280,6 +1322,7 @@ mod tests {
         port: 41101,
         state: SurfaceState::Ready,
         device: None,
+        backend: None,
       },
       RunningLaunchRow {
         launch_id: "L1".into(),
@@ -1287,6 +1330,7 @@ mod tests {
         port: 41100,
         state: SurfaceState::Ready,
         device: None,
+        backend: None,
       },
     ];
     let rows = build_rows(RowInputs {
@@ -1296,6 +1340,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &running,
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     // Expect: [TableHeader, Header(▶ Running), Model(L2), Model(L1), Header(/m), Model(catalog)]
     assert_eq!(rows.first(), Some(&ListRow::TableHeader));
@@ -1334,6 +1379,7 @@ mod tests {
       port: 41100,
       state: SurfaceState::Ready,
       device: None,
+      backend: None,
     }];
     let recent = vec![a.path.clone(), b.path.clone()];
     let rows = build_rows(RowInputs {
@@ -1343,6 +1389,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &running,
       recent_paths: &recent,
+      backend_by_path: &BTreeMap::new(),
     });
     let recent_section_idx = rows.iter().position(|r| match r {
       ListRow::Header { label } => label.contains("Recent"),
@@ -1382,6 +1429,7 @@ mod tests {
       model_ports: &ports,
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     let row_port = rows.iter().find_map(|r| match r {
       ListRow::Model { port, .. } => Some(*port),
@@ -1404,6 +1452,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     let row_port = rows.iter().find_map(|r| match r {
       ListRow::Model { port, .. } => Some(*port),
@@ -1427,6 +1476,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     let a_rows = rows
       .iter()
@@ -1465,6 +1515,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     let divider_idx = rows
       .iter()
@@ -1497,6 +1548,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     // No divider expected since the favorited row also fills the
     // /m/x folder slot — meaning the folder group does exist.
@@ -1508,6 +1560,7 @@ mod tests {
       port: 41100,
       state: SurfaceState::Ready,
       device: None,
+      backend: None,
     }];
     let rows_with_running = build_rows(RowInputs {
       models: std::slice::from_ref(&a),
@@ -1516,6 +1569,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &running,
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     // First Vec carries Favorites + /m/x folder → divider expected.
     assert!(
@@ -1551,6 +1605,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     let headers: Vec<String> = rows
       .iter()
@@ -1819,6 +1874,7 @@ mod tests {
       model_ports: &BTreeMap::new(),
       running: &[],
       recent_paths: &[],
+      backend_by_path: &BTreeMap::new(),
     });
     let model_row = rows
       .iter()
@@ -1883,7 +1939,7 @@ mod tests {
   #[test]
   fn layout_picks_every_column_when_pane_is_wide() {
     // Pane wide enough for every data column plus generous Name.
-    let layout = layout_columns(200, true);
+    let layout = layout_columns(200, true, true);
     assert_eq!(
       layout.visible.len(),
       COLUMNS.len(),
@@ -1896,14 +1952,14 @@ mod tests {
   fn layout_omits_device_column_on_single_gpu() {
     // Single-GPU / CPU-only hosts (show_device = false) never see the
     // Device column, even on a pane wide enough for everything.
-    let single = layout_columns(200, false);
+    let single = layout_columns(200, false, true);
     assert!(
       single.visible.iter().all(|c| c.id != ColumnId::Device),
       "Device column must be absent on single-GPU hosts"
     );
     assert_eq!(single.visible.len(), COLUMNS.len() - 1);
     // Multi-GPU hosts get it, rendered last (after Port).
-    let multi = layout_columns(200, true);
+    let multi = layout_columns(200, true, true);
     assert_eq!(
       multi.visible.last().map(|c| c.id),
       Some(ColumnId::Device),
@@ -1912,10 +1968,72 @@ mod tests {
   }
 
   #[test]
+  fn layout_omits_backend_column_on_single_backend_host() {
+    // Gated like Device: absent unless more than one backend is in play, so a
+    // pure-llama.cpp user never sees an all-`llamacpp` column.
+    let single = layout_columns(200, true, false);
+    assert!(
+      single.visible.iter().all(|c| c.id != ColumnId::Backend),
+      "Backend column must be absent on single-backend hosts"
+    );
+    let multi = layout_columns(200, true, true);
+    assert!(
+      multi.visible.iter().any(|c| c.id == ColumnId::Backend),
+      "Backend column present on multi-backend hosts"
+    );
+  }
+
+  #[test]
+  fn build_rows_backend_is_prediction_for_idle_and_resolved_for_running() {
+    let idle = fake("/m/a.gguf", "/m");
+    let run_m = fake("/m/b.gguf", "/m");
+    let mut backend_by_path = BTreeMap::new();
+    // The daemon predicts both would route to ds4…
+    backend_by_path.insert(idle.path.clone(), "ds4".to_string());
+    backend_by_path.insert(run_m.path.clone(), "ds4".to_string());
+    // …but the running one was launched `--backend llamacpp` (resolved wins).
+    let running = vec![RunningLaunchRow {
+      launch_id: "L1".into(),
+      path: run_m.path.clone(),
+      port: 41100,
+      state: SurfaceState::Ready,
+      device: None,
+      backend: Some("llamacpp".into()),
+    }];
+    let rows = build_rows(RowInputs {
+      models: &[idle.clone(), run_m.clone()],
+      favorites: &[],
+      model_states: &BTreeMap::new(),
+      model_ports: &BTreeMap::new(),
+      running: &running,
+      recent_paths: &[],
+      backend_by_path: &backend_by_path,
+    });
+    let backend_of = |want: &str| {
+      rows.iter().find_map(|r| match r {
+        ListRow::Model { path, backend, .. } if path == &PathBuf::from(want) => {
+          Some(backend.clone())
+        }
+        _ => None,
+      })
+    };
+    assert_eq!(
+      backend_of("/m/b.gguf"),
+      Some("llamacpp".to_string()),
+      "running row shows the resolved backend"
+    );
+    assert_eq!(
+      backend_of("/m/a.gguf"),
+      Some("ds4".to_string()),
+      "idle catalog row shows the daemon's prediction"
+    );
+  }
+
+  #[test]
   fn layout_drops_no_columns_when_only_zero_budget_remains() {
     // content_w = chrome + MIN_NAME_W → budget == 0. Nothing fits.
     // Name parks exactly at MIN_NAME_W.
-    let layout = layout_columns(MARKER_W + MIN_NAME_W, true);
+    let layout = layout_columns(MARKER_W + MIN_NAME_W, true, false);
     assert!(layout.visible.is_empty());
     assert_eq!(layout.name_w, MIN_NAME_W);
   }
@@ -1924,7 +2042,7 @@ mod tests {
   fn layout_keeps_lowest_rank_column_when_only_one_fits() {
     // Budget == one Size column (rank 10, cost 6+1=7). Name still
     // at MIN_NAME_W.
-    let layout = layout_columns(MARKER_W + MIN_NAME_W + 7, true);
+    let layout = layout_columns(MARKER_W + MIN_NAME_W + 7, true, false);
     assert_eq!(layout.visible.len(), 1);
     assert_eq!(layout.visible[0].id, ColumnId::Size);
     assert_eq!(layout.name_w, MIN_NAME_W);
@@ -1937,7 +2055,7 @@ mod tests {
     // takes Size (cost 7), Ctx (8), Quant (8), Arch (9) → sum 32 ≤ 40.
     // Device (rank 40, cost 10) would be 42 > 40 → stop. Survivors
     // keep their declaration order (Arch precedes Quant/Ctx/Size).
-    let layout = layout_columns(76, true);
+    let layout = layout_columns(76, true, false);
     let ids: Vec<ColumnId> = layout.visible.iter().map(|c| c.id).collect();
     assert_eq!(
       ids,
@@ -1959,7 +2077,7 @@ mod tests {
     // primary signal (name) gets ~40 cells, data shrinks to
     // Ctx + Size only — Ctx wins over Quant because Ctx is rank
     // 20 (use-case fit) and Quant is rank 30.
-    let layout = layout_columns(58, true);
+    let layout = layout_columns(58, true, false);
     let ids: Vec<ColumnId> = layout.visible.iter().map(|c| c.id).collect();
     assert_eq!(ids, vec![ColumnId::Ctx, ColumnId::Size]);
     assert!(
@@ -1978,7 +2096,7 @@ mod tests {
     // smuggled in even though 32+7=39 would have fit, because the
     // strict cutoff stops at the first overrun and never revisits
     // higher ranks.
-    let layout = layout_columns(76, true);
+    let layout = layout_columns(76, true, false);
     let ids: Vec<ColumnId> = layout.visible.iter().map(|c| c.id).collect();
     assert!(
       !ids.contains(&ColumnId::Port),
@@ -1993,7 +2111,7 @@ mod tests {
     // drops with it (rather than slotting in because it's
     // cheaper). Predictable visibility: ranks determine drops,
     // not column widths.
-    let with_both = layout_columns(110, true);
+    let with_both = layout_columns(110, true, false);
     let with_both_ids: Vec<ColumnId> = with_both.visible.iter().map(|c| c.id).collect();
     assert!(
       with_both_ids.contains(&ColumnId::Mode) && with_both_ids.contains(&ColumnId::Port),
@@ -2001,7 +2119,7 @@ mod tests {
     );
     // 76 cells = the golden width. Mode doesn't fit (budget=40,
     // 32+11=43). Cutoff fires → Port drops too.
-    let neither = layout_columns(76, true);
+    let neither = layout_columns(76, true, false);
     let neither_ids: Vec<ColumnId> = neither.visible.iter().map(|c| c.id).collect();
     assert!(
       !neither_ids.contains(&ColumnId::Mode) && !neither_ids.contains(&ColumnId::Port),
@@ -2013,7 +2131,7 @@ mod tests {
   fn layout_grows_name_with_unspent_budget_on_wide_panes() {
     // At 130 cells (typical wide-mode list pane in a 200-col
     // terminal) every column fits and Name absorbs the rest.
-    let layout = layout_columns(130, true);
+    let layout = layout_columns(130, true, true);
     assert_eq!(layout.visible.len(), COLUMNS.len(), "all columns visible");
     let cols_w: usize = COLUMNS.iter().map(|c| c.width + COL_SEP_W).sum();
     assert_eq!(layout.name_w, 130 - MARKER_W - cols_w);

@@ -469,6 +469,7 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) 
           filter_chip_label: &filter_chip,
           focused: list_focused,
           show_device: app.multi_device(),
+          show_backend: app.multi_backend(),
         },
       );
     }
@@ -1252,6 +1253,7 @@ mod tests {
         native_ctx: None,
         weights_bytes: None,
         mode_hint: String::new(),
+        backend: String::new(),
         favorite: false,
         state,
         port: None,

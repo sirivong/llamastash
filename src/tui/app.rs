@@ -296,12 +296,14 @@ pub struct App {
   pub options: AppOptions,
   pub focus: Focus,
   pub models: Vec<DiscoveredModel>,
-  /// Canonical paths the daemon's `list_models` badged `backend: "ds4"` —
-  /// ds4-compatible files that route to ds4 (the daemon already applied the
-  /// availability + quant-contract predicate). Drives the launch picker's
-  /// `model_backend` so the ds4 native-knob rows render for exactly the rows
-  /// a plain launch would send to ds4. Refreshed with `models`.
-  pub ds4_badge_paths: std::collections::HashSet<PathBuf>,
+  /// The daemon's per-model `list_models` `backend` prediction, keyed by
+  /// canonical path (`llamacpp` / `lemonade` / `ds4`). The daemon already
+  /// applied the ds4 availability + quant-contract predicate and the source
+  /// mapping, so this is the single source of truth for "where would a plain
+  /// launch of this model route" — it drives the launch picker's
+  /// `model_backend`, the right-pane ds4 badge, and the Models-list Backend
+  /// column, with no backend logic re-derived TUI-side. Refreshed with `models`.
+  pub backend_by_path: std::collections::BTreeMap<PathBuf, String>,
   pub favorites: Vec<PathBuf>,
   pub managed: Vec<ManagedRow>,
   /// External (unmanaged) `llama-server` processes the daemon's
@@ -556,7 +558,7 @@ impl App {
       options,
       focus: Focus::List,
       models: Vec::new(),
-      ds4_badge_paths: std::collections::HashSet::new(),
+      backend_by_path: std::collections::BTreeMap::new(),
       favorites: Vec::new(),
       managed: Vec::new(),
       external: Vec::new(),
@@ -830,20 +832,40 @@ impl App {
       None => return,
     };
     let mut next: Vec<DiscoveredModel> = Vec::with_capacity(arr.len());
-    let mut ds4_paths = std::collections::HashSet::new();
+    let mut backend_by_path = std::collections::BTreeMap::new();
     for row in arr {
       if let Some(m) = parse_list_models_row(row) {
-        // Capture the daemon's honest ds4 badge so the picker can render the
-        // ds4 native-knob rows for exactly the rows that route to ds4.
-        if row.get("backend").and_then(Value::as_str) == Some("ds4") {
-          ds4_paths.insert(m.path.clone());
+        // Capture the daemon's honest per-row backend prediction (the single
+        // source for the picker, the ds4 badge, and the Backend column).
+        if let Some(backend) = row.get("backend").and_then(Value::as_str) {
+          backend_by_path.insert(m.path.clone(), backend.to_string());
         }
         next.push(m);
       }
     }
     self.models = next;
-    self.ds4_badge_paths = ds4_paths;
+    self.backend_by_path = backend_by_path;
     self.clamp_cursor();
+  }
+
+  /// The daemon's predicted backend for `path` (`llamacpp` / `lemonade` /
+  /// `ds4`), or `None` when the model isn't in the current catalog.
+  pub fn predicted_backend(&self, path: &std::path::Path) -> Option<&str> {
+    self.backend_by_path.get(path).map(String::as_str)
+  }
+
+  /// Whether a plain launch of `path` would route to ds4 — the daemon's badge,
+  /// not a TUI-side re-derivation.
+  pub fn is_ds4_path(&self, path: &std::path::Path) -> bool {
+    self.predicted_backend(path) == Some(crate::backend::ds4::DS4_BACKEND_ID)
+  }
+
+  /// True when more than one backend is actually in play — any model routes to
+  /// something other than the default `llamacpp`. Gates the Models-list Backend
+  /// column (like `multi_device` gates the Device column) so a single-backend
+  /// host never sees a redundant all-`llamacpp` column.
+  pub fn multi_backend(&self) -> bool {
+    self.backend_by_path.values().any(|b| b != "llamacpp")
   }
 
   /// Apply a `status` IPC response. Refreshes the supervisor's
@@ -1152,6 +1174,9 @@ impl App {
         port: m.port,
         state: m.state,
         device: m.device.clone(),
+        // The backend the launch actually resolved to (honest even for a
+        // `--backend llamacpp` override on a ds4-compatible file).
+        backend: m.backend.clone(),
       })
       .collect();
     let mut all = build_rows(RowInputs {
@@ -1161,6 +1186,7 @@ impl App {
       model_ports: &model_ports,
       running: &running,
       recent_paths: &self.recent_paths,
+      backend_by_path: &self.backend_by_path,
     });
     if !self.filter_input.is_empty() {
       all = apply_filter(&all, self.filter_input.buffer());
@@ -1537,22 +1563,13 @@ impl App {
     }
     state.active_instances = active_count;
     // Scope the backend chooser to the focused model's own backend so the
-    // picker can't force a cross-backend launch. A ds4-badged path (the
-    // daemon's honest routing signal) derives ds4; a Lemonade-registry source
-    // derives Lemonade; everything else is the direct llama.cpp backend.
-    state.model_backend = match path.as_ref() {
-      Some(p) if self.ds4_badge_paths.contains(p) => crate::launch::params::BackendChoice::Ds4,
-      Some(p)
-        if self
-          .models
-          .iter()
-          .find(|m| &m.path == p)
-          .map(|m| m.source.backend_id() == crate::backend::lemonade::LEMONADE_BACKEND_ID)
-          .unwrap_or(false) =>
-      {
-        crate::launch::params::BackendChoice::Lemonade
-      }
-      _ => crate::launch::params::BackendChoice::LlamaCpp,
+    // picker can't force a cross-backend launch — straight off the daemon's
+    // per-row prediction (`backend_by_path`), no TUI-side re-derivation.
+    use crate::launch::params::BackendChoice;
+    state.model_backend = match path.as_ref().and_then(|p| self.predicted_backend(p)) {
+      Some(b) if b == crate::backend::ds4::DS4_BACKEND_ID => BackendChoice::Ds4,
+      Some(b) if b == crate::backend::lemonade::LEMONADE_BACKEND_ID => BackendChoice::Lemonade,
+      _ => BackendChoice::LlamaCpp,
     };
     // Surface the model's backend native knobs (six for ds4, none for
     // llama.cpp / Lemonade).
@@ -2446,6 +2463,12 @@ mod tests {
     row.source = ModelSource::Lemonade;
     row.display_label = Some("qwen3.5-4b-FLM".into());
     app.models = vec![row];
+    // The picker now reads the daemon's per-row prediction (as `ingest_list_models`
+    // records it), not a TUI-side source re-derivation.
+    app.backend_by_path.insert(
+      PathBuf::from("lemonade://qwen3.5-4b-FLM"),
+      "lemonade".into(),
+    );
     app.list_cursor = 2;
     assert!(app.focused_path().is_some(), "cursor must sit on the row");
     let picker = app.build_default_picker().expect("picker builds");
@@ -2492,6 +2515,21 @@ mod tests {
         .multimodal,
       None
     );
+  }
+
+  #[test]
+  fn multi_backend_and_is_ds4_path_read_the_daemon_prediction() {
+    let mut app = App::new(AppOptions::default());
+    app
+      .backend_by_path
+      .insert(PathBuf::from("/m/a.gguf"), "llamacpp".into());
+    assert!(!app.multi_backend(), "all-llamacpp is single-backend");
+    app
+      .backend_by_path
+      .insert(PathBuf::from("/m/b.gguf"), "ds4".into());
+    assert!(app.multi_backend(), "a ds4/lemonade row flips it on");
+    assert!(app.is_ds4_path(&PathBuf::from("/m/b.gguf")));
+    assert!(!app.is_ds4_path(&PathBuf::from("/m/a.gguf")));
   }
 
   #[test]

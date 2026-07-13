@@ -618,7 +618,7 @@ fn focused_backend_badge(app: &App) -> Option<BackendBadge> {
   // there is no model→alias remap to surface.
   let is_ds4 = match running {
     Some(m) => m.is_ds4(),
-    None => app.ds4_badge_paths.contains(&path),
+    None => app.is_ds4_path(&path),
   };
   if is_ds4 {
     return Some(BackendBadge { chip: " ds4 " });
@@ -896,7 +896,9 @@ mod tests {
     );
     // The prediction alone must NOT badge a running row launched on llama.cpp.
     app.managed[0].backend = Some("llamacpp".into());
-    app.ds4_badge_paths.insert(PathBuf::from("/m/qwen.gguf"));
+    app
+      .backend_by_path
+      .insert(PathBuf::from("/m/qwen.gguf"), "ds4".into());
     let llama_row = render_badge(&app);
     assert!(
       !llama_row.contains("ds4"),

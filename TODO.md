@@ -213,10 +213,10 @@ places.
 - [x] ~~why does lemond runs get a special ID instead of L1, L2 etc~~ — done: every backend now draws its launch id from the one `registry::next_id()` counter (`L#`); the `lemonade:<name>` scheme is deleted. Delegated (Lemonade) models stamp the `L#` on their `RunningSnapshot` (no supervisor to hold it) and `stop`/`logs` reverse-map it to the umbrella model name. See [`src/daemon/launch_service.rs`](src/daemon/launch_service.rs) `start_delegated_lemonade` + [`src/ipc/methods.rs`](src/ipc/methods.rs) `delegated_name_for`.
 - [ ] CLI 'status' shows 'backends llamacpp ✓ installed cpu, rocm lemonade ✓ installed cpu, npu umbrella: running ds4 ✓ installed cpu' the cpu/rocm/npu etc labels doesnt seem accurate. how are these derived?
 - [ ] CLI status should also show WEB UI URL.
-- [ ] Update website and main docs to refelect multiple backends supported
+- [x] Update website and main docs to refelect multiple backends supported
 - [ ] unable to favorite lemonade models and they dont appear in recents as well.
 - [x] ~~add a param field to model list TUI/CLI~~ — done: a `Params` column (parameter count `7B` / `235B` / `1.2T`) in the TUI Models list and `llamastash list`, from the GGUF header; the label formatter is now compact + accurate across the range. Arch column widened to 11 (fits `deepseek4` / `qwen3next`), Mode narrowed to 6.
-- [ ] add a backend field to model list TUI/CLI
+- [x] ~~add a backend field to model list TUI/CLI~~ — done: a `Backend` column (`llamacpp` / `lemonade` / `ds4`) in the TUI Models list and `llamastash list`, gated to multi-backend hosts (like Device on multi-GPU). Idle rows show the daemon's `list_models` prediction, running rows the resolved backend. DRY: one `App::backend_by_path` map (the daemon's per-row prediction) now powers the picker, the ds4 badge, and this column — no backend logic re-derived TUI-side.
 - [x] ~~The (model/server default) label for setting knobs should not wrap; cut off what doesn't fit and show `…`.~~ — Settings rows clip to the pane width with `…` (no `Wrap`); the running view and editable form now share one render path (`fmt::clip_line` is the shared primitive), so both truncate identically. (821c26b)
 - [x] ~~show a label (N) near the prest knob in settings to indicate how many presets are available for the current model. (N=0 if none)~~ — the Settings preset row renders `preset (N)` (count of effective named presets), `preset (0)` when none.
 

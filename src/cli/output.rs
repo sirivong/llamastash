@@ -47,7 +47,17 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
   if rows.is_empty() {
     return format!("{}\n", colors::dim("(no models discovered)"));
   }
-  let header = ["NAME", "ARCH", "PARAMS", "QUANT", "CTX", "SIZE", "STATUS"];
+  // Show the BACKEND column only on a multi-backend host — when at least one
+  // model routes to something other than the default `llamacpp` (matches the
+  // TUI's `multi_backend` gate). Uses the daemon's per-row `backend` prediction.
+  let show_backend = rows
+    .iter()
+    .any(|r| r.backend.as_deref().is_some_and(|b| b != "llamacpp"));
+  let mut header: Vec<&str> = vec!["NAME", "ARCH", "PARAMS", "QUANT", "CTX", "SIZE"];
+  if show_backend {
+    header.push("BACKEND");
+  }
+  header.push("STATUS");
   let body: Vec<Vec<String>> = rows
     .iter()
     .map(|r| {
@@ -68,7 +78,12 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
       // split-shard aggregation). One `stat` per row is cheap.
       let size = display_size(r);
       let status = running_status_cell(running.get(&r.path));
-      vec![r.name(), arch, params, quant, ctx, size, status]
+      let mut cells = vec![r.name(), arch, params, quant, ctx, size];
+      if show_backend {
+        cells.push(crate::tui::fmt::list_cell(r.backend.as_deref(), "?"));
+      }
+      cells.push(status);
+      cells
     })
     .collect();
   let mut out = format::table(&header, &body);
@@ -719,6 +734,28 @@ mod tests {
       s,
       "NAME\tARCH\tPARAMS\tQUANT\tCTX\tSIZE\tSTATUS\nqwen.gguf\tqwen2\t7B\tQ4_K\t8192\t3.9G\t\n"
     );
+  }
+
+  #[test]
+  fn list_human_backend_column_only_on_multi_backend() {
+    let _g = ColorGuard::set(false);
+    // All-`llamacpp` (or no prediction) → no BACKEND column, old shape intact.
+    let mut llama = row("qwen", "qwen2", "Q4_K", 8192);
+    llama.backend = Some("llamacpp".to_string());
+    let single = list_human(std::slice::from_ref(&llama), &HashMap::new());
+    assert!(
+      !single.contains("BACKEND"),
+      "single-backend host hides the column: {single:?}"
+    );
+    // A non-`llamacpp` prediction flips it on.
+    let mut ds4 = row("deepseek", "deepseek4", "Q2_K", 4096);
+    ds4.backend = Some("ds4".to_string());
+    let multi = list_human(&[llama, ds4], &HashMap::new());
+    assert!(
+      multi.contains("BACKEND"),
+      "multi-backend host shows the column"
+    );
+    assert!(multi.contains("ds4"), "the ds4 value renders: {multi:?}");
   }
 
   #[test]
