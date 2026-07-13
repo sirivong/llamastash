@@ -284,6 +284,31 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
     tokio::time::sleep(Duration::from_millis(50)).await;
   }
 
+  // Recents: a successful Lemonade preload records `last_params` (keyed on the
+  // synthetic `lemonade://<name>` path), so the model surfaces in the TUI's
+  // `↺ Recent` section like any other launch. Recorded on the Ready transition,
+  // so poll briefly.
+  let deadline = Instant::now() + Duration::from_secs(5);
+  loop {
+    let lp = dispatch_request(&ctx, Request::new(30, "last_params_list", None))
+      .await
+      .result
+      .expect("last_params_list");
+    let recorded = lp["last_params"]
+      .as_array()
+      .expect("last_params array")
+      .iter()
+      .any(|r| r["model_path"] == "lemonade://Qwen-slow");
+    if recorded {
+      break;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "a Ready Lemonade launch must record last_params: {lp}"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+
   // Rejected load (name containing `fail` → 500): the row must surface
   // `error` with lemond's cause, not a phantom `ready`.
   let resp = dispatch_request(

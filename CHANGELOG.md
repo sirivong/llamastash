@@ -22,6 +22,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- Lemonade models can now be favorited (`f`) and show up in the TUI's `↺ Recent` section. Favoriting a `lemonade://` registry model no longer errors (there's no GGUF file to hash — it uses a synthetic id keyed on the catalog path), and a successful Lemonade launch records `last_params` like every other backend.
 - Split-GGUF parameter counts now sum tensor elements across every shard, so a 2-shard 80B model reports ~80B instead of the shard-1-only ~56B in the `Params` column of `list` / `show` (an explicit `general.parameter_count` still wins). Small models (embedding-scale) now label in millions (`22.7M`) instead of showing a placeholder.
 - deepseek4 KV cache is now modeled from the header (its two-tier compressed cache) instead of the naive per-head estimate, which over-counted ~8x at long context (~86 GiB vs the real ~11 GiB at 1M for Flash) and could spuriously refuse a launch. The "KV demand not modeled" advisory is dropped.
 - TUI Settings knob rows no longer wrap when a `(model/server default)` source label doesn't fit the pane — they truncate on one line with `…`, so cycling presets or live updates don't make the form jump. The running view and the editable form now render through one shared path, so both show/hide/truncate these labels identically.

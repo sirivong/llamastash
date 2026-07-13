@@ -1081,6 +1081,13 @@ async fn start_delegated_lemonade(
     let name = spec.model.name.clone();
     let params = params.clone();
     let umbrella = umbrella.clone();
+    // Record `last_params` on preload success so a Lemonade model shows up in
+    // the TUI's `↺ Recent` section like any other launch. Keyed on the synthetic
+    // GGUF id (path = `lemonade://<name>`) because `last_params_list` only emits
+    // `model_path` for the GGUF shape — the same synthetic-id convention this
+    // path already uses for its running snapshot.
+    let state = ctx.state.clone();
+    let last_params_id = ModelIdentity::Gguf(id.clone());
     tokio::spawn(async move {
       // `ensure_umbrella` returns at `Loading`; the load POST would race
       // the umbrella's bind and hit connection-refused on a cold start.
@@ -1104,6 +1111,15 @@ async fn start_delegated_lemonade(
         Ok(()) => {
           registry
             .set_delegated_state(&name, ManagedState::Ready)
+            .await;
+          state
+            .mutate(|s| {
+              s.upsert_last_params(
+                last_params_id.clone(),
+                params.clone(),
+                crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
+              )
+            })
             .await;
         }
         Err(e) => {

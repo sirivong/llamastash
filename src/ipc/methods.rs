@@ -930,12 +930,29 @@ struct FavoriteParams {
   model_path: PathBuf,
 }
 
+/// The favorites-store id for a model path. A Lemonade registry path
+/// (`lemonade://<name>`) has no file to hash, so it gets a synthetic `ModelId`
+/// keyed on that path (sentinel header) — the same synthetic-id convention the
+/// launch path uses, and path-identical to the catalog row so the TUI's `★`
+/// (which matches favorites by `id.path`) resolves. A local GGUF resolves its
+/// real header identity. Shared by add + remove so both build the same key.
+fn resolve_favorite_id(model_path: &std::path::Path) -> Result<ModelId, ErrorObject> {
+  if crate::backend::lemonade::registry_name_from_path(model_path).is_some() {
+    Ok(ModelId {
+      path: model_path.to_path_buf(),
+      header_blake3: [0u8; 32],
+    })
+  } else {
+    resolve_model_id(model_path)
+  }
+}
+
 async fn favorite_add_handler(
   ctx: &MethodContext,
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: FavoriteParams = parse_params(params)?;
-  let id = resolve_model_id(&parsed.model_path)?;
+  let id = resolve_favorite_id(&parsed.model_path)?;
   let identity = ModelIdentity::Gguf(id.clone());
   let added = ctx
     .state
@@ -952,7 +969,7 @@ async fn favorite_remove_handler(
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: FavoriteParams = parse_params(params)?;
-  let id = resolve_model_id(&parsed.model_path)?;
+  let id = resolve_favorite_id(&parsed.model_path)?;
   let identity = ModelIdentity::Gguf(id.clone());
   let removed = ctx.state.mutate(|s| s.favorites.remove(&identity)).await;
   Ok(json!({
@@ -1185,6 +1202,37 @@ mod tests {
       err.message.contains("/no/such/path-9f3a.gguf"),
       "error message should name the missing path: {}",
       err.message
+    );
+  }
+
+  #[tokio::test]
+  async fn favorite_add_accepts_a_lemonade_registry_path() {
+    // A fileless `lemonade://` path has no GGUF to hash — favoriting must still
+    // work (via the synthetic id), keyed on the path the catalog row uses so
+    // the TUI `★` resolves.
+    let c = ctx();
+    let resp = dispatch_request(
+      &c,
+      Request::new(
+        1,
+        "favorite_add",
+        Some(json!({"model_path": "lemonade://qwen3.5-4b-FLM"})),
+      ),
+    )
+    .await;
+    let body = resp
+      .result
+      .expect("lemonade favorite must succeed, not error");
+    assert_eq!(body["added"], json!(true));
+    assert_eq!(body["model_id"]["path"], "lemonade://qwen3.5-4b-FLM");
+    // favorite_list surfaces it with an `id.path` the TUI matches to the catalog.
+    let list = dispatch_request(&c, Request::new(2, "favorite_list", None))
+      .await
+      .result
+      .expect("favorite_list");
+    assert_eq!(
+      list["favorites"][0]["id"]["path"],
+      "lemonade://qwen3.5-4b-FLM"
     );
   }
 
