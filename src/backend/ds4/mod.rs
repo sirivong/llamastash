@@ -10,10 +10,11 @@
 //! backend-agnostic.
 //!
 //! Routing keys on [`ds4_compatible`] — the header-level quant contract read
-//! from ds4's own loader (`ds4.c`) — not on arch alone, because upstream
-//! llama.cpp master also runs `deepseek4` GGUFs. ds4 is the *preferred*
-//! engine for the files it can run; llama.cpp is the fallback, never a
-//! refusal.
+//! from ds4's own loader (`ds4.c`) — not on arch alone, because a current
+//! upstream llama.cpp (b9840+) also runs `deepseek4` GGUFs. ds4 is the
+//! *preferred* engine for the files it can run; llama.cpp is the fallback,
+//! never a refusal (an older llama.cpp than b9840 rejects the file with
+//! `unknown model architecture: 'deepseek4'`).
 //!
 //! Facts verified against a real ds4 build (`ds4-server --help`, master
 //! 2026-06-17) and the published q2 Flash header:

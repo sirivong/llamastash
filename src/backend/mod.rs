@@ -549,7 +549,8 @@ impl SelectionContext {
 /// the ds4-compatibility routing signal (D-route). Precedence: an explicit
 /// [`BackendChoice`] wins verbatim; otherwise `Auto` prefers ds4 when
 /// [`SelectionContext::prefers_ds4`], else defers to [`backend_for_identity`]
-/// (a `deepseek4` GGUF still runs on llama.cpp — fallback, never a refusal).
+/// (a `deepseek4` GGUF still runs on a current llama.cpp, b9840+ — fallback,
+/// never a refusal).
 ///
 /// This is the single compat-aware seam the live launch path, the TUI
 /// backend derivation, and the CLI row badge all call, so a row badges `ds4`

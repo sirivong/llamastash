@@ -330,7 +330,7 @@ pub(crate) async fn compose_and_spawn(
   // honors the per-model override, then the ds4-compatibility signal (a
   // compatible GGUF prefers ds4 when it's available and the mode fits), then
   // the identity rule (`Auto` → GGUF binds llama.cpp; a `deepseek4` GGUF still
-  // runs there as fallback).
+  // runs there as fallback on a b9840+ llama.cpp).
   let sel_ctx = crate::backend::SelectionContext {
     ds4_compatible,
     ds4_available: ctx.ds4_available(),

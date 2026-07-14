@@ -166,7 +166,7 @@ Once the underlying launch issue is fixed, the fallback path stops firing. To tu
 
 ## My DeepSeek-V4 model launched on llama.cpp, not ds4
 
-**This is expected in several cases** — ds4 is preferred, not required, and llama.cpp runs DeepSeek-V4 too, so an auto launch never refuses. Walk the checklist:
+**This is expected in several cases** — ds4 is preferred, not required, and a current llama.cpp (**b9840+**) runs DeepSeek-V4 too, so an auto launch never refuses. Walk the checklist:
 
 - **ds4-server not found.** ds4 is default-on only when the binary resolves. Check `llamastash status --json | jq '.backends[] | select(.id=="ds4")'` — `installed: false` means no `ds4-server` on `PATH` and no valid `ds4.binary`. See the [ds4 backend](usage.md#ds4-backend) setup.
 - **ds4 force-disabled.** `ds4.enabled: false` in config turns it off even when the binary is present.
@@ -174,6 +174,21 @@ Once the underlying launch issue is fixed, the fallback path stops firing. To tu
 - **Embedding / rerank mode.** `--mode embedding` or `--mode rerank` routes a compatible model to llama.cpp — ds4 serves chat/completions only.
 
 **Force it:** `llamastash start <model> --backend ds4` bypasses the predicate (ds4-server surfaces its own error if the file is a genuine mismatch).
+
+## DeepSeek-V4 fails on llama.cpp: `unknown model architecture: 'deepseek4'`
+
+**Symptom:** a DeepSeek-V4 GGUF routed to llama.cpp — no `ds4-server` installed, or you passed `--backend llamacpp` — dies at load with `error loading model: unknown model architecture: 'deepseek4'`. It fails in milliseconds, before any tensor loads.
+
+**Cause:** your `llama-server` predates DeepSeek-V4 support. It landed in llama.cpp **b9840** ([ggml-org/llama.cpp#24162](https://github.com/ggml-org/llama.cpp/pull/24162), merged 2026-06-29); older builds don't know the `deepseek4` architecture and reject the file outright. This is the failure mode behind the "fall back to llama.cpp, never a refusal" caveat — the fallback only degrades gracefully on a b9840+ build.
+
+**Fix:** update `llama-server` to **b9840 or newer** (a GitHub release binary, `brew upgrade llama.cpp`, or a source build from that merge onward) and point `llama_server_path` at it. Confirm the resolved binary and its build:
+
+```bash
+llamastash status --json | jq -r '.daemon.server_path'
+"$(llamastash status --json | jq -r '.daemon.server_path')" --version   # want: version >= 9840
+```
+
+Or install `ds4-server` so compatible GGUFs route to ds4 instead. (On a b9840+ llama.cpp, Flash Attention is currently auto-disabled for the deepseek4 graph — the model still loads and runs.)
 
 ## ds4 model out-of-memories at load
 

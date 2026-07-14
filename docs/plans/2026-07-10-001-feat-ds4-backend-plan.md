@@ -16,8 +16,9 @@ ds4-server is a self-contained OpenAI/Anthropic-compatible HTTP server that
 runs exclusively the DeepSeek V4 Flash/PRO GGUFs published at
 `huggingface.co/antirez/deepseek-v4-gguf`. Those files are standard-format
 `deepseek4` GGUFs whose quant recipe matches ds4's deliberately narrow
-kernel set; **upstream llama.cpp master also runs deepseek4 GGUFs**
-(verified against its source — arch, full tensor vocabulary, graph), so ds4
+kernel set; **a current upstream llama.cpp (b9840+) also runs deepseek4
+GGUFs** (PR #24162, merged 2026-06-29; verified against its source — arch,
+full tensor vocabulary, graph — and first-hand load-tested), so ds4
 is the *preferred, purpose-built* engine, not the only one. Routing
 therefore keys on a header-level **ds4-compatibility predicate** (arch +
 per-tensor-role quant contract, read from ds4's loader source), with
@@ -61,13 +62,20 @@ Verified facts this plan builds on (read from `ds4_server.c`, `ds4.c`, the
 GGUF headers themselves, upstream llama.cpp source, and the HF API,
 2026-07-10):
 
-- **llama.cpp master implements `deepseek4`**: `LLM_ARCH_DEEPSEEK4` with the
+- **llama.cpp implements `deepseek4`**: `LLM_ARCH_DEEPSEEK4` with the
   complete DS4 tensor vocabulary (`attn_compressor_*`, `indexer.*`, `hc_*` /
   `output_hc_*`, `attn_sinks`, `blk.*.ffn_gate_tid2eid`) and real graph
-  branches in `llama-model.cpp`. Third-party attestation
-  (ssweens/DeepSeek-V4-Flash-GGUF-YMMV): a V4-capable llama.cpp loads
-  antirez's files. antirez's own card: "they should" work elsewhere —
-  except the MTP sidecar, which "requires a specific loader" (ds4-only).
+  branches in `llama-model.cpp`. **Support landed in PR #24162 (merged
+  2026-06-29); the first release tag containing it is `b9840`.** Builds
+  older than b9840 reject the file with `unknown model architecture:
+  'deepseek4'`, so the fallback contract below assumes a b9840+ `llama-server`.
+  First-hand load-tested 2026-07-14: b9245 fails; b10011 (`bf2c86ddc`, latest
+  master) loads antirez's Flash IQ2XXS GGUF and generates end-to-end (Flash
+  Attention auto-disables for the deepseek4 graph; loads and runs without it).
+  Third-party attestation (ssweens/DeepSeek-V4-Flash-GGUF-YMMV): a V4-capable
+  llama.cpp loads antirez's files. antirez's own card: "they should" work
+  elsewhere — except the MTP sidecar, which "requires a specific loader"
+  (ds4-only).
 - **No ds4 metadata marker exists.** A parsed header of the published q2
   file shows only standard keys (`general.*`, `deepseek4.*`,
   `tokenizer.ggml.*`); tensor types are all standard GGML ids. Nothing in

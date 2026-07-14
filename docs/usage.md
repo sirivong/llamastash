@@ -404,9 +404,11 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 
 ## ds4 backend
 
-> **⚠️ Experimental.** ds4 support is new and lightly road-tested (validated on a single Strix Halo / ROCm host). Its behaviour, config keys, and defaults may change between releases. llama.cpp is the stable default and runs DeepSeek-V4 too, so ds4 is never required — if anything here misbehaves, force llama.cpp with `--backend llamacpp` or `ds4.enabled: false`.
+> **⚠️ Experimental.** ds4 support is new and lightly road-tested (validated on a single Strix Halo / ROCm host). Its behaviour, config keys, and defaults may change between releases. llama.cpp is the stable default and runs DeepSeek-V4 too on a current build (**b9840+**), so ds4 is never required — if anything here misbehaves, force llama.cpp with `--backend llamacpp` or `ds4.enabled: false`.
 
-[ds4](https://github.com/antirez/ds4) (antirez's DwarfStar) is a third backend: a direct, process-per-model engine that runs the `ds4-server` binary for the DeepSeek-V4 Flash/PRO GGUFs at [huggingface.co/antirez/deepseek-v4-gguf](https://huggingface.co/antirez/deepseek-v4-gguf). It is the purpose-built engine for those files (disk KV cache, SSD streaming); llama.cpp also runs DeepSeek-V4, so ds4 is preferred, never required.
+[ds4](https://github.com/antirez/ds4) (antirez's DwarfStar) is a third backend: a direct, process-per-model engine that runs the `ds4-server` binary for the DeepSeek-V4 Flash/PRO GGUFs at [huggingface.co/antirez/deepseek-v4-gguf](https://huggingface.co/antirez/deepseek-v4-gguf). It is the purpose-built engine for those files (disk KV cache, SSD streaming); a current llama.cpp (**b9840+**) also runs DeepSeek-V4, so ds4 is preferred, never required.
+
+> **Minimum llama.cpp version for these GGUFs.** DeepSeek-V4 support landed in llama.cpp **b9840** ([ggml-org/llama.cpp#24162](https://github.com/ggml-org/llama.cpp/pull/24162), merged 2026-06-29). On **b9840 or newer** — a release binary or a source build from that merge onward — llama.cpp loads antirez's Flash/PRO GGUFs; on anything older it fails immediately with `error loading model: unknown model architecture: 'deepseek4'`. This matters because ds4's "falls back to llama.cpp, never a refusal" (below) only degrades gracefully when your llama.cpp is new enough — an older `llama-server` turns that fallback into a hard load error. Point `llama_server_path` at a b9840+ build if you rely on the fallback. (Note: on the llama.cpp backend, Flash Attention is currently auto-disabled for the deepseek4 graph; it loads and runs without it.)
 
 **You supply the binary.** LlamaStash does not install ds4-server — build it from the repo (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and either put `ds4-server` on `PATH` or point `ds4.binary` at it. ds4 is **default-on the moment the binary resolves**; it stays completely dormant when it doesn't (no discovery, no new JSON fields on other rows).
 
@@ -428,7 +430,7 @@ ds4:
 Routing is automatic and keys on a header-level compatibility predicate — arch `deepseek4` **plus** ds4's quant contract (routed-expert tensors `ffn_*_exps` in `IQ2_XXS` / `Q2_K` / `Q4_K`, every other tensor in `F32` / `F16` / `Q8_0` / `I32`). Both published Flash/PRO variants pass; a generic third-party `deepseek4` K-quant does not and stays an ordinary llama.cpp model.
 
 - A **compatible** GGUF launches on ds4 when ds4 is available and the mode is chat/completions.
-- Otherwise it **falls back to llama.cpp** — never a refusal. llama.cpp master runs DeepSeek-V4 too.
+- Otherwise it **falls back to llama.cpp** — never a refusal, on a **b9840+** llama.cpp (see the version note above); an older `llama-server` fails the load with `unknown model architecture: 'deepseek4'`.
 - `start <model> --backend ds4` forces ds4 (it surfaces its own error if the file is a mismatch); `--backend llamacpp` forces llama.cpp on a compatible file. `--backend` accepts `auto` (default) | `ds4` | `llamacpp` | `lemonade`.
 - `--mode embedding` / `--mode rerank` on a compatible model routes to llama.cpp — ds4 serves chat/completions only.
 - The split PRO half-files (`…-Layers00-30.gguf` / `…-Layers-31-output.gguf`) are refused before spawn with "ds4 distributed mode unsupported"; use a single-file DeepSeek-V4 GGUF. Single-file PRO quants (e.g. the `…-Pro-IQ2XXS-…-Instruct` variants) are fine.

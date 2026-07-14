@@ -208,8 +208,8 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 ### [ds4 (DwarfStar) — DeepSeek V4 GGUFs](docs/usage.md#ds4-backend)
 
-- **⚠️ Experimental** — new and lightly road-tested (validated on a single Strix Halo / ROCm box); behaviour, config, and defaults may change. llama.cpp stays the stable default and runs DeepSeek-V4 too, so nothing depends on ds4.
-- **A third backend for antirez's [ds4](https://github.com/antirez/ds4).** ds4-server is the purpose-built engine for the DeepSeek-V4 Flash/PRO GGUFs (disk KV cache, SSD streaming). A ds4-compatible GGUF auto-routes to ds4 when the `ds4-server` binary is found, and **falls back to llama.cpp when it isn't** — llama.cpp master runs DeepSeek-V4 too, so ds4 is preferred, never required. Default-on when the binary resolves; enable/force via `[ds4]` config, `--ds4`, or `LLAMASTASH_DS4=1`. An SSD-streaming launch knob runs the 81–300+ GB models on below-floor RAM. See **[ds4 backend](docs/usage.md#ds4-backend)**.
+- **⚠️ Experimental** — new and lightly road-tested (validated on a single Strix Halo / ROCm box); behaviour, config, and defaults may change. llama.cpp stays the stable default and runs DeepSeek-V4 too on a current build (llama.cpp **b9840+**), so nothing depends on ds4.
+- **A third backend for antirez's [ds4](https://github.com/antirez/ds4).** ds4-server is the purpose-built engine for the DeepSeek-V4 Flash/PRO GGUFs (disk KV cache, SSD streaming). A ds4-compatible GGUF auto-routes to ds4 when the `ds4-server` binary is found, and **falls back to llama.cpp when it isn't** — a current llama.cpp (**b9840+**, the first release with DeepSeek-V4 support) runs these GGUFs too, so ds4 is preferred, never required. Older llama.cpp builds can't load them (`unknown model architecture: 'deepseek4'`). Default-on when the binary resolves; enable/force via `[ds4]` config, `--ds4`, or `LLAMASTASH_DS4=1`. An SSD-streaming launch knob runs the 81–300+ GB models on below-floor RAM. See **[ds4 backend](docs/usage.md#ds4-backend)**.
 
 ### [Built to be safe to run](FEATURES.md#built-to-be-safe-to-run)
 
