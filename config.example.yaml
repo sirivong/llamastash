@@ -57,26 +57,26 @@ theme: macchiato
 #
 # Sources — CLI: (none) · Env: (none). Config-only.
 #
-# custom_theme:
-#   base: macchiato            # built-in palette to inherit from
-#   is_dark: true              # affects the title row text choices
-#   bg: "#1A1B26"              # panel background
-#   fg: "#C0CAF5"              # primary text
-#   accent: "#BB9AF7"          # panel borders + active tab strip
-#   on_accent: "#1A1B26"       # text drawn on top of accent (title bar)
-#   panel_title: "#FFC777"     # block-title text — yellow in stock themes
-#   label: "#7DCFFF"           # in-panel label prefixes — blue in stock themes
-#   muted: "#565F89"           # secondary text + hint separators
-#   selection: "#283457"       # subtle surface tone (reserved)
-#   highlight: "#FFC777"       # selected row background in the Models list
-#   success: "#9ECE6A"
-#   warning: "#FF9E64"
-#   error:   "#F7768E"
-#   status_loading:  "#FFC777"
-#   status_ready:    "#9ECE6A"
-#   status_error:    "#F7768E"
-#   status_stopped:  "#565F89"
-#   status_external: "#7DCFFF"
+custom_theme:
+  base: macchiato # built-in palette to inherit from
+  is_dark: true # affects the title row text choices
+  bg: "#1A1B26" # panel background
+  fg: "#C0CAF5" # primary text
+  accent: "#BB9AF7" # panel borders + active tab strip
+  on_accent: "#1A1B26" # text drawn on top of accent (title bar)
+  panel_title: "#FFC777" # block-title text — yellow in stock themes
+  label: "#7DCFFF" # in-panel label prefixes — blue in stock themes
+  muted: "#565F89" # secondary text + hint separators
+  selection: "#283457" # subtle surface tone (reserved)
+  highlight: "#FFC777" # selected row background in the Models list
+  success: "#9ECE6A"
+  warning: "#FF9E64"
+  error: "#F7768E"
+  status_loading: "#FFC777"
+  status_ready: "#9ECE6A"
+  status_error: "#F7768E"
+  status_stopped: "#565F89"
+  status_external: "#7DCFFF"
 
 # ─── Model paths ──────────────────────────────────────────────────
 #
@@ -87,9 +87,9 @@ theme: macchiato
 #           Env: LLAMASTASH_MODEL_PATHS — `:`-separated on POSIX,
 #                `;`-separated on Windows (std::env::split_paths
 #                semantics; empty entries are skipped).
-model_paths: []
-# - /opt/llms
-# - /mnt/data/gguf
+model_paths:
+  - /opt/llms
+  - /mnt/data/gguf
 
 # ─── Default cache scanning ───────────────────────────────────────
 #
@@ -138,7 +138,7 @@ port_range:
 #
 # Sources — CLI: --llama-server PATH (global) ·
 #           Env: LLAMASTASH_LLAMA_SERVER=PATH.
-# llama_server_path: /usr/local/bin/llama-server
+llama_server_path: /usr/local/bin/llama-server
 
 # Additional `llama-server` binaries to probe for launch devices.
 # Each is queried with `--list-devices` at daemon start; the union of
@@ -151,9 +151,9 @@ port_range:
 # binary's own device names (`CUDA0`, `ROCm0`, `Vulkan0`).
 #
 # Sources — CLI: (none) · Env: (none). Config-only.
-# llama_server_paths:
-#   - /opt/builds/cuda/llama-server
-#   - /opt/builds/rocm/llama-server
+llama_server_paths:
+  - /opt/builds/cuda/llama-server
+  - /opt/builds/rocm/llama-server
 
 # Per-launch health-probe timeout in seconds. 120s suits a typical
 # 7B–13B model on local NVMe; raise to ~600 for 70B+ on slow disks
@@ -309,7 +309,7 @@ proxy:
   #           use `--proxy-port 0` to bind an ephemeral port — read
   #           the actual address from `llamastash status --json |
   #           jq .proxy.listen`) · Env: (none).
-  # port: 11435
+  port: 11435
 
   # Family-MRU fallback behaviour when a requested model fails to
   # auto-start. Default `true`: the proxy serves the request from
@@ -362,7 +362,7 @@ proxy:
   #
   # Sources — CLI: daemon start --proxy-host IP (beats env + config) ·
   #           Env: LLAMASTASH_PROXY_HOST. Precedence: CLI > env > config.
-  # host: 0.0.0.0
+  host: 0.0.0.0
 
   # Bearer token required on the proxy's data routes (`/v1/*`,
   # `/api/*`) when set. Comment out (the default) for no auth — the
@@ -376,7 +376,7 @@ proxy:
   #           precedence and is never written back to disk — for
   #           containers / secret managers). Secret: never logged;
   #           status reports only whether auth is enforced.
-  # api_key: sk-llamastash-...
+  api_key: sk-llamastash-...
 
   # Allow a non-loopback `host` with no `api_key` (unauthenticated LAN
   # proxy). Default false — the daemon refuses such a bind. Set true
@@ -413,13 +413,13 @@ lemonade:
   #           Env: LLAMASTASH_LEMONADE=1 (force on).
   # (The flag and env only force on; `false` here still wins as an
   # explicit off.)
-  # enabled: true
+  enabled: true
 
   # Explicit path to the user's `lemond` binary. Comment out to fall
   # back to a `lemond` (or `lemonade`) found on `$PATH`.
   #
   # Sources — CLI: (none) · Env: (none). Config-only.
-  # binary: /opt/lemonade/lemond
+  binary: /opt/lemonade/lemond
 
   # Loopback port the `lemond` umbrella binds and that discovery probes
   # for the model list. Defaults to Lemonade's own default (13305).
@@ -444,22 +444,22 @@ lemonade:
 # Unknown keys inside this block are rejected loudly (no
 # silently-tolerated typos). See docs/usage.md#ds4-backend.
 #
-# ds4:
-  # Force the backend on or off. Tri-state — leave unset for the
-  # default (auto: on whenever `ds4-server` resolves), `true` to force
-  # on, `false` to force off even when the binary is present.
-  #
-  # Sources — CLI: daemon start --ds4 (force on) ·
-  #           Env: LLAMASTASH_DS4=1 (force on).
-  # (The flag and env only force on; `false` here still wins as an
-  # explicit off.)
-  # enabled: true
+ds4:
+# Force the backend on or off. Tri-state — leave unset for the
+# default (auto: on whenever `ds4-server` resolves), `true` to force
+# on, `false` to force off even when the binary is present.
+#
+# Sources — CLI: daemon start --ds4 (force on) ·
+#           Env: LLAMASTASH_DS4=1 (force on).
+# (The flag and env only force on; `false` here still wins as an
+# explicit off.)
+enabled: true
 
-  # Explicit path to the `ds4-server` binary. Comment out to fall back
-  # to a `ds4-server` found on `$PATH`.
-  #
-  # Sources — CLI: (none) · Env: (none). Config-only.
-  # binary: /opt/ds4/ds4-server
+# Explicit path to the `ds4-server` binary. Comment out to fall back
+# to a `ds4-server` found on `$PATH`.
+#
+# Sources — CLI: (none) · Env: (none). Config-only.
+binary: /opt/ds4/ds4-server
 
 # ─── Keybindings ──────────────────────────────────────────────────
 #
@@ -487,67 +487,67 @@ lemonade:
 # default chord show the secondary key in a trailing comment.
 #
 # Sources — CLI: (none) · Env: (none). Config-only.
-keybindings: {}
-#  # ── Global / always-on ─────────────────────────────────────
-#  quit: q                            # also: ctrl+c
-#  toggle_help: '?'
-#  cycle_theme: t
-#  cycle_theme_prev: T                # i.e. shift+t
-#
-#  # ── Daemon-level (destructive — all behind Ctrl) ──────────
-#  restart_daemon: ctrl+r
-#  kill_daemon: ctrl+k
-#  stop_model: ctrl+s
-#  delete_model: ctrl+d
-#  cancel_download: ctrl+x
-#
-#  # ── Motion (Models list + right pane) ─────────────────────
-#  move_up: up                        # vi alias: k
-#  move_down: down                    # vi alias: j
-#  page_up: pgup
-#  page_down: pgdn
-#  go_top: g                          # also: home
-#  go_bottom: G                       # also: end
-#
-#  # ── Pane navigation ────────────────────────────────────────
-#  next_focus: tab                    # nav alias: l
-#  prev_focus: shift+tab              # nav alias: h
-#
-#  # ── Shift-letter quick-jumps to surfaces ──────────────────
-#  focus_list: M                      # i.e. shift+m
-#  focus_logs_tab: L
-#  focus_chat_tab: C                  # also: E, R (mnemonic aliases)
-#  focus_settings_tab: S
-#  open_hf_dialog: P                  # i.e. shift+p — "Pull"
-#
-#  # ── Models list local actions ─────────────────────────────
-#  open_filter: '/'
-#  clear_filter: esc                  # in filter focus
-#  toggle_favorite: f
-#  open_launch_picker: enter          # in list focus
-#  yank_url: u
-#  yank_curl: c                       # vi alias: y (yank)
-#  yank_path: p
-#
-#  # ── Right pane (Logs / Settings) ──────────────────────────
-#  enter_edit: e
-#  exit_edit: esc                     # in input focuses
-#  toggle_auto_scroll: s              # logs tab
-#  cycle_value_next: right            # settings tab
-#  cycle_value_prev: left
-#
-#  # ── Submit / cancel (Enter / Esc in multi-focus scopes) ───
-#  submit: enter                      # filter, right pane, embed, rerank, confirm popup, HF dialog
-#  send_chat: enter                   # chat input
-#  insert_newline: shift+enter        # all input focuses (kitty-protocol terminals)
-#  cancel: esc                        # confirm popup, HF dialog
-#
-#  # ── Field cycling (rerank input) ──────────────────────────
-#  next_field: down
-#  prev_field: up
-#
-#  # ── Chat-only chord ───────────────────────────────────────
-#  toggle_think_collapse: ctrl+r      # chat input
+keybindings:
+  # ── Global / always-on ─────────────────────────────────────
+  quit: q # also: ctrl+c
+  toggle_help: "?"
+  cycle_theme: t
+  cycle_theme_prev: T # i.e. shift+t
+
+  # ── Daemon-level (destructive — all behind Ctrl) ──────────
+  restart_daemon: ctrl+r
+  kill_daemon: ctrl+k
+  stop_model: ctrl+s
+  delete_model: ctrl+d
+  cancel_download: ctrl+x
+
+  # ── Motion (Models list + right pane) ─────────────────────
+  move_up: up # vi alias: k
+  move_down: down # vi alias: j
+  page_up: pgup
+  page_down: pgdn
+  go_top: g # also: home
+  go_bottom: G # also: end
+
+  # ── Pane navigation ────────────────────────────────────────
+  next_focus: tab # nav alias: l
+  prev_focus: shift+tab # nav alias: h
+
+  # ── Shift-letter quick-jumps to surfaces ──────────────────
+  focus_list: M # i.e. shift+m
+  focus_logs_tab: L
+  focus_chat_tab: C # also: E, R (mnemonic aliases)
+  focus_settings_tab: S
+  open_hf_dialog: P # i.e. shift+p — "Pull"
+
+  # ── Models list local actions ─────────────────────────────
+  open_filter: "/"
+  clear_filter: esc # in filter focus
+  toggle_favorite: f
+  open_launch_picker: enter # in list focus
+  yank_url: u
+  yank_curl: c # vi alias: y (yank)
+  yank_path: p
+
+  # ── Right pane (Logs / Settings) ──────────────────────────
+  enter_edit: e
+  exit_edit: esc # in input focuses
+  toggle_auto_scroll: s # logs tab
+  cycle_value_next: right # settings tab
+  cycle_value_prev: left
+
+  # ── Submit / cancel (Enter / Esc in multi-focus scopes) ───
+  submit: enter # filter, right pane, embed, rerank, confirm popup, HF dialog
+  send_chat: enter # chat input
+  insert_newline: shift+enter # all input focuses (kitty-protocol terminals)
+  cancel: esc # confirm popup, HF dialog
+
+  # ── Field cycling (rerank input) ──────────────────────────
+  next_field: down
+  prev_field: up
+
+  # ── Chat-only chord ───────────────────────────────────────
+  toggle_think_collapse: ctrl+r # chat input
 
 # ─── arch_defaults ────────────────────────────────────────────────
 #
@@ -569,37 +569,36 @@ keybindings: {}
 # `llamastash start --ctx N` flag and the in-TUI Settings tab feed
 # the `last_params` and `preset` layers above this one, not this map.)
 #
-# arch_defaults:
-#   qwen2:
-#     # ── Context & scheduling ──────────────────────────────
-#     ctx: 8192                      # → -c / --ctx-size
-#     parallel: 4                    # → --parallel (request slots)
-#     batch_size: 2048               # → --batch-size
-#     ubatch_size: 512               # → --ubatch-size (physical)
-#     keep: 0                        # → --keep (context shift)
-#     rope_freq_scale: 1.0           # → --rope-freq-scale
-#     # ── Compute placement ─────────────────────────────────
-#     n_gpu_layers: 99               # → --n-gpu-layers (99 = all)
-#     n_cpu_moe: 12                  # → --n-cpu-moe (MoE layers on CPU)
-#     threads: 8                     # → --threads (CPU)
-#     flash_attn: true               # → --flash-attn
-#     # ── Multi-GPU placement (only meaningful with >1 GPU) ──
-#     tensor_split: "3,1"            # → --tensor-split (75% GPU0 / 25% GPU1)
-#     main_gpu: 0                    # → --main-gpu (primary GPU)
-#     split_mode: layer              # → --split-mode (none|layer|row)
-#     # device: Vulkan0              # → --device (pin to one selector)
-#     # ── KV cache quantisation ─────────────────────────────
-#     cache_type_k: q8_0             # → --cache-type-k
-#     cache_type_v: q8_0             # → --cache-type-v
-#     # ── Memory residency ──────────────────────────────────
-#     mlock: false                   # → --mlock (lock in RAM)
-#     no_mmap: false                 # → --no-mmap (full RAM load)
-#     # ── Chat template ─────────────────────────────────────
-#     reasoning: false               # true bundles --jinja
-#                                    #   --reasoning-format deepseek
-#   llama:
-#     threads: 8
-#     parallel: 4
+arch_defaults:
+  qwen2:
+    # ── Context & scheduling ──────────────────────────────
+    ctx: 8192 # → -c / --ctx-size
+    parallel: 4 # → --parallel (request slots)
+    batch_size: 2048 # → --batch-size
+    ubatch_size: 512 # → --ubatch-size (physical)
+    keep: 0 # → --keep (context shift)
+    rope_freq_scale: 1.0 # → --rope-freq-scale
+    # ── Compute placement ─────────────────────────────────
+    n_gpu_layers: 99 # → --n-gpu-layers (99 = all)
+    n_cpu_moe: 12 # → --n-cpu-moe (MoE layers on CPU)
+    threads: 8 # → --threads (CPU)
+    flash_attn: true # → --flash-attn
+    # ── Multi-GPU placement (only meaningful with >1 GPU) ──
+    tensor_split: "3,1" # → --tensor-split (75% GPU0 / 25% GPU1)
+    main_gpu: 0 # → --main-gpu (primary GPU)
+    split_mode: layer # → --split-mode (none|layer|row)
+    # device: Vulkan0              # → --device (pin to one selector)
+    # ── KV cache quantisation ─────────────────────────────
+    cache_type_k: q8_0 # → --cache-type-k
+    cache_type_v: q8_0 # → --cache-type-v
+    # ── Memory residency ──────────────────────────────────
+    mlock: false # → --mlock (lock in RAM)
+    no_mmap: false # → --no-mmap (full RAM load)
+    # ── Chat template ─────────────────────────────────────
+    reasoning: false # true bundles --jinja,  --reasoning-format deepseek
+  llama:
+    threads: 8
+    parallel: 4
 
 # ─── presets ──────────────────────────────────────────────────────
 #
@@ -646,27 +645,26 @@ keybindings: {}
 # Changes the app writes are live immediately; hand-edits here need a
 # `llamastash daemon restart` to be picked up.
 #
-# presets:
-#   # per-model preset, keyed by the GGUF file's basename
-#   Qwen3-Coder-30B-Q4_K_M.gguf:
-#     default: long-ctx               # standing default; auto-applies on a plain start
-#                                     # (use `default: auto` for pure fit instead)
-#     entries:
-#       short-ctx:
-#         ctx: 8192
-#       long-ctx:
-#         ctx: 65536
-#         flash_attn: true
-#         n_gpu_layers: auto          # delegate this knob to --fit
-#       embed:
-#         mode: embedding
-#         ctx: 4096
-#         extras:
-#           - --rope-freq-base
-#           - "10000"
-#   # arch preset, keyed by `general.architecture` — applies to every
-#   # qwen3 model that has no per-model entry of the same name
-#   qwen3:
-#     entries:
-#       balanced:
-#         ctx: 16384
+presets:
+  # per-model preset, keyed by the GGUF file's basename
+  Qwen3-Coder-30B-Q4_K_M.gguf:
+    default: long-ctx # standing default; auto-applies on a plain start (use `default: auto` for pure fit instead)
+    entries:
+      short-ctx:
+        ctx: 8192
+      long-ctx:
+        ctx: 65536
+        flash_attn: true
+        n_gpu_layers: auto # delegate this knob to --fit
+      embed:
+        mode: embedding
+        ctx: 4096
+        extras:
+          - --rope-freq-base
+          - "10000"
+  # arch preset, keyed by `general.architecture` — applies to every
+  # qwen3 model that has no per-model entry of the same name
+  qwen3:
+    entries:
+      balanced:
+        ctx: 16384
