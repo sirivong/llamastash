@@ -2,7 +2,8 @@
 //! and parameterise a `llama-server` child.
 //!
 //! - [`binary`] — locate the `llama-server` executable on disk.
-//! - [`params`] — compose the argv vector from user choices.
+//! - [`params`] — the neutral launch IR (`LaunchParams`, typed knobs, the
+//!   layered resolver). Per-backend argv emission lives with each backend.
 //! - [`mode`] — `LaunchMode` (chat/embedding/rerank) and helpers.
 //! - [`presets`] / [`favorites`] — types persisted in
 //!   [`crate::daemon::state_store`].
@@ -13,7 +14,6 @@ pub mod defaults_table;
 pub mod favorites;
 pub mod flag_aliases;
 pub mod headroom;
-pub mod list_devices;
 pub mod mode;
 pub mod native_knobs;
 pub mod params;
@@ -25,7 +25,7 @@ pub use defaults_table::lookup as lookup_defaults;
 pub use favorites::{FavoriteEntry, Favorites};
 pub use mode::LaunchMode;
 pub use params::{
-  compose, field_is_auto, resolve_layered, seed_layerless, set_field_auto, LaunchParams,
-  LayerLabel, Resolved,
+  field_is_auto, resolve_layered, seed_layerless, set_field_auto, LaunchParams, LayerLabel,
+  Resolved,
 };
 pub use presets::{NamedPreset, Presets};

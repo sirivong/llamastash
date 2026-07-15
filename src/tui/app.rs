@@ -369,7 +369,7 @@ pub struct App {
   /// with the owning binary. Sourced from every configured binary's
   /// `--list-devices`. Populated by [`Self::ingest_status`]; consumed
   /// by the launch picker's Device row.
-  pub device_catalog: Vec<crate::launch::list_devices::LaunchDevice>,
+  pub device_catalog: Vec<crate::backend::llama_cpp::LaunchDevice>,
   /// Set when the user presses `q` so the event loop can exit.
   pub should_exit: bool,
   /// Whether the modal help overlay is visible. Bound to `?`.
@@ -1025,7 +1025,7 @@ impl App {
     if let Some(catalog) = body.get("device_catalog") {
       if !catalog.is_null() {
         if let Ok(devices) =
-          serde_json::from_value::<Vec<crate::launch::list_devices::LaunchDevice>>(catalog.clone())
+          serde_json::from_value::<Vec<crate::backend::llama_cpp::LaunchDevice>>(catalog.clone())
         {
           self.device_catalog = devices;
         }
@@ -1474,7 +1474,7 @@ impl App {
     self.device_catalog.len() > 1
   }
 
-  pub fn focused_override_device(&self) -> Option<&crate::launch::list_devices::LaunchDevice> {
+  pub fn focused_override_device(&self) -> Option<&crate::backend::llama_cpp::LaunchDevice> {
     let rows = self.rendered_rows();
     let selector = match rows.get(self.list_cursor) {
       Some(ListRow::Model {
@@ -2339,10 +2339,10 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::backend::llama_cpp::LaunchDevice;
   use crate::config::KnobValue;
   use crate::discovery::ModelSource;
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
-  use crate::launch::list_devices::LaunchDevice;
   use serde_json::json;
 
   #[test]

@@ -427,7 +427,7 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
   // backend-agnostic: it spawns `plan.binary` with `plan.argv`, removes
   // `plan.env_remove`, and probes `plan.readiness` — without knowing
   // which engine produced the spec. For llama.cpp `plan.argv` is exactly
-  // `params::compose`'s output (pinned by parity tests).
+  // `backend::llama_cpp::compose`'s output (pinned by parity tests).
   let mut cmd = Command::new(&input.plan.binary);
   cmd
     .args(&input.plan.argv)

@@ -503,7 +503,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       let binary_count = catalog_binaries.len();
       tokio::spawn(async move {
         let built = tokio::task::spawn_blocking(move || {
-          crate::launch::list_devices::build_catalog(&catalog_binaries)
+          crate::backend::llama_cpp::build_catalog(&catalog_binaries)
         })
         .await
         .unwrap_or_default();

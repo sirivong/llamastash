@@ -258,7 +258,7 @@ pub struct LaunchPickerState {
   /// this flat list (one entry per backend-view of a card, e.g. the
   /// same physical card may appear as both `ROCm0` and `Vulkan0`).
   /// `user_knobs.device` stores the chosen selector verbatim.
-  pub device_catalog: Vec<crate::launch::list_devices::LaunchDevice>,
+  pub device_catalog: Vec<crate::backend::llama_cpp::LaunchDevice>,
   /// Effective presets for this model (per-model ∪ arch), name-sorted —
   /// the cycle stops below `auto`. Empty for a model with no presets, in
   /// which case the Preset row is hidden.
@@ -1465,7 +1465,7 @@ mod tests {
 
   // ---- Flat device-catalog picker tests ----
 
-  use crate::launch::list_devices::LaunchDevice;
+  use crate::backend::llama_cpp::LaunchDevice;
 
   /// Build a `LaunchDevice` for tests. Memory fields don't affect the
   /// picker logic, so they're left `None`.

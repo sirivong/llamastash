@@ -572,7 +572,7 @@ fn enrich_with_lspci(devices: &mut [GpuDevice], lspci: &Option<LspciMaps>) {
 /// two drivers — e.g. ROCm and Vulkan — collapses to one entry instead
 /// of a phantom 0-VRAM duplicate. Launch-side device selection is
 /// separate: it reads `llama-server --list-devices` (see
-/// [`crate::launch::list_devices`]), not this probe.
+/// [`crate::backend::llama_cpp::list_devices`]), not this probe.
 ///
 /// Suitable for daemon startup and periodic hotplug-detection
 /// passes; the per-tick host-metrics refresh uses [`refresh_active`]

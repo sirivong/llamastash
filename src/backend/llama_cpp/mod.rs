@@ -4,13 +4,19 @@
 //! launch surface rather than reimplementing it, so the wire behavior is
 //! provably unchanged:
 //!
-//! - argv ← [`crate::launch::params::compose`]
+//! - argv ← `compose::compose` (llama.cpp's own emitter, the `compose` submodule)
 //! - identity ← [`crate::gguf::identity::compute`]
 //! - capabilities ← every [`crate::launch::flag_aliases`] knob
 //! - the env strip ← [`LLAMA_ENV_STRIP`] (moved here from the supervisor)
 //!
 //! The golden parity tests below pin `prepare_launch`'s argv to
 //! `compose`'s output so a future reimplementation can't silently drift.
+
+mod compose;
+pub mod list_devices;
+
+use compose::compose;
+pub use list_devices::{build_catalog, parse_list_devices, BinaryDevice, LaunchDevice};
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +30,7 @@ use super::{
 use crate::config::KnobValue;
 use crate::daemon::context::MethodContext;
 use crate::daemon::probe::ProbeOptions;
-use crate::launch::params::{compose, LaunchParams};
+use crate::launch::params::LaunchParams;
 
 /// Config-derived launch-knob keys llama.cpp carries in
 /// [`LaunchParams::backend_knobs`] (string-encoded, like ds4's native knobs).

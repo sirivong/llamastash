@@ -183,7 +183,7 @@ pub struct LaunchEnv {
   pub arch_defaults: std::collections::BTreeMap<String, crate::config::TypedKnobs>,
   /// Launch device catalog: the union of every configured binary's
   /// `--list-devices` output, deduped by selector (see
-  /// [`crate::launch::list_devices`]). `start_model` looks the chosen
+  /// [`crate::backend::llama_cpp::list_devices`]). `start_model` looks the chosen
   /// `knobs.device` selector up here to decide *which* binary to spawn;
   /// `status` projects it so the TUI device picker offers exactly the
   /// selectors `--device` will accept.
@@ -195,7 +195,7 @@ pub struct LaunchEnv {
   /// seconds for `runtime.json`). Reads start empty and flip to the
   /// full set once the probe completes; a launch in that brief window
   /// finds no selector match and falls back to the default `binary`.
-  pub device_catalog: Arc<RwLock<Vec<crate::launch::list_devices::LaunchDevice>>>,
+  pub device_catalog: Arc<RwLock<Vec<crate::backend::llama_cpp::LaunchDevice>>>,
   /// Seed mode for knobs no layer filled. Sourced from
   /// `Config.default_launch_mode` (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`).
   pub default_launch_mode: crate::config::DefaultLaunchMode,

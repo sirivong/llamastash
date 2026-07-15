@@ -156,7 +156,7 @@ pub struct ProcessLaunchSpec {
   /// by the orchestrator).
   pub binary: PathBuf,
   /// The full argv (everything after the program name). For llama.cpp
-  /// this is exactly [`crate::launch::params::compose`]'s output —
+  /// this is exactly [`crate::backend::llama_cpp`]'s `compose` output —
   /// pinned by golden parity tests.
   pub argv: Vec<OsString>,
   /// Environment variables to remove before spawn (the loopback /

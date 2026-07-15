@@ -27,7 +27,7 @@ pub struct DeviceRow {
   /// Backend-prefixed display label: `Nvidia0`, `Amd0`, `Vulkan0`,
   /// `Metal0`. Used by the host stats pane to tag per-device rows.
   /// This is *not* the `--device` value — launch selection draws from
-  /// the `llama-server --list-devices` catalog (`crate::launch::list_devices`),
+  /// the `llama-server --list-devices` catalog (`crate::backend::llama_cpp::list_devices`),
   /// whose selectors (`CUDA0`, `ROCm0`) are the only ones the binary accepts.
   pub selector: String,
   /// Backend the probe used to detect this device: `"nvidia"`,
@@ -514,7 +514,7 @@ fn aggregate_gpu(info: &GpuInfo) -> GpuAggregate {
 /// pane. Each row carries the device name, VRAM (used/total),
 /// utilization, and temperature when the vendor tool surfaces them.
 /// The `selector` field is a display label only — the launch device
-/// list comes from [`crate::launch::list_devices`], not from here.
+/// list comes from [`crate::backend::llama_cpp::list_devices`], not from here.
 pub fn build_device_rows(info: &GpuInfo) -> Option<Vec<DeviceRow>> {
   let all: &[GpuDevice] = match info {
     GpuInfo::CpuOnly => return None,

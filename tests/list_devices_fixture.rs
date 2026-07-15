@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use llamastash::launch::list_devices::parse_list_devices;
+use llamastash::backend::llama_cpp::parse_list_devices;
 
 fn fixture() -> PathBuf {
   PathBuf::from(env!("CARGO_BIN_EXE_fake_llama_server"))

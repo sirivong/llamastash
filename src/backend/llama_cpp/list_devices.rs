@@ -1,4 +1,5 @@
 //! Authoritative device discovery via `llama-server --list-devices`.
+//! Owned by the llama.cpp backend — this is the llama.cpp device probe.
 //!
 //! A single `llama-server` binary is compiled against exactly one GPU
 //! backend family (CUDA *or* HIP/ROCm, optionally plus Vulkan), so the

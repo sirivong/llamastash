@@ -466,10 +466,10 @@ fn format_uptime(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::backend::llama_cpp::LaunchDevice;
   use crate::daemon::host_metrics::HostMetricsSnapshot;
   use crate::discovery::{DiscoveredModel, ModelSource};
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
-  use crate::launch::list_devices::LaunchDevice;
   use crate::tui::app::{App, AppOptions, DaemonInfo, ManagedRow};
   use crate::tui::status_icons::SurfaceState;
   use ratatui::backend::TestBackend;

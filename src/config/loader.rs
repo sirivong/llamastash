@@ -570,7 +570,7 @@ pub struct TypedKnobs {
   /// selector exactly as that binary's `--list-devices` reports it
   /// (`"Vulkan0"`, `"CUDA0"`, `"ROCm0"`) — sourced from the launch
   /// device catalog, never a bare index. The daemon spawns the binary
-  /// that owns the selector (see [`crate::launch::list_devices`]).
+  /// that owns the selector (see [`crate::backend::llama_cpp::list_devices`]).
   pub device: Option<KnobValue<String>>,
   /// Proportional split of the model across multiple GPUs. Maps to
   /// `--tensor-split` (e.g. `"3,1"` puts 75% on GPU 0 and 25% on

@@ -425,7 +425,7 @@ pub fn extract_model_path(cmd: &[String]) -> Option<PathBuf> {
 }
 
 /// Extract `--port N` / `--port=N` / `-p N` from a `llama-server`
-/// argv. The supervisor's composer (`launch::params::compose`) always
+/// argv. The llama.cpp composer (`backend::llama_cpp::compose`) always
 /// emits `--port <N>` for managed children, so this is the canonical
 /// answer for any process that came from us. `None` means the cmdline
 /// didn't carry the flag — the caller treats that as "port unknown"
@@ -635,7 +635,7 @@ mod tests {
   #[test]
   fn extract_port_handles_long_short_and_inline_forms() {
     // Canonical llamastash-composed shape — long flag, space-separated
-    // value. This is what `launch::params::compose` always emits.
+    // value. This is what `backend::llama_cpp::compose` always emits.
     let canon: Vec<String> = vec![
       "llama-server".into(),
       "--port".into(),
