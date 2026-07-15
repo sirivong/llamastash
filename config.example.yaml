@@ -133,10 +133,6 @@ port_range:
   start: 41100
   end: 41300
 
-# The `llama-server` binary lives under `backend.llamacpp.binary` (with
-# `additional_binaries` for multi-backend installs) — see the Backend
-# engines section below.
-
 # Per-launch health-probe timeout in seconds. 120s suits a typical
 # 7B–13B model on local NVMe; raise to ~600 for 70B+ on slow disks
 # if you hit `health probe timeout (last status 503)` on legitimate
@@ -158,9 +154,6 @@ probe_timeout_secs: 120
 #
 # Sources — CLI: (none) · Env: LLAMASTASH_DEFAULT_LAUNCH_MODE=auto|inherited.
 default_launch_mode: auto
-
-# The llama.cpp fit knobs (`fit_ctx_floor`, `strict_fit`, `jinja`) live
-# under `backend.llamacpp` — see the Backend engines section below.
 
 # ─── ASCII glyph fallback ─────────────────────────────────────────
 #
@@ -357,7 +350,6 @@ proxy:
 # Unknown keys under `backend` / each engine block are rejected loudly
 # (no silently-tolerated typos).
 backend:
-
   # ── llama.cpp — the always-on default engine ──
   llamacpp:
     # Path to the `llama-server` binary. Leave commented out to fall

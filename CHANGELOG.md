@@ -4,6 +4,10 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: all backend config is grouped under a `backend:` map.** The top-level `llama_server_path` / `llama_server_paths` / `jinja` / `strict_fit` / `fit_ctx_floor` keys and the separate `lemonade:` / `ds4:` blocks now live under `backend.{llamacpp,lemonade,ds4}`, standardized on `binary` / `additional_binaries`. No migration (pre-1.0) — update `config.yaml` to the new shape (see `config.example.yaml`). CLI flags and `LLAMASTASH_*` env overrides are unchanged. Internally the llama.cpp-specific launch knobs no longer leak into the generic launch structs: `status` running rows now surface `jinja` / `strict_fit` / `fit_ctx_floor` under `params.backend_knobs` rather than a top-level `jinja` field.
+
 ### Fixed
 
 - Lemonade models no longer appear in the `/ui` chooser as web-UI-capable — they serve no browser UI, so the chooser lists them non-selectable. (`22fc76f`)

@@ -10,8 +10,8 @@ AMD Ryzen AI / XDNA hardware, plus ROCm, ONNX, and others.
 > surface may change without notice. llama.cpp remains the stable default.
 
 It is **default-on when the `lemond` binary resolves** (mirroring ds4): if
-`lemond` is on your `PATH`, or `lemonade.binary` points at it, LlamaStash
-auto-enables the backend unless you set `lemonade.enabled: false`. When no
+`lemond` is on your `PATH`, or `backend.lemonade.binary` points at it, LlamaStash
+auto-enables the backend unless you set `backend.lemonade.enabled: false`. When no
 `lemond` is found it stays completely dormant — no discovery, no umbrella.
 llama.cpp stays the direct, zero-overhead default.
 
@@ -52,26 +52,27 @@ over a config `enabled: false`, or opt out entirely with:
 - **Config** — in `config.yaml`:
 
   ```yaml
-  lemonade:
-    # Tri-state, like ds4: leave unset for the default (auto: on whenever
-    # `lemond` resolves), `true` to force on, `false` to force off even when
-    # the binary is present.
-    # enabled: true
-    # Optional: explicit *absolute* path to the lemond binary. If omitted,
-    # LlamaStash looks for `lemond` (or `lemonade`) on your PATH. lemond
-    # keeps its config.json + model data in its own default cache dir
-    # (`~/.cache/lemonade`), shared with any manual lemond runs.
-    binary: /opt/lemonade/lemond
-    # Optional: the loopback port lemond binds. Defaults to 13305.
-    port: 13305
+  backend:
+    lemonade:
+      # Tri-state, like ds4: leave unset for the default (auto: on whenever
+      # `lemond` resolves), `true` to force on, `false` to force off even when
+      # the binary is present.
+      # enabled: true
+      # Optional: explicit *absolute* path to the lemond binary. If omitted,
+      # LlamaStash looks for `lemond` (or `lemonade`) on your PATH. lemond
+      # keeps its config.json + model data in its own default cache dir
+      # (`~/.cache/lemonade`), shared with any manual lemond runs.
+      binary: /opt/lemonade/lemond
+      # Optional: the loopback port lemond binds. Defaults to 13305.
+      port: 13305
   ```
 
 - **Daemon flag** — `llamastash daemon start --lemonade` (force on)
 - **Env var** — `LLAMASTASH_LEMONADE=1` (force on)
 
-`binary` resolution: the explicit `lemonade.binary` path if set (and it exists),
+`binary` resolution: the explicit `backend.lemonade.binary` path if set (and it exists),
 otherwise `lemond` / `lemonade` on `PATH`. The same resolution drives the
-`status` `installed` signal — an off-PATH `lemonade.binary` still reads as
+`status` `installed` signal — an off-PATH `backend.lemonade.binary` still reads as
 installed.
 
 ## 3. How LlamaStash uses it
@@ -104,10 +105,10 @@ lemond honors — `ctx` and the free-form extras (forwarded as the recipe's
 
 - **`503 backend_unavailable`** from the proxy — the umbrella isn't running.
   Confirm Lemonade is enabled, `lemond` is resolvable (PATH or
-  `lemonade.binary`), and start the daemon with `--lemonade`.
-- **`status` shows `lemonade: not installed`** — neither `lemonade.binary` nor
+  `backend.lemonade.binary`), and start the daemon with `--lemonade`.
+- **`status` shows `lemonade: not installed`** — neither `backend.lemonade.binary` nor
   a `lemond` / `lemonade` on `PATH` resolved to a file. Add `lemond` to `PATH`
-  or set `lemonade.binary` to its full path.
+  or set `backend.lemonade.binary` to its full path.
 - **No NPU acceleration** — Lemonade falls back to CPU/GPU when AMD's NPU
   system stack (XRT / firmware / `flm`) isn't installed. Check Lemonade's own
   diagnostics; that stack is AMD's to install, not LlamaStash's.

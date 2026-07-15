@@ -67,7 +67,23 @@ port_range: # Default 41100..=41300. Inclusive.
   start: 41100
   end: 41300
 
-llama_server_path: /usr/local/bin/llama-server # Overridable by --llama-server / env var.
+backend: # Per-engine config, one block per backend. llama.cpp is the
+         # always-on default (no enable toggle); lemonade + ds4 are
+         # optional, each default-on when its own binary resolves.
+  llamacpp:
+    binary: /usr/local/bin/llama-server # Overridable by --llama-server / env var.
+    additional_binaries: # Extra builds probed for --list-devices (CUDA/ROCm/Vulkan).
+      - /opt/builds/cuda/llama-server
+    fit_ctx_floor: 16384 # Min --fit-ctx window. Env: LLAMASTASH_FIT_CTX_FLOOR.
+    strict_fit: false # Refuse (vs degrade) an unplaceable --fit. Env: LLAMASTASH_STRICT_FIT.
+    jinja: true # Emit --jinja every launch (tool calling). Config-only.
+  ds4: # See §"ds4 backend" below.
+    # binary: /opt/ds4/ds4-server # ds4-server path; else PATH.
+    # enabled: # tri-state: unset=auto, true=force on, false=force off.
+  lemonade:
+    # binary: /opt/lemonade/lemond # lemond path; else PATH.
+    # enabled: # tri-state (see ds4).
+    # port: 13305 # lemond umbrella port.
 
 disable_scan: false # Equivalent to LLAMASTASH_NO_SCAN=1.
 disable_default_cache_paths:
@@ -189,14 +205,14 @@ The "nav focuses" alias means `List` + `RightPane`; "input focuses" means `ChatI
 | `LLAMASTASH_CONFIG_DIR`             | Override the directory `paths::config_dir()` resolves to; `user_config_file()` becomes `<dir>/config.yaml`. Empty value = unset                                                                                                                                                                                                                                                                                                                 |
 | `LLAMASTASH_STATE_DIR`              | Override the directory `paths::state_dir()` resolves to (state.json, daemon.pid, init_snapshot.json, runtime.json). Empty value = unset                                                                                                                                                                                                                                                                                                         |
 | `LLAMASTASH_CACHE_DIR`              | Override the directory `paths::cache_dir()` resolves to; `log_dir()` inherits as `<dir>/logs`. Empty value = unset                                                                                                                                                                                                                                                                                                                              |
-| `LLAMASTASH_LLAMA_SERVER`           | Path to `llama-server`                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `LLAMASTASH_LLAMA_SERVER`           | Path to `llama-server` (config key `backend.llamacpp.binary`)                                                                                                                                                                                                                                                                                                                                                                                   |
 | `LLAMASTASH_NO_SCAN`                | Skip filesystem scanning                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `LLAMASTASH_IPC_URL`                | Point a CLI/TUI at a non-default daemon control plane (verbatim URL, e.g. `http://127.0.0.1:48134`). Must be set together with `LLAMASTASH_IPC_TOKEN`; partial overrides are rejected. Bypasses `runtime.json` lookup entirely.                                                                                                                                                                                                                 |
 | `LLAMASTASH_IPC_TOKEN`              | Bearer token for the control-plane URL. See `LLAMASTASH_IPC_URL`.                                                                                                                                                                                                                                                                                                                                                                               |
 | `LLAMASTASH_OFFLINE`                | Refuse any outbound network from `init` / `pull` / `recommend` (equivalent to `--offline` on those subcommands). Truthy values `1` / `true` / `yes` (case-insensitive) enable it; `0`, an empty value, and unset leave it off.                                                                                                                                                                                                                  |
 | `LLAMASTASH_DEFAULT_LAUNCH_MODE`    | Seed mode for knobs no layer supplied: `auto` (default — delegate to `--fit`) or `inherited` (leave unset, llama-server's own default). Overrides `default_launch_mode` in config. Invalid values are logged and ignored.                                                                                                                                                                                                                       |
-| `LLAMASTASH_FIT_CTX_FLOOR`          | `--fit-ctx` floor in tokens passed to fit-capable `llama-server` (overrides `fit_ctx_floor`). Validated `1..=1048576`; a non-numeric or out-of-range value is logged and the factory `16384` is used.                                                                                                                                                                                                                                          |
-| `LLAMASTASH_STRICT_FIT`             | Set to `"1"` to refuse (rather than degrade) a launch `--fit` could not place as requested. OR-ed with the `strict_fit` config field.                                                                                                                                                                                                                                                                                                          |
+| `LLAMASTASH_FIT_CTX_FLOOR`          | `--fit-ctx` floor in tokens passed to fit-capable `llama-server` (overrides `backend.llamacpp.fit_ctx_floor`). Validated `1..=1048576`; a non-numeric or out-of-range value is logged and the factory `16384` is used.                                                                                                                                                                                                                          |
+| `LLAMASTASH_STRICT_FIT`             | Set to `"1"` to refuse (rather than degrade) a launch `--fit` could not place as requested. OR-ed with the `backend.llamacpp.strict_fit` config field.                                                                                                                                                                                                                                                                                         |
 | `LLAMASTASH_ASCII`                  | Render the TUI with the 7-bit ASCII glyph fallback instead of the default Unicode house style (status dots, severity markers, gauge bars, box borders, the logo banner). Truthy values `1` / `true` / `yes` enable it; this **wins over** the `ascii_glyphs` config field. For terminals / fonts that show the Unicode set as tofu. Keyboard-symbol hint labels (`↑ ↓ ⏎ ⇧ ↹`) stay Unicode — they're present in every monospace terminal font.   |
 | `HF_HOME`                           | Honored by `init::download::hf_cache_dir()` per HuggingFace convention; controls where pulled GGUFs land                                                                                                                                                                                                                                                                                                                                        |
 | `NO_COLOR`                          | Any non-empty value disables ANSI styling on every human-readable output (per [no-color.org](https://no-color.org/)). An empty value (`NO_COLOR=`) does **not** disable.                                                                                                                                                                                                                                                                        |
@@ -222,7 +238,9 @@ LLAMASTASH_LLAMA_SERVER=/path/to/llama.cpp/build-vulkan/bin/llama-server \
   llamastash start qwen
 
 # Or set it once in config.yaml
-llama_server_path: /path/to/llama.cpp/build-vulkan/bin/llama-server
+backend:
+  llamacpp:
+    binary: /path/to/llama.cpp/build-vulkan/bin/llama-server
 ```
 
 This changes the **runtime binary**, not the detected host backend. So
@@ -292,7 +310,7 @@ Every knob has three states:
 - `auto` (`--n-gpu-layers auto`, `start --ctx auto`, or the Auto stop in the TUI knob cycle) — delegated to `--fit`;
 - unset (Inherited) — falls through presets / arch defaults / the server default.
 
-`fit_ctx_floor` (default 16384) is the minimum context `--fit` is told to keep. Set `default_launch_mode: inherited` to opt the whole machine back to the pre-Auto behavior (knobs you never touch fall through to llama-server's own defaults instead of `--fit`). See the config schema and the environment-variable table above for `default_launch_mode`, `fit_ctx_floor`, and `strict_fit`.
+`backend.llamacpp.fit_ctx_floor` (default 16384) is the minimum context `--fit` is told to keep. Set `default_launch_mode: inherited` to opt the whole machine back to the pre-Auto behavior (knobs you never touch fall through to llama-server's own defaults instead of `--fit`). See the config schema and the environment-variable table above for `default_launch_mode`, `backend.llamacpp.fit_ctx_floor`, and `backend.llamacpp.strict_fit`.
 
 #### `--wait` (block until the launch settles)
 
@@ -404,23 +422,24 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 
 ## ds4 backend
 
-> **⚠️ Experimental.** ds4 support is new and lightly road-tested (validated on a single Strix Halo / ROCm host). Its behaviour, config keys, and defaults may change between releases. llama.cpp is the stable default and runs DeepSeek-V4 too on a current build (**b9840+**), so ds4 is never required — if anything here misbehaves, force llama.cpp with `--backend llamacpp` or `ds4.enabled: false`.
+> **⚠️ Experimental.** ds4 support is new and lightly road-tested (validated on a single Strix Halo / ROCm host). Its behaviour, config keys, and defaults may change between releases. llama.cpp is the stable default and runs DeepSeek-V4 too on a current build (**b9840+**), so ds4 is never required — if anything here misbehaves, force llama.cpp with `--backend llamacpp` or `backend.ds4.enabled: false`.
 
 [ds4](https://github.com/antirez/ds4) (antirez's DwarfStar) is a third backend: a direct, process-per-model engine that runs the `ds4-server` binary for the DeepSeek-V4 Flash/PRO GGUFs at [huggingface.co/antirez/deepseek-v4-gguf](https://huggingface.co/antirez/deepseek-v4-gguf). It is the purpose-built engine for those files (disk KV cache, SSD streaming); a current llama.cpp (**b9840+**) also runs DeepSeek-V4, so ds4 is preferred, never required.
 
-> **Minimum llama.cpp version for these GGUFs.** DeepSeek-V4 support landed in llama.cpp **b9840** ([ggml-org/llama.cpp#24162](https://github.com/ggml-org/llama.cpp/pull/24162), merged 2026-06-29). On **b9840 or newer** — a release binary or a source build from that merge onward — llama.cpp loads antirez's Flash/PRO GGUFs; on anything older it fails immediately with `error loading model: unknown model architecture: 'deepseek4'`. This matters because ds4's "falls back to llama.cpp, never a refusal" (below) only degrades gracefully when your llama.cpp is new enough — an older `llama-server` turns that fallback into a hard load error. Point `llama_server_path` at a b9840+ build if you rely on the fallback. (Note: on the llama.cpp backend, Flash Attention is currently auto-disabled for the deepseek4 graph; it loads and runs without it.)
+> **Minimum llama.cpp version for these GGUFs.** DeepSeek-V4 support landed in llama.cpp **b9840** ([ggml-org/llama.cpp#24162](https://github.com/ggml-org/llama.cpp/pull/24162), merged 2026-06-29). On **b9840 or newer** — a release binary or a source build from that merge onward — llama.cpp loads antirez's Flash/PRO GGUFs; on anything older it fails immediately with `error loading model: unknown model architecture: 'deepseek4'`. This matters because ds4's "falls back to llama.cpp, never a refusal" (below) only degrades gracefully when your llama.cpp is new enough — an older `llama-server` turns that fallback into a hard load error. Point `backend.llamacpp.binary` at a b9840+ build if you rely on the fallback. (Note: on the llama.cpp backend, Flash Attention is currently auto-disabled for the deepseek4 graph; it loads and runs without it.)
 
-**You supply the binary.** LlamaStash does not install ds4-server — build it from the repo (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and either put `ds4-server` on `PATH` or point `ds4.binary` at it. ds4 is **default-on the moment the binary resolves**; it stays completely dormant when it doesn't (no discovery, no new JSON fields on other rows).
+**You supply the binary.** LlamaStash does not install ds4-server — build it from the repo (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and either put `ds4-server` on `PATH` or point `backend.ds4.binary` at it. ds4 is **default-on the moment the binary resolves**; it stays completely dormant when it doesn't (no discovery, no new JSON fields on other rows).
 
 Enable / configure:
 
 ```yaml
-ds4:
-  # binary: /opt/ds4/ds4-server   # explicit path; else `ds4-server` on PATH
-  # enabled:                       # tri-state:
-  #   (unset)  auto — on when the binary is found (the default)
-  #   true     force on
-  #   false    force off even when the binary is present
+backend:
+  ds4:
+    # binary: /opt/ds4/ds4-server   # explicit path; else `ds4-server` on PATH
+    # enabled:                       # tri-state:
+    #   (unset)  auto — on when the binary is found (the default)
+    #   true     force on
+    #   false    force off even when the binary is present
 ```
 
 `--ds4` on `daemon start` and `LLAMASTASH_DS4=1` also force ds4 on (OR-merged with the config, and carried through the detached daemon re-exec).
@@ -489,7 +508,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:11435 \
 - **Set both model vars** to a discovered model name (not a `claude-*` name) so Claude Code's main and background calls both resolve through the proxy.
 - **`llamastash init` writes these for you.** Its **Claude Code** integration drops a sourceable `~/.config/llamastash/claude-code.sh` with the `ANTHROPIC_*` exports (separate from the OpenAI `env.sh`); `source ~/.config/llamastash/claude-code.sh && claude` opts Claude Code into the proxy **for that shell only**. It deliberately does *not* write Claude Code's global `~/.claude/settings.json` (whose `env` block applies to every session) — so bare `claude` keeps using your real Anthropic models.
 - **Auth.** Anthropic clients send the key in the `x-api-key` header; the proxy accepts it alongside `Authorization: Bearer` and browser `Basic`. On the keyless loopback default no key is needed (the token value is ignored, but Claude Code still wants one set). When you set `proxy.api_key` (or `LLAMASTASH_PROXY_API_KEY`), auth is enforced and `init`'s generated `env.sh` / `claude-code.sh` carry that real key (mode `0o600`) — so a client only authenticates once the script is sourced into its environment.
-- **Tool calling** needs the backend launched with `--jinja`, which is on by default (`jinja: true` in `config.yaml`; the reasoning toggle also forces it). Set `jinja: false` only if you don't need tool use. Basic chat / streaming work either way. Some model templates (e.g. certain Qwen GGUFs) fail llama-server's tool-parser generation with `System message must be at the beginning`; override with `start <model> -- --chat-template-file <tool-compatible.jinja>` (or the crude `--chat-template chatml`), or use a GGUF whose template is tool-compatible.
+- **Tool calling** needs the backend launched with `--jinja`, which is on by default (`backend.llamacpp.jinja: true` in `config.yaml`; the reasoning toggle also forces it). Set `backend.llamacpp.jinja: false` only if you don't need tool use. Basic chat / streaming work either way. Some model templates (e.g. certain Qwen GGUFs) fail llama-server's tool-parser generation with `System message must be at the beginning`; override with `start <model> -- --chat-template-file <tool-compatible.jinja>` (or the crude `--chat-template chatml`), or use a GGUF whose template is tool-compatible.
 - Compatibility is best-effort (it's llama-server's translation, not a full Anthropic spec implementation) — verify your client end-to-end.
 
 ### Web UI (`/ui`)

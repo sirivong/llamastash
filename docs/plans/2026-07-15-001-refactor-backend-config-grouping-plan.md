@@ -1,6 +1,6 @@
 # Group backend config under `backend:` + de-leak llama.cpp launch values
 
-**Status:** in progress (breaking, pre-1.0, no migration).
+**Status:** landed 2026-07-15 (breaking, pre-1.0, no migration). Stage 1 `57bfd0c`; Stage 2 `0ffe15f`; Stage 3 `a919671`; Stages 4+5 `b7489cf` (combined). Full suite green; live E2E confirmed `--jinja`/`--fit-ctx` still emitted and `status` carries the three under `backend_knobs`. Deferred follow-ups moved to TODO.md R7 (config-grouping bullet): `/props`+strict-fit gate, full device-catalog/TUI de-leak, DaemonOptions consolidation, orphans name leak.
 
 ## Context
 
