@@ -141,7 +141,7 @@ fn persist_llama_server_override(cli: &Cli, config: &crate::config::Config) {
     );
     let mut backend = yaml_serde::Mapping::new();
     backend.insert(
-      yaml_serde::Value::String("llamacpp".into()),
+      yaml_serde::Value::String(crate::backend::DEFAULT_BACKEND_ID.into()),
       yaml_serde::Value::Mapping(llamacpp),
     );
     let mut m = yaml_serde::Mapping::new();
