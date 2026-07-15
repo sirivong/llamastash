@@ -278,14 +278,19 @@ impl Backend for LemonadeBackend {
     // Intent (default-on unless `lemonade.enabled: false`, `--lemonade`/env
     // force) AND the `lemond` binary resolves. Consulted by selection and
     // `status`.
-    ctx.lemonade.intends_enabled(ctx.lemonade_force)
-      && resolve_lemond_binary(&ctx.lemonade).is_some()
+    let force = ctx
+      .backend_force
+      .get(LEMONADE_BACKEND_ID)
+      .copied()
+      .unwrap_or(false);
+    ctx.backend.lemonade.intends_enabled(force)
+      && resolve_lemond_binary(&ctx.backend.lemonade).is_some()
   }
 
   fn installed(&self, ctx: &MethodContext) -> bool {
     // Presence of the binary, independent of the enablement toggle. Honors the
     // full resolution order (explicit path, then PATH).
-    resolve_lemond_binary(&ctx.lemonade).is_some()
+    resolve_lemond_binary(&ctx.backend.lemonade).is_some()
   }
 
   fn status_enabled(&self, ctx: &MethodContext) -> Option<bool> {
@@ -293,7 +298,7 @@ impl Backend for LemonadeBackend {
   }
 
   fn binary_path(&self, ctx: &MethodContext) -> Option<String> {
-    resolve_lemond_binary(&ctx.lemonade).map(|b| b.display().to_string())
+    resolve_lemond_binary(&ctx.backend.lemonade).map(|b| b.display().to_string())
   }
 
   async fn status_accelerators(&self, ctx: &MethodContext, _device: &[Accelerator]) -> Vec<String> {
@@ -390,8 +395,8 @@ impl Backend for LemonadeBackend {
   ) -> Result<(PathBuf, u16), String> {
     // The umbrella supervises its own `lemond` executable on its own configured
     // loopback port, not the launch-pool reservation.
-    match resolve_lemond_binary(&ctx.lemonade) {
-      Some(bin) => Ok((bin, ctx.lemonade.port)),
+    match resolve_lemond_binary(&ctx.backend.lemonade) {
+      Some(bin) => Ok((bin, ctx.backend.lemonade.port)),
       None => Err(
         "lemonade backend selected but no `lemond` binary found; set `lemonade.binary` \
          or put `lemond` on PATH (see docs/lemonade-setup.md)"
@@ -656,7 +661,7 @@ impl LemonadeBackend {
     // configured port, so an externally-run lemond is probed too.
     let port = match ctx.supervisors.get(&umbrella_launch_id()).await {
       Some(umbrella) => umbrella.port(),
-      None => ctx.lemonade.port,
+      None => ctx.backend.lemonade.port,
     };
     let client = LemonadeClient::new(port).ok()?;
     // Bounded independently of the client's own (minutes-long, model-load) timeout:
@@ -942,14 +947,18 @@ mod tests {
     // on-when-found), so the umbrella state short-circuits to "disabled" without
     // touching the supervisor registry — regardless of whether a `lemond`
     // happens to sit on PATH.
+    use crate::backend::BackendConfig;
     use crate::daemon::context::MethodContext;
     use crate::daemon::shutdown::ShutdownToken;
-    let c = MethodContext::new(ShutdownToken::new()).with_lemonade(
-      crate::config::LemonadeConfig {
-        enabled: Some(false),
+    let c = MethodContext::new(ShutdownToken::new()).with_backend(
+      BackendConfig {
+        lemonade: crate::config::LemonadeConfig {
+          enabled: Some(false),
+          ..Default::default()
+        },
         ..Default::default()
       },
-      false,
+      std::collections::BTreeMap::new(),
     );
     assert_eq!(super::umbrella_state(&c).await, "disabled");
   }

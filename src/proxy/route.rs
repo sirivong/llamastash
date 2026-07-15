@@ -782,7 +782,13 @@ mod tests {
     let catalog = ModelCatalog::new();
     catalog.upsert(chat).await;
     catalog.upsert(embed).await;
-    let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_ds4(ds4_cfg, false);
+    let ctx = MethodContext::with_catalog(ShutdownToken::new(), catalog).with_backend(
+      crate::backend::BackendConfig {
+        ds4: ds4_cfg,
+        ..Default::default()
+      },
+      std::collections::BTreeMap::new(),
+    );
     let state = crate::proxy::state::ProxyState::from_context(&ctx, false, true);
 
     let chat_backend = super::would_route_backend(&state, &chat_row)

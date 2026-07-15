@@ -18,7 +18,6 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 
 use crate::config::loader::PortRange;
-use crate::config::LemonadeConfig;
 use crate::daemon::host_metrics::{HostMetricsSnapshot, SamplerHandles};
 use crate::daemon::orphans::ExternalProcess;
 use crate::daemon::probe::ProbeOptions;
@@ -100,22 +99,18 @@ pub struct MethodContext {
   /// debugging port-collision scans). `None` in catalog-only tests
   /// that don't bring up the control plane.
   pub ipc_url: Option<String>,
-  /// Opt-in Lemonade backend config (enable flag + the user's `lemond`
-  /// binary path + loopback port). The `start_model` path reads
-  /// `binary`/`port` to spawn the umbrella with the right executable on
-  /// the right port, and `status` reads it for the `installed` signal.
-  /// Defaults to disabled, so catalog-only tests never touch `lemond`.
-  pub lemonade: LemonadeConfig,
-  /// Whether `--lemonade`/`LLAMASTASH_LEMONADE` force-enabled Lemonade (folds
-  /// into [`Self::lemonade_available`] alongside the config `enabled` tri-state).
-  pub lemonade_force: bool,
-  /// ds4 (DwarfStar) backend config. `start_model` reads `binary` to resolve
-  /// `ds4-server`; selection + `status` read `ds4_available()` for routing +
-  /// the `installed` signal.
-  pub ds4: crate::config::Ds4Config,
-  /// Whether `--ds4`/`LLAMASTASH_DS4` force-enabled ds4 (folds into
-  /// [`Self::ds4_available`] alongside the config `enabled` tri-state).
-  pub ds4_force: bool,
+  /// All backend configuration, grouped under `backend:` in `config.yaml`.
+  /// Each backend reads its own typed sub-config (`backend.llamacpp` /
+  /// `backend.lemonade` / `backend.ds4`) through its `available`/`installed`/
+  /// launch hooks; the generic context names no backend. Defaults to the
+  /// factory config, so catalog-only tests never touch an external binary.
+  pub backend: crate::backend::BackendConfig,
+  /// Per-backend force-enable flags keyed by backend id (`--lemonade` /
+  /// `LLAMASTASH_LEMONADE`, `--ds4` / `LLAMASTASH_DS4`). A backend folds its own
+  /// entry into its `available` predicate alongside the config `enabled`
+  /// tri-state; an absent key means "not forced". Keyed by id so the type names
+  /// no backend.
+  pub backend_force: std::collections::BTreeMap<String, bool>,
   /// Pre-spawn memory admission ledger. Shared across every launch
   /// entry point so check-and-reserve is atomic against concurrent
   /// launches; settled (released) when each child reaches Ready / Error
@@ -204,16 +199,6 @@ pub struct LaunchEnv {
   /// Seed mode for knobs no layer filled. Sourced from
   /// `Config.default_launch_mode` (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`).
   pub default_launch_mode: crate::config::DefaultLaunchMode,
-  /// `--fit-ctx` floor. Consumed by `compose`; carried here so the
-  /// launch path reads one resolved value. Validated upstream.
-  pub fit_ctx_floor: u32,
-  /// Strict-fit mode. Consumed by the admission/strict path; carried
-  /// here so it rides the same launch env.
-  pub strict_fit: bool,
-  /// Default for `LaunchParams.jinja` (from `Config.jinja`, factory
-  /// `true`). Projected onto every launch's `jinja` field; the
-  /// reasoning toggle still forces `--jinja` on regardless.
-  pub jinja_default: bool,
 }
 
 impl MethodContext {
@@ -240,10 +225,8 @@ impl MethodContext {
       external: Arc::new(RwLock::new(Vec::new())),
       proxy_status: None,
       ipc_url: None,
-      lemonade: LemonadeConfig::default(),
-      lemonade_force: false,
-      ds4: crate::config::Ds4Config::default(),
-      ds4_force: false,
+      backend: crate::backend::BackendConfig::default(),
+      backend_force: std::collections::BTreeMap::new(),
       admission: Arc::new(crate::launch::admission::Ledger::default()),
     }
   }
@@ -318,11 +301,16 @@ impl MethodContext {
     self
   }
 
-  /// Builder helper: attach the Lemonade backend config + force flag so the
-  /// `start_model` + `status` paths can resolve the `lemond` binary / port.
-  pub fn with_lemonade(mut self, lemonade: LemonadeConfig, force: bool) -> Self {
-    self.lemonade = lemonade;
-    self.lemonade_force = force;
+  /// Builder helper: attach the aggregate backend config + per-backend
+  /// force-enable map so each backend's `available`/`installed`/launch hooks can
+  /// resolve their own binary / enablement from `ctx`. Names no backend.
+  pub fn with_backend(
+    mut self,
+    backend: crate::backend::BackendConfig,
+    force: std::collections::BTreeMap<String, bool>,
+  ) -> Self {
+    self.backend = backend;
+    self.backend_force = force;
     self
   }
 
@@ -335,14 +323,6 @@ impl MethodContext {
     crate::backend::lemonade::LemonadeBackend::new().available(self)
   }
 
-  /// Builder helper: attach the ds4 backend config + force flag so the
-  /// selection seam, `start_model`, and `status` can resolve availability.
-  pub fn with_ds4(mut self, ds4: crate::config::Ds4Config, force: bool) -> Self {
-    self.ds4 = ds4;
-    self.ds4_force = force;
-    self
-  }
-
   /// Whether the ds4 backend is available on this daemon. Thin wrapper over
   /// [`crate::backend::Backend::available`] — the availability logic lives in
   /// the backend's own file. Retained only for the remaining direct callers;
@@ -350,5 +330,57 @@ impl MethodContext {
   pub fn ds4_available(&self) -> bool {
     use crate::backend::Backend;
     crate::backend::ds4::Ds4Backend::new().available(self)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::backend::ds4::{Ds4Backend, DS4_BACKEND_ID};
+  use crate::backend::lemonade::{LemonadeBackend, LEMONADE_BACKEND_ID};
+  use crate::backend::{Backend, BackendConfig};
+  use crate::daemon::shutdown::ShutdownToken;
+
+  /// The force-enable map key must match each backend's own id const, or the
+  /// `--ds4` / `--lemonade` (and env) force can never override an explicit
+  /// `enabled: false`. Points `binary` at a real file (this test binary) so
+  /// availability's binary-resolve half passes under the `test-fixtures` build,
+  /// which compiles out the PATH search — isolating the force-key logic.
+  #[test]
+  fn backend_force_key_overrides_explicit_off() {
+    let exe = std::env::current_exe().expect("current exe");
+    let force: std::collections::BTreeMap<String, bool> = [
+      (DS4_BACKEND_ID.to_string(), true),
+      (LEMONADE_BACKEND_ID.to_string(), true),
+    ]
+    .into_iter()
+    .collect();
+    let backend = BackendConfig {
+      ds4: crate::config::Ds4Config {
+        enabled: Some(false),
+        binary: Some(exe.clone()),
+      },
+      lemonade: crate::config::LemonadeConfig {
+        enabled: Some(false),
+        binary: Some(exe),
+        port: 13305,
+      },
+      ..Default::default()
+    };
+    let ctx = MethodContext::new(ShutdownToken::new()).with_backend(backend.clone(), force);
+    assert!(
+      Ds4Backend::new().available(&ctx),
+      "ds4 force must override an explicit enabled:false"
+    );
+    assert!(
+      LemonadeBackend::new().available(&ctx),
+      "lemonade force must override an explicit enabled:false"
+    );
+
+    // Without the force entries, the explicit `enabled: false` wins → unavailable.
+    let ctx_off = MethodContext::new(ShutdownToken::new())
+      .with_backend(backend, std::collections::BTreeMap::new());
+    assert!(!Ds4Backend::new().available(&ctx_off));
+    assert!(!LemonadeBackend::new().available(&ctx_off));
   }
 }

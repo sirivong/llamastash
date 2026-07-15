@@ -524,13 +524,18 @@ impl Backend for Ds4Backend {
     // Intent (default-on unless `ds4.enabled: false`, `--ds4`/env force) AND the
     // `ds4-server` binary resolves. The single availability predicate selection,
     // the split-file guard, and `status` all consult.
-    ctx.ds4.intends_enabled(ctx.ds4_force)
-      && resolve_ds4_binary(ctx.ds4.binary.as_deref()).is_some()
+    let force = ctx
+      .backend_force
+      .get(DS4_BACKEND_ID)
+      .copied()
+      .unwrap_or(false);
+    ctx.backend.ds4.intends_enabled(force)
+      && resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()).is_some()
   }
 
   fn installed(&self, ctx: &MethodContext) -> bool {
     // Presence of the binary, independent of the enablement toggle.
-    resolve_ds4_binary(ctx.ds4.binary.as_deref()).is_some()
+    resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()).is_some()
   }
 
   fn status_enabled(&self, ctx: &MethodContext) -> Option<bool> {
@@ -538,7 +543,7 @@ impl Backend for Ds4Backend {
   }
 
   fn binary_path(&self, ctx: &MethodContext) -> Option<String> {
-    resolve_ds4_binary(ctx.ds4.binary.as_deref()).map(|b| b.display().to_string())
+    resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()).map(|b| b.display().to_string())
   }
 
   fn process_marker(&self) -> Option<&'static str> {
@@ -553,7 +558,7 @@ impl Backend for Ds4Backend {
   ) -> Result<(PathBuf, u16), String> {
     // ds4 spawns `ds4-server` (not the device-owning `llama-server`) on the
     // reserved pool port.
-    match resolve_ds4_binary(ctx.ds4.binary.as_deref()) {
+    match resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()) {
       Some(bin) => Ok((bin, port)),
       None => Err(
         "ds4 backend selected but no `ds4-server` binary found; set `ds4.binary` \

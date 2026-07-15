@@ -1421,9 +1421,6 @@ mod tests {
       arch_defaults: Default::default(),
       device_catalog: Arc::new(RwLock::new(Vec::new())),
       default_launch_mode: Default::default(),
-      fit_ctx_floor: 16384,
-      strict_fit: false,
-      jinja_default: true,
     };
 
     // Lemonade enabled but pointed at a binary that does not exist. The
@@ -1433,13 +1430,16 @@ mod tests {
     let ctx = MethodContext::new(ShutdownToken::new())
       .with_supervisors(registry)
       .with_launch_env(env)
-      .with_lemonade(
-        LemonadeConfig {
-          enabled: Some(true),
-          binary: Some(PathBuf::from("/nonexistent/lemond-xyz")),
-          port: 13305,
+      .with_backend(
+        crate::backend::BackendConfig {
+          lemonade: LemonadeConfig {
+            enabled: Some(true),
+            binary: Some(PathBuf::from("/nonexistent/lemond-xyz")),
+            port: 13305,
+          },
+          ..Default::default()
         },
-        false,
+        std::collections::BTreeMap::new(),
       );
 
     let parsed = StartParams {
@@ -1504,9 +1504,6 @@ mod tests {
       arch_defaults: Default::default(),
       device_catalog: Arc::new(RwLock::new(Vec::new())),
       default_launch_mode: Default::default(),
-      fit_ctx_floor: 16384,
-      strict_fit: false,
-      jinja_default: true,
     };
     let ctx = MethodContext::new(ShutdownToken::new())
       .with_supervisors(SupervisorRegistry::new())

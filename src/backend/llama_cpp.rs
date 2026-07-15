@@ -246,10 +246,8 @@ impl Backend for LlamaCppBackend {
     // value can never stick them. `--jinja` is a llamastash default, so the
     // bench parity escape hatch suppresses it (keeps `start` byte-identical to
     // raw `llama-server` for Suite-A overhead); `compose` ORs reasoning in.
-    let Some(env) = ctx.launch.as_ref() else {
-      return;
-    };
-    let jinja = env.jinja_default && !crate::launch::params::bench_disable_defaults_from_env();
+    let cfg = &ctx.backend.llamacpp;
+    let jinja = cfg.jinja && !crate::launch::params::bench_disable_defaults_from_env();
     if jinja {
       params.backend_knobs.insert(
         LLAMACPP_KNOB_JINJA.to_string(),
@@ -262,11 +260,11 @@ impl Backend for LlamaCppBackend {
     }
     params.backend_knobs.insert(
       LLAMACPP_KNOB_STRICT_FIT.to_string(),
-      KnobValue::Set(env.strict_fit.to_string()),
+      KnobValue::Set(cfg.strict_fit.to_string()),
     );
     params.backend_knobs.insert(
       LLAMACPP_KNOB_FIT_CTX_FLOOR.to_string(),
-      KnobValue::Set(env.fit_ctx_floor.to_string()),
+      KnobValue::Set(cfg.fit_ctx_floor.to_string()),
     );
   }
 
@@ -537,28 +535,22 @@ mod tests {
 
   // ---- config-derived launch knobs (jinja / strict_fit / fit_ctx_floor) ----
 
-  fn ctx_with_env(jinja_default: bool, strict_fit: bool, fit_ctx_floor: u32) -> MethodContext {
-    use crate::config::loader::PortRange;
-    use crate::daemon::context::LaunchEnv;
+  fn ctx_with_env(jinja: bool, strict_fit: bool, fit_ctx_floor: u32) -> MethodContext {
+    use crate::backend::BackendConfig;
     use crate::daemon::shutdown::ShutdownToken;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-    let env = LaunchEnv {
-      binary: PathBuf::from("/bin/llama-server"),
-      port_range: PortRange {
-        start: 41000,
-        end: 41000,
+    // `seed_launch_knobs` reads its config from `ctx.backend.llamacpp`, so the
+    // launch-behaviour knobs ride the backend config, not a `LaunchEnv`.
+    let backend = BackendConfig {
+      llamacpp: LlamaCppConfig {
+        jinja,
+        strict_fit,
+        fit_ctx_floor,
+        ..Default::default()
       },
-      log_dir: PathBuf::from("/tmp"),
-      probe: ProbeOptions::default(),
-      arch_defaults: Default::default(),
-      device_catalog: Arc::new(RwLock::new(Vec::new())),
-      default_launch_mode: Default::default(),
-      fit_ctx_floor,
-      strict_fit,
-      jinja_default,
+      ..Default::default()
     };
-    MethodContext::new(ShutdownToken::new()).with_launch_env(env)
+    MethodContext::new(ShutdownToken::new())
+      .with_backend(backend, std::collections::BTreeMap::new())
   }
 
   #[test]

@@ -186,20 +186,20 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
     arch_defaults: Default::default(),
     device_catalog: Default::default(),
     default_launch_mode: Default::default(),
-    fit_ctx_floor: 16384,
-    strict_fit: false,
-    jinja_default: true,
   };
   let ctx = MethodContext::new(ShutdownToken::new())
     .with_supervisors(registry.clone())
     .with_launch_env(env)
-    .with_lemonade(
-      LemonadeConfig {
-        enabled: Some(true),
-        binary: Some(fake_lemond_binary()),
-        port,
+    .with_backend(
+      llamastash::backend::BackendConfig {
+        lemonade: LemonadeConfig {
+          enabled: Some(true),
+          binary: Some(fake_lemond_binary()),
+          port,
+        },
+        ..Default::default()
       },
-      false,
+      std::collections::BTreeMap::new(),
     );
 
   // Delegated rows now carry a plain `L#` launch id (shared with every other

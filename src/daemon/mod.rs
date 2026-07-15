@@ -158,7 +158,7 @@ pub struct DaemonOptions {
   /// (+ `LLAMASTASH_STRICT_FIT`).
   pub strict_fit: bool,
   /// Pass `--jinja` to `llama-server` by default from `Config.jinja`
-  /// (factory `true`). Threaded into `LaunchEnv.jinja_default`; the
+  /// (factory `true`). Threaded into `BackendConfig.llamacpp.jinja`; the
   /// reasoning toggle still forces it on per-launch regardless.
   pub jinja: bool,
   /// Config `presets:` blocks (from `Config.presets`). Seed the daemon's
@@ -433,6 +433,33 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // the `Disabled` variant so a daemon with
   // `proxy.enabled: false` reads as disabled even before §8b runs.
   let proxy_status_cell = proxy::server::new_status_cell();
+  // Aggregate backend config + per-backend force-enable map. Each backend reads
+  // its own sub-config through its hooks; the daemon names no backend beyond the
+  // two canonical id consts. Values are post-env-override (`build_options`
+  // already applied `LLAMASTASH_FIT_CTX_FLOOR` / `STRICT_FIT`).
+  let backend_cfg = crate::backend::BackendConfig {
+    llamacpp: crate::backend::llama_cpp::LlamaCppConfig {
+      binary: opts.binary.clone(),
+      additional_binaries: opts.extra_binaries.clone(),
+      jinja: opts.jinja,
+      strict_fit: opts.strict_fit,
+      fit_ctx_floor: opts.fit_ctx_floor,
+    },
+    lemonade: opts.lemonade.clone(),
+    ds4: opts.ds4.clone(),
+  };
+  let backend_force: std::collections::BTreeMap<String, bool> = [
+    (
+      crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
+      opts.lemonade_force,
+    ),
+    (
+      crate::backend::ds4::DS4_BACKEND_ID.to_string(),
+      opts.ds4_force,
+    ),
+  ]
+  .into_iter()
+  .collect();
   let mut ctx = MethodContext::with_catalog(token.clone(), catalog)
     .with_supervisors(supervisors)
     .with_gpu(initial_gpu)
@@ -441,8 +468,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     .with_presets(preset_store)
     .with_external(external_combined)
     .with_proxy_status(std::sync::Arc::clone(&proxy_status_cell))
-    .with_lemonade(opts.lemonade.clone(), opts.lemonade_force)
-    .with_ds4(opts.ds4.clone(), opts.ds4_force);
+    .with_backend(backend_cfg, backend_force);
   if let Some(binary) = opts.binary.clone() {
     if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
       log::warn!(
@@ -497,9 +523,6 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       arch_defaults: opts.arch_defaults.clone(),
       device_catalog,
       default_launch_mode: opts.default_launch_mode,
-      fit_ctx_floor: opts.fit_ctx_floor,
-      strict_fit: opts.strict_fit,
-      jinja_default: opts.jinja,
     });
   } else {
     log::info!(
