@@ -543,7 +543,7 @@ pub(crate) fn build_options(
   opts.binary = match locate_binary(LocateInputs {
     cli_flag: cli.llama_server.clone(),
     env_var: std::env::var_os("LLAMASTASH_LLAMA_SERVER"),
-    config_path: config.llama_server_path.clone(),
+    config_path: config.backend.llamacpp.binary.clone(),
   }) {
     Ok(p) => Some(p),
     Err(e) => {
@@ -557,7 +557,9 @@ pub(crate) fn build_options(
   // failing daemon startup — the device catalog just won't include its
   // devices.
   opts.extra_binaries = config
-    .llama_server_paths
+    .backend
+    .llamacpp
+    .additional_binaries
     .iter()
     .filter_map(|p| {
       match locate_binary(LocateInputs {
@@ -595,7 +597,7 @@ pub(crate) fn build_options(
       ),
     }
   }
-  opts.fit_ctx_floor = config.fit_ctx_floor;
+  opts.fit_ctx_floor = config.backend.llamacpp.fit_ctx_floor;
   if let Some(raw) = std::env::var_os("LLAMASTASH_FIT_CTX_FLOOR") {
     let s = raw.to_string_lossy();
     match s.trim().parse::<u32>() {
@@ -612,11 +614,11 @@ pub(crate) fn build_options(
   }
   // Strict-fit is an opt-in: config OR `LLAMASTASH_STRICT_FIT=1` (the
   // strict-`"1"` env contract shared with the other boolean envs).
-  opts.strict_fit = config.strict_fit || env_flag_truthy("LLAMASTASH_STRICT_FIT");
+  opts.strict_fit = config.backend.llamacpp.strict_fit || env_flag_truthy("LLAMASTASH_STRICT_FIT");
   // `--jinja` default: config-only (factory `true`). No env override —
   // unlike the opt-in booleans above this defaults *on*, and the
   // `"1"`-truthy env contract can't express "force off".
-  opts.jinja = config.jinja;
+  opts.jinja = config.backend.llamacpp.jinja;
   // Proxy: config layer first, then CLI / env overrides. Without this
   // thread-through the daemon silently ignored `proxy:` from the config
   // file and ran with `ProxyConfig::default()` regardless.
@@ -676,12 +678,12 @@ pub(crate) fn build_options(
   // force it on over `enabled: false` (captured separately so the detached
   // re-exec can re-append `--lemonade`). The user's `binary` path + `port`
   // ride along from config (llamastash never installs `lemond`).
-  opts.lemonade = config.lemonade.clone();
+  opts.lemonade = config.backend.lemonade.clone();
   opts.lemonade_force = lemonade_cli || env_flag_truthy("LLAMASTASH_LEMONADE");
   // ds4: default-on when the binary resolves. The config `[ds4]` block rides
   // through; `--ds4` / `LLAMASTASH_DS4` force it on over `enabled: false`
   // (captured separately so the detached re-exec can re-append `--ds4`).
-  opts.ds4 = config.ds4.clone();
+  opts.ds4 = config.backend.ds4.clone();
   opts.ds4_force = ds4_cli || env_flag_truthy("LLAMASTASH_DS4");
   opts.propagated_cli_args = propagated_cli_args(cli);
   Ok(opts)
@@ -1152,9 +1154,15 @@ mod tests {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config {
       default_launch_mode: DefaultLaunchMode::Inherited,
-      fit_ctx_floor: 8192,
-      strict_fit: true,
-      jinja: false,
+      backend: crate::backend::BackendConfig {
+        llamacpp: crate::config::LlamaCppConfig {
+          fit_ctx_floor: 8192,
+          strict_fit: true,
+          jinja: false,
+          ..Default::default()
+        },
+        ..Default::default()
+      },
       ..Config::default()
     };
     let opts = build_options(
@@ -1174,7 +1182,13 @@ mod tests {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config {
       default_launch_mode: DefaultLaunchMode::Auto,
-      strict_fit: false,
+      backend: crate::backend::BackendConfig {
+        llamacpp: crate::config::LlamaCppConfig {
+          strict_fit: false,
+          ..Default::default()
+        },
+        ..Default::default()
+      },
       ..Config::default()
     };
     std::env::set_var("LLAMASTASH_DEFAULT_LAUNCH_MODE", "inherited");
@@ -1200,7 +1214,13 @@ mod tests {
     let cli = parse_cli(&["daemon", "start"]);
     for bad in [0u32, 2_000_000] {
       let config = Config {
-        fit_ctx_floor: bad,
+        backend: crate::backend::BackendConfig {
+          llamacpp: crate::config::LlamaCppConfig {
+            fit_ctx_floor: bad,
+            ..Default::default()
+          },
+          ..Default::default()
+        },
         ..Config::default()
       };
       let opts = build_options(
@@ -1754,8 +1774,11 @@ mod tests {
 
     // Config `enabled: false` disables the intent (no force present).
     let config_off = Config {
-      lemonade: crate::config::loader::LemonadeConfig {
-        enabled: Some(false),
+      backend: crate::backend::BackendConfig {
+        lemonade: crate::config::LemonadeConfig {
+          enabled: Some(false),
+          ..Default::default()
+        },
         ..Default::default()
       },
       ..Config::default()

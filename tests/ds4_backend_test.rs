@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use llamastash::config::loader::{Ds4Config, PortRange};
+use llamastash::config::{Ds4Config, PortRange};
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::gguf::test_fixtures::FixtureBuilder;
 use llamastash::ipc::Client;

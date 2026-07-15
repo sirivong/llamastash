@@ -118,7 +118,9 @@ fn persist_llama_server_override(cli: &Cli, config: &crate::config::Config) {
   // the path error later.
   let resolved = crate::util::paths::canonicalize(raw).unwrap_or_else(|_| raw.clone());
   if config
-    .llama_server_path
+    .backend
+    .llamacpp
+    .binary
     .as_ref()
     .map(|p| p == &resolved)
     .unwrap_or(false)
@@ -129,11 +131,23 @@ fn persist_llama_server_override(cli: &Cli, config: &crate::config::Config) {
     log::warn!("--llama-server: no writable config path; skipping persist");
     return;
   };
+  // Nested `backend: { llamacpp: { binary: <path> } }` so the recursive
+  // merge sets only that key and preserves the user's other config.
   let additions = yaml_serde::Value::Mapping({
+    let mut llamacpp = yaml_serde::Mapping::new();
+    llamacpp.insert(
+      yaml_serde::Value::String("binary".into()),
+      yaml_serde::Value::String(resolved.display().to_string()),
+    );
+    let mut backend = yaml_serde::Mapping::new();
+    backend.insert(
+      yaml_serde::Value::String("llamacpp".into()),
+      yaml_serde::Value::Mapping(llamacpp),
+    );
     let mut m = yaml_serde::Mapping::new();
     m.insert(
-      yaml_serde::Value::String("llama_server_path".into()),
-      yaml_serde::Value::String(resolved.display().to_string()),
+      yaml_serde::Value::String("backend".into()),
+      yaml_serde::Value::Mapping(backend),
     );
     m
   });

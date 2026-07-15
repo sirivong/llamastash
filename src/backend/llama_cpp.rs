@@ -14,6 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use super::identity::ModelIdentity;
 use super::{
   Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
@@ -48,6 +50,62 @@ pub const LLAMA_ENV_STRIP: &[&str] = &[
   "HF_HOME",
   "HF_ENDPOINT",
 ];
+
+/// llama.cpp backend configuration — the always-on default backend, so it has
+/// no `enabled` field. `binary` / `additional_binaries` are the `llama-server`
+/// executable(s) to launch and probe (back-compat with the `--llama-server`
+/// flag / `LLAMASTASH_LLAMA_SERVER` env for the primary); `jinja` /
+/// `strict_fit` / `fit_ctx_floor` are launch-behaviour knobs surfaced under
+/// `backend.llamacpp` in `config.yaml`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct LlamaCppConfig {
+  /// Single `llama-server` binary. When `additional_binaries` is also set this
+  /// one is the *default* binary (auto / no-device launches) and is prepended
+  /// to the probe set.
+  #[serde(default)]
+  pub binary: Option<PathBuf>,
+  /// Additional `llama-server` binaries probed for launch devices at daemon
+  /// start (`--list-devices`); the deduped union becomes the launch device
+  /// catalog. Not labelled by backend — inferred from each binary's own device
+  /// names.
+  #[serde(default)]
+  pub additional_binaries: Vec<PathBuf>,
+  /// Pass `--jinja` on every launch (factory `true`) — what enables tool
+  /// calling on both the OpenAI `/v1/chat/completions` and Anthropic
+  /// `/v1/messages` surfaces. The reasoning toggle still forces `--jinja` on
+  /// regardless.
+  #[serde(default = "default_true")]
+  pub jinja: bool,
+  /// Refuse (rather than degrade) a launch `--fit` could not place as
+  /// requested. Factory `false`.
+  #[serde(default)]
+  pub strict_fit: bool,
+  /// `--fit-ctx` floor so `--fit` never collapses the window below a usable
+  /// size. Factory [`crate::config::DEFAULT_FIT_CTX_FLOOR`].
+  #[serde(default = "default_fit_ctx_floor")]
+  pub fit_ctx_floor: u32,
+}
+
+fn default_true() -> bool {
+  true
+}
+
+fn default_fit_ctx_floor() -> u32 {
+  crate::config::DEFAULT_FIT_CTX_FLOOR
+}
+
+impl Default for LlamaCppConfig {
+  fn default() -> Self {
+    Self {
+      binary: None,
+      additional_binaries: Vec::new(),
+      jinja: true,
+      strict_fit: false,
+      fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
+    }
+  }
+}
 
 /// llama.cpp backend: direct, zero-overhead, fully-tuned. The product's
 /// reason to exist; never routed through a wrapper.

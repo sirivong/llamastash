@@ -55,22 +55,6 @@ pub struct Config {
   pub model_paths: Vec<PathBuf>,
   pub disable_default_cache_paths: CachePathsConfig,
   pub port_range: PortRange,
-  /// Single `llama-server` binary. Back-compat with pre-multi-binary
-  /// configs and the `--llama-server` flag / `LLAMASTASH_LLAMA_SERVER`
-  /// env. When `llama_server_paths` is also set, this one is treated
-  /// as the *default* binary (used for auto / no-device launches) and
-  /// is prepended to the probe set.
-  pub llama_server_path: Option<PathBuf>,
-  /// Additional `llama-server` binaries to probe for devices. Each is
-  /// queried with `--list-devices` at daemon start; the union of their
-  /// devices (deduped by exact selector, first-listed wins) becomes
-  /// the launch device catalog. Binaries are **not** labelled by
-  /// backend in config — the backend is inferred from each binary's
-  /// own device names (`Vulkan0`, `CUDA0`, `ROCm0`, …). This lets one
-  /// install offer CUDA / ROCm / Vulkan launches by pointing at the
-  /// matching single-backend builds.
-  #[serde(default)]
-  pub llama_server_paths: Vec<PathBuf>,
   pub keybindings: BTreeMap<String, String>,
   pub disable_scan: bool,
   /// Per-launch health-probe timeout in seconds. Defaults to 120 s,
@@ -107,47 +91,19 @@ pub struct Config {
   /// from the top-level config which tolerates unknown keys for
   /// forward-compat.
   pub proxy: ProxyConfig,
-  /// Lemonade (NPU / multi-engine) managed-multiplexer backend. **Default-on
-  /// when the binary is found:** if `lemond` is on `PATH` (or `lemonade.binary`
-  /// points at it) the backend is enabled unless `lemonade.enabled: false`. The
-  /// `--lemonade` daemon flag / `LLAMASTASH_LEMONADE=1` force-enable regardless
-  /// (see `cli::daemon::compose_daemon_options`). Zero footprint when the binary
-  /// is absent — no discovery, no umbrella. llamastash never installs `lemond`;
-  /// the user sets it up and points us at it. Mirrors ds4's on-when-found gate.
-  pub lemonade: LemonadeConfig,
-  /// ds4 (DwarfStar) direct backend for DeepSeek V4 GGUFs. **Default-on when
-  /// the binary is found:** if `ds4-server` is on `PATH` (or `ds4.binary`
-  /// points at it) the backend is enabled unless `ds4.enabled: false`. The
-  /// `--ds4` daemon flag / `LLAMASTASH_DS4=1` force-enable regardless. Zero
-  /// footprint when the binary is absent. llamastash never installs
-  /// `ds4-server`; the user builds it and points us at it.
-  pub ds4: Ds4Config,
+  /// All backend configuration, grouped under `backend:`. Holds the always-on
+  /// llama.cpp settings (`binary`, `additional_binaries`, `jinja`,
+  /// `strict_fit`, `fit_ctx_floor`) plus the optional Lemonade / ds4 engines
+  /// (each default-on when its binary resolves). Each backend owns its own
+  /// typed struct in its own module; see [`crate::backend::BackendConfig`].
+  #[serde(default)]
+  pub backend: crate::backend::BackendConfig,
   /// How a knob no layer supplied a value for is seeded at launch
   /// `auto` (factory) delegates layer-less knobs to `--fit`;
   /// `inherited` leaves them unset (pre-Auto behavior). Env override:
   /// `LLAMASTASH_DEFAULT_LAUNCH_MODE=auto|inherited`.
   #[serde(default)]
   pub default_launch_mode: DefaultLaunchMode,
-  /// `--fit-ctx` floor passed to fit-capable `llama-server` so the
-  /// context window never collapses below a usable size. Factory
-  /// [`DEFAULT_FIT_CTX_FLOOR`]; validated `1..=MAX_CTX_TOKENS`. Env
-  /// override: `LLAMASTASH_FIT_CTX_FLOOR`.
-  #[serde(default = "default_fit_ctx_floor")]
-  pub fit_ctx_floor: u32,
-  /// Strict-fit mode: when true, refuse (rather than degrade) a
-  /// launch that fit could not place as requested. Factory `false`.
-  /// Env override: `LLAMASTASH_STRICT_FIT=1`.
-  #[serde(default)]
-  pub strict_fit: bool,
-  /// Pass `--jinja` to `llama-server` on every launch. Factory `true`:
-  /// the Jinja chat-template engine is what makes tool calling /
-  /// function calling work on both the OpenAI `/v1/chat/completions`
-  /// and the Anthropic `/v1/messages` surfaces. Set `false` to fall
-  /// back to llama-server's built-in chat template (no per-launch
-  /// `--jinja`). The reasoning toggle still forces `--jinja` on for the
-  /// launches it applies to, regardless of this setting.
-  #[serde(default = "default_true")]
-  pub jinja: bool,
   /// Render the TUI with the `7`-bit ASCII glyph fallback instead of
   /// the default Unicode house style (geometric status dots, severity
   /// triangles, box-drawing borders). For terminals / fonts that show
@@ -174,14 +130,6 @@ pub struct Config {
   /// [`crate::config::presets_writer`]); arch keys are hand-authored.
   #[serde(default)]
   pub presets: BTreeMap<String, ConfigPresetBlock>,
-}
-
-fn default_fit_ctx_floor() -> u32 {
-  DEFAULT_FIT_CTX_FLOOR
-}
-
-fn default_true() -> bool {
-  true
 }
 
 /// Factory left-pane width cycle: current (65/35), list-full, even, right-heavy,
@@ -406,81 +354,6 @@ impl Default for ProxyConfig {
       api_key: None,
       insecure_no_auth: false,
     }
-  }
-}
-
-/// Lemonade backend configuration (R9/R11 opt-in gate). **Experimental** —
-/// the backend is new and lightly road-tested; these keys may change.
-///
-/// Off by default. Only when `enabled` is true does the daemon run Lemonade
-/// discovery, supervise the `lemond` umbrella, and route to it. llamastash
-/// never downloads or installs `lemond` — the user sets up Lemonade manually
-/// (see `docs/lemonade-setup.md`). `binary` is an explicit path to the
-/// user's `lemond`; when unset the umbrella launch falls back to a `lemond`
-/// (or `lemonade`) on `PATH`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub struct LemonadeConfig {
-  /// Tri-state enablement, mirroring [`Ds4Config::enabled`]: unset =
-  /// auto/on-when-`lemond`-found, `false` = force off, `true` = force on.
-  #[serde(default)]
-  pub enabled: Option<bool>,
-  #[serde(default)]
-  pub binary: Option<PathBuf>,
-  /// Loopback port the `lemond` umbrella binds and that discovery probes
-  /// for the model list. Defaults to Lemonade's own default (`13305`).
-  #[serde(default = "LemonadeConfig::default_port")]
-  pub port: u16,
-}
-
-impl LemonadeConfig {
-  /// Lemonade's documented default port.
-  pub fn default_port() -> u16 {
-    13305
-  }
-
-  /// Whether the user *intends* Lemonade enabled, given the force flag
-  /// (`--lemonade` / `LLAMASTASH_LEMONADE`). Actual activation still requires
-  /// the `lemond` binary to resolve — this only encodes intent (default-on
-  /// unless explicitly `enabled: false`, which the force flag overrides).
-  /// Mirrors [`Ds4Config::intends_enabled`].
-  pub fn intends_enabled(&self, force: bool) -> bool {
-    force || self.enabled != Some(false)
-  }
-}
-
-impl Default for LemonadeConfig {
-  fn default() -> Self {
-    Self {
-      enabled: None,
-      binary: None,
-      port: Self::default_port(),
-    }
-  }
-}
-
-/// ds4 (DwarfStar) direct backend config. **Default-on, gated by binary
-/// detection** (D-enable): unlike Lemonade's opt-in `bool`, `enabled` is an
-/// `Option<bool>` — `None` (unset) means "on when `ds4-server` resolves",
-/// `Some(false)` forces off, `Some(true)` forces on. The `--ds4` flag /
-/// `LLAMASTASH_DS4=1` force on regardless. Availability always additionally
-/// requires the binary to resolve, so the footprint is zero when it is absent.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub struct Ds4Config {
-  #[serde(default)]
-  pub enabled: Option<bool>,
-  #[serde(default)]
-  pub binary: Option<PathBuf>,
-}
-
-impl Ds4Config {
-  /// Whether the user *intends* ds4 enabled, given the force flag
-  /// (`--ds4` / `LLAMASTASH_DS4`). Actual availability still requires the
-  /// binary to resolve — this only encodes intent (default-on unless
-  /// explicitly `enabled: false`, which the force flag overrides).
-  pub fn intends_enabled(&self, force: bool) -> bool {
-    force || self.enabled != Some(false)
   }
 }
 
@@ -998,20 +871,14 @@ impl Default for Config {
       model_paths: Vec::new(),
       disable_default_cache_paths: CachePathsConfig::default(),
       port_range: PortRange::default(),
-      llama_server_path: None,
-      llama_server_paths: Vec::new(),
       keybindings: BTreeMap::new(),
       disable_scan: false,
       probe_timeout_secs: 120,
       mouse_focus: false,
       arch_defaults: BTreeMap::new(),
       proxy: ProxyConfig::default(),
-      lemonade: LemonadeConfig::default(),
-      ds4: Ds4Config::default(),
+      backend: Default::default(),
       default_launch_mode: DefaultLaunchMode::default(),
-      fit_ctx_floor: DEFAULT_FIT_CTX_FLOOR,
-      strict_fit: false,
-      jinja: true,
       ascii_glyphs: false,
       left_pane_ratios: default_left_pane_ratios(),
       presets: BTreeMap::new(),
@@ -1831,10 +1698,12 @@ arch_defaults:
     fs::write(
       &path,
       r"
-llama_server_path: /opt/builds/vulkan/llama-server
-llama_server_paths:
-  - /opt/builds/cuda/llama-server
-  - /opt/builds/rocm/llama-server
+backend:
+  llamacpp:
+    binary: /opt/builds/vulkan/llama-server
+    additional_binaries:
+      - /opt/builds/cuda/llama-server
+      - /opt/builds/rocm/llama-server
 ",
     )
     .expect("config fixture should be written");
@@ -1843,11 +1712,11 @@ llama_server_paths:
 
     assert!(loaded.warning.is_none(), "valid config should not warn");
     assert_eq!(
-      loaded.config.llama_server_path,
+      loaded.config.backend.llamacpp.binary,
       Some(PathBuf::from("/opt/builds/vulkan/llama-server"))
     );
     assert_eq!(
-      loaded.config.llama_server_paths,
+      loaded.config.backend.llamacpp.additional_binaries,
       vec![
         PathBuf::from("/opt/builds/cuda/llama-server"),
         PathBuf::from("/opt/builds/rocm/llama-server"),
@@ -1858,7 +1727,7 @@ llama_server_paths:
   #[test]
   fn llama_server_paths_absent_defaults_to_empty_vec() {
     let cfg = Config::default();
-    assert!(cfg.llama_server_paths.is_empty());
+    assert!(cfg.backend.llamacpp.additional_binaries.is_empty());
   }
 
   #[test]
@@ -1995,18 +1864,18 @@ proxy:
 
   #[test]
   fn lemonade_is_off_by_default_and_parses_when_enabled() {
-    // Missing `lemonade:` section → opt-in default (off), no warning.
+    // Missing `backend.lemonade:` section → opt-in default (off), no warning.
     let dir = temp_test_dir("lemonade-default");
     let path = dir.join("config.yaml");
     fs::write(&path, "{}\n").expect("write failed");
     let loaded = load_config_from_path(&path);
     assert!(loaded.warning.is_none());
     assert_eq!(
-      loaded.config.lemonade.enabled, None,
+      loaded.config.backend.lemonade.enabled, None,
       "lemonade `enabled` defaults to unset (on-when-found intent, like ds4)"
     );
-    assert!(loaded.config.lemonade.binary.is_none());
-    assert_eq!(loaded.config.lemonade.port, 13305);
+    assert!(loaded.config.backend.lemonade.binary.is_none());
+    assert_eq!(loaded.config.backend.lemonade.port, 13305);
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
 
     // Explicit enable + user-provided binary path round-trips.
@@ -2014,14 +1883,14 @@ proxy:
     let on_path = on_dir.join("config.yaml");
     fs::write(
       &on_path,
-      "lemonade:\n  enabled: true\n  binary: /opt/lemonade/lemond\n",
+      "backend:\n  lemonade:\n    enabled: true\n    binary: /opt/lemonade/lemond\n",
     )
     .expect("write failed");
     let on_loaded = load_config_from_path(&on_path);
     assert!(on_loaded.warning.is_none());
-    assert_eq!(on_loaded.config.lemonade.enabled, Some(true));
+    assert_eq!(on_loaded.config.backend.lemonade.enabled, Some(true));
     assert_eq!(
-      on_loaded.config.lemonade.binary.as_deref(),
+      on_loaded.config.backend.lemonade.binary.as_deref(),
       Some(std::path::Path::new("/opt/lemonade/lemond"))
     );
     fs::remove_dir_all(on_dir).expect("temp test dir should be removed");
@@ -2069,8 +1938,10 @@ proxy:
     // that an empty doc parsed): defaults the example pins explicitly.
     assert!(loaded.config.proxy.enabled);
     assert!(!loaded.config.proxy.insecure_no_auth);
-    assert_eq!(loaded.config.lemonade.enabled, None);
-    assert_eq!(loaded.config.lemonade.port, 13305);
+    // The example pins `backend.lemonade.enabled: true` explicitly (active key,
+    // per the "example keys are not commented out" convention).
+    assert_eq!(loaded.config.backend.lemonade.enabled, Some(true));
+    assert_eq!(loaded.config.backend.lemonade.port, 13305);
   }
 
   #[test]

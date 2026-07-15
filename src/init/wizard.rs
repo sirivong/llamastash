@@ -326,7 +326,7 @@ pub async fn run(args: InitArgs, cli: &Cli, config: &Config) -> CliResult {
   let binary = detect_binary(DetectBinaryInputs {
     cli_flag: cli.llama_server.clone(),
     env_var: std::env::var_os("LLAMASTASH_LLAMA_SERVER"),
-    config_path: config.llama_server_path.clone(),
+    config_path: config.backend.llamacpp.binary.clone(),
   });
 
   let fetch = match build_with_offline_check(args.offline, FetchClientConfig::default()) {
@@ -1081,7 +1081,11 @@ async fn run_config_step(
   // canonical YAML bytes for R72).
   let mut bootstrap = InitConfigAdditions::default();
   if let Some(install) = install {
-    bootstrap.llama_server_path = Some(install.path.display().to_string());
+    bootstrap.backend = Some(InitBackendAdditions {
+      llamacpp: Some(InitLlamaCppAdditions {
+        binary: Some(install.path.display().to_string()),
+      }),
+    });
   }
   // Round-9: the wizard no longer seeds `arch_defaults` — the
   // built-in `(arch, gpu_backend) → TypedKnobs` table supersedes
@@ -1342,11 +1346,24 @@ async fn run_integrations_step(
 /// What `run_config_step` composes for the writer. Skipping empty
 /// fields keeps the on-disk diff minimal. Each
 /// `#[serde(skip_serializing_if)]` mirrors the merge semantics
-/// `merge_and_write` already honours.
+/// `merge_and_write` already honours. The nested shape emits
+/// `backend: { llamacpp: { binary: <path> } }`, matching the config schema.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 struct InitConfigAdditions {
   #[serde(skip_serializing_if = "Option::is_none")]
-  llama_server_path: Option<String>,
+  backend: Option<InitBackendAdditions>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct InitBackendAdditions {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  llamacpp: Option<InitLlamaCppAdditions>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct InitLlamaCppAdditions {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  binary: Option<String>,
 }
 
 /// Advisory lock around `init_snapshot.json` writes so two concurrent

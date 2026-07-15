@@ -1278,7 +1278,7 @@ mod tests {
   use tokio::sync::RwLock;
 
   use super::*;
-  use crate::config::loader::LemonadeConfig;
+  use crate::config::LemonadeConfig;
   use crate::daemon::context::LaunchEnv;
   use crate::daemon::probe::ProbeOptions;
   use crate::daemon::registry::SupervisorRegistry;

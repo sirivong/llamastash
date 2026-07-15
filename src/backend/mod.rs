@@ -59,6 +59,8 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::backend::ds4::Ds4Backend;
 use crate::backend::identity::ModelIdentity;
 use crate::backend::lemonade::LemonadeBackend;
@@ -70,6 +72,19 @@ use crate::launch::flag_aliases::{knob_specs, KnobField};
 use crate::launch::mode::LaunchMode;
 use crate::launch::native_knobs::NativeKnobDescriptor;
 use crate::launch::params::{BackendChoice, LaunchParams};
+
+/// All backend configuration, grouped under the `backend:` map in
+/// `config.yaml`. Each backend owns its own typed config struct in its own
+/// module; this is the single aggregation point the top-level [`crate::config::Config`]
+/// carries. llama.cpp is the always-on default backend, so it has no `enabled`
+/// field — only the optional engines do.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "snake_case")]
+pub struct BackendConfig {
+  pub llamacpp: crate::backend::llama_cpp::LlamaCppConfig,
+  pub lemonade: crate::backend::lemonade::LemonadeConfig,
+  pub ds4: crate::backend::ds4::Ds4Config,
+}
 
 /// How a backend manages the lifecycle of the models it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

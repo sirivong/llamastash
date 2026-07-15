@@ -17,7 +17,7 @@ use llamastash::backend::lemonade::{
   ensure_umbrella, umbrella_launch_id, LemonadeBackend, LemonadeClient,
 };
 use llamastash::backend::{Backend, LaunchPlan};
-use llamastash::config::loader::{LemonadeConfig, PortRange};
+use llamastash::config::{LemonadeConfig, PortRange};
 use llamastash::daemon::context::{LaunchEnv, MethodContext};
 use llamastash::daemon::probe::ProbeOptions;
 use llamastash::daemon::registry::{LaunchId, SupervisorRegistry};

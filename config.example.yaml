@@ -133,27 +133,9 @@ port_range:
   start: 41100
   end: 41300
 
-# Path to the `llama-server` binary. Leave commented out to fall
-# back to `$PATH`.
-#
-# Sources — CLI: --llama-server PATH (global) ·
-#           Env: LLAMASTASH_LLAMA_SERVER=PATH.
-llama_server_path: /usr/local/bin/llama-server
-
-# Additional `llama-server` binaries to probe for launch devices.
-# Each is queried with `--list-devices` at daemon start; the union of
-# their devices (deduped by selector, first-listed wins) becomes the
-# launch device catalog — so one install can offer CUDA / ROCm /
-# Vulkan launches by pointing at the matching single-backend builds.
-# When `llama_server_path` is also set it's the default binary (auto /
-# no-device launches) and is prepended to this probe set. Binaries are
-# not labelled by backend here; the backend is inferred from each
-# binary's own device names (`CUDA0`, `ROCm0`, `Vulkan0`).
-#
-# Sources — CLI: (none) · Env: (none). Config-only.
-llama_server_paths:
-  - /opt/builds/cuda/llama-server
-  - /opt/builds/rocm/llama-server
+# The `llama-server` binary lives under `backend.llamacpp.binary` (with
+# `additional_binaries` for multi-backend installs) — see the Backend
+# engines section below.
 
 # Per-launch health-probe timeout in seconds. 120s suits a typical
 # 7B–13B model on local NVMe; raise to ~600 for 70B+ on slow disks
@@ -177,31 +159,8 @@ probe_timeout_secs: 120
 # Sources — CLI: (none) · Env: LLAMASTASH_DEFAULT_LAUNCH_MODE=auto|inherited.
 default_launch_mode: auto
 
-# Minimum context window passed to fit-capable llama-server as
-# `--fit-ctx`, so `--fit` never collapses the window below a usable
-# size on unified-memory hosts. A pinned `--ctx` overrides this.
-# Validated to 1..=1048576; out-of-range values fall back to 16384.
-#
-# Sources — CLI: (none) · Env: LLAMASTASH_FIT_CTX_FLOOR=TOKENS.
-fit_ctx_floor: 16384
-
-# Strict-fit mode: when true, refuse a launch that `--fit` could not
-# place as requested rather than letting it run degraded. Off by
-# default (degrade-and-warn).
-#
-# Sources — CLI: (none) · Env: LLAMASTASH_STRICT_FIT=1.
-strict_fit: false
-
-# Pass `--jinja` to llama-server on every launch (default: true). The
-# Jinja chat-template engine is what makes tool calling / function
-# calling work on both the OpenAI `/v1/chat/completions` and the
-# Anthropic `/v1/messages` surfaces. Set false to fall back to
-# llama-server's built-in chat template (no per-launch `--jinja`).
-# The reasoning toggle still forces `--jinja` on for launches it
-# applies to, regardless of this setting.
-#
-# Sources — CLI: (none) · Env: (none, config-only).
-jinja: true
+# The llama.cpp fit knobs (`fit_ctx_floor`, `strict_fit`, `jinja`) live
+# under `backend.llamacpp` — see the Backend engines section below.
 
 # ─── ASCII glyph fallback ─────────────────────────────────────────
 #
@@ -389,77 +348,131 @@ proxy:
   # (Config field, CLI flag, and env are OR-ed — any one waives auth.)
   insecure_no_auth: false
 
-# ─── Lemonade (NPU / multi-engine backend) [EXPERIMENTAL] ─────────
+# ─── Backend engines ──────────────────────────────────────────────
 #
-# EXPERIMENTAL: behaviour and these keys may change. A second backend
-# for engines llama.cpp can't reach — NPU inference on AMD Ryzen AI /
-# XDNA, plus ROCm / ONNX / others — via the Lemonade (`lemond`) managed
-# umbrella.
+# All backend configuration lives under `backend:`. llama.cpp is the
+# always-on default engine (no enable toggle); Lemonade and ds4 are
+# optional engines, each default-on when its own binary resolves.
 #
-# Default-on when the `lemond` binary resolves (like ds4): if `lemond`
-# is on PATH (or `binary` below points at it) the daemon runs Lemonade
-# discovery + umbrella unless `enabled: false`. Zero footprint when the
-# binary is absent. llamastash never installs `lemond` — you set it up
-# yourself and point us at it (see docs/lemonade-setup.md).
-#
-# Unknown keys inside this block are rejected loudly (no
-# silently-tolerated typos).
-lemonade:
-  # Force the backend on or off. Tri-state — leave unset for the default
-  # (auto: on whenever `lemond` resolves), `true` to force on, `false`
-  # to force off even when the binary is present.
+# Unknown keys under `backend` / each engine block are rejected loudly
+# (no silently-tolerated typos).
+backend:
+
+  # ── llama.cpp — the always-on default engine ──
+  llamacpp:
+    # Path to the `llama-server` binary. Leave commented out to fall
+    # back to `$PATH`.
+    #
+    # Sources — CLI: --llama-server PATH (global) ·
+    #           Env: LLAMASTASH_LLAMA_SERVER=PATH.
+    binary: /usr/local/bin/llama-server
+
+    # Additional `llama-server` binaries to probe for launch devices.
+    # Each is queried with `--list-devices` at daemon start; the union
+    # of their devices (deduped by selector, first-listed wins) becomes
+    # the launch device catalog — so one install can offer CUDA / ROCm /
+    # Vulkan launches by pointing at the matching single-backend builds.
+    # When `binary` is also set it's the default binary (auto / no-device
+    # launches) and is prepended to this probe set. Binaries are not
+    # labelled by backend here; the backend is inferred from each binary's
+    # own device names (`CUDA0`, `ROCm0`, `Vulkan0`).
+    #
+    # Sources — CLI: (none) · Env: (none). Config-only.
+    additional_binaries:
+      - /opt/builds/cuda/llama-server
+      - /opt/builds/rocm/llama-server
+
+    # Minimum context window passed to fit-capable llama-server as
+    # `--fit-ctx`, so `--fit` never collapses the window below a usable
+    # size on unified-memory hosts. A pinned `--ctx` overrides this.
+    # Validated to 1..=1048576; out-of-range values fall back to 16384.
+    #
+    # Sources — CLI: (none) · Env: LLAMASTASH_FIT_CTX_FLOOR=TOKENS.
+    fit_ctx_floor: 16384
+
+    # Strict-fit mode: when true, refuse a launch that `--fit` could not
+    # place as requested rather than letting it run degraded. Off by
+    # default (degrade-and-warn).
+    #
+    # Sources — CLI: (none) · Env: LLAMASTASH_STRICT_FIT=1.
+    strict_fit: false
+
+    # Pass `--jinja` to llama-server on every launch (default: true). The
+    # Jinja chat-template engine is what makes tool calling / function
+    # calling work on both the OpenAI `/v1/chat/completions` and the
+    # Anthropic `/v1/messages` surfaces. Set false to fall back to
+    # llama-server's built-in chat template (no per-launch `--jinja`).
+    # The reasoning toggle still forces `--jinja` on for launches it
+    # applies to, regardless of this setting.
+    #
+    # Sources — CLI: (none) · Env: (none, config-only).
+    jinja: true
+
+  # ── Lemonade (NPU / multi-engine backend) [EXPERIMENTAL] ──
   #
-  # Sources — CLI: daemon start --lemonade (force on) ·
-  #           Env: LLAMASTASH_LEMONADE=1 (force on).
-  # (The flag and env only force on; `false` here still wins as an
-  # explicit off.)
-  enabled: true
-
-  # Explicit path to the user's `lemond` binary. Comment out to fall
-  # back to a `lemond` (or `lemonade`) found on `$PATH`.
+  # EXPERIMENTAL: behaviour and these keys may change. A second backend
+  # for engines llama.cpp can't reach — NPU inference on AMD Ryzen AI /
+  # XDNA, plus ROCm / ONNX / others — via the Lemonade (`lemond`) managed
+  # umbrella.
   #
-  # Sources — CLI: (none) · Env: (none). Config-only.
-  binary: /opt/lemonade/lemond
+  # Default-on when the `lemond` binary resolves (like ds4): if `lemond`
+  # is on PATH (or `binary` below points at it) the daemon runs Lemonade
+  # discovery + umbrella unless `enabled: false`. Zero footprint when the
+  # binary is absent. llamastash never installs `lemond` — you set it up
+  # yourself and point us at it (see docs/lemonade-setup.md).
+  lemonade:
+    # Force the backend on or off. Tri-state — leave unset (commented,
+    # the shown default) for auto: on whenever `lemond` resolves; `true`
+    # to force on; `false` to force off even when the binary is present.
+    #
+    # Sources — CLI: daemon start --lemonade (force on) ·
+    #           Env: LLAMASTASH_LEMONADE=1 (force on).
+    # (The flag and env only force on; `false` here still wins as an
+    # explicit off.)
+    enabled: true
 
-  # Loopback port the `lemond` umbrella binds and that discovery probes
-  # for the model list. Defaults to Lemonade's own default (13305).
+    # Explicit path to the user's `lemond` binary. Comment out to fall
+    # back to a `lemond` (or `lemonade`) found on `$PATH`.
+    #
+    # Sources — CLI: (none) · Env: (none). Config-only.
+    binary: /opt/lemonade/lemond
+
+    # Loopback port the `lemond` umbrella binds and that discovery probes
+    # for the model list. Defaults to Lemonade's own default (13305).
+    #
+    # Sources — CLI: (none) · Env: (none). Config-only.
+    port: 13305
+
+  # ── ds4 (DwarfStar) — DeepSeek V4 backend [EXPERIMENTAL] ──
   #
-  # Sources — CLI: (none) · Env: (none). Config-only.
-  port: 13305
+  # EXPERIMENTAL: new and lightly road-tested; keys and defaults below may
+  # change between releases. llama.cpp stays the stable default and runs
+  # DeepSeek-V4 too, so ds4 is never required (set `enabled: false` or use
+  # `--backend llamacpp` to opt out).
+  #
+  # A third backend that runs antirez's `ds4-server` for the DeepSeek-V4
+  # Flash/PRO GGUFs. A ds4-compatible GGUF auto-routes to ds4 when the
+  # binary resolves; anything else (and any incompatible quant) stays on
+  # llama.cpp — ds4 is preferred, never required. You supply the binary:
+  # build ds4-server from https://github.com/antirez/ds4 and either put it
+  # on PATH or point `binary` at it. Zero footprint when it's absent.
+  # See docs/usage.md#ds4-backend.
+  ds4:
+    # Force the backend on or off. Tri-state — leave unset (commented,
+    # the shown default) for auto: on whenever `ds4-server` resolves;
+    # `true` to force on; `false` to force off even when present.
+    #
+    # Sources — CLI: daemon start --ds4 (force on) ·
+    #           Env: LLAMASTASH_DS4=1 (force on).
+    # (The flag and env only force on; `false` here still wins as an
+    # explicit off.)
+    enabled: true
 
-# ─── ds4 (DwarfStar) — DeepSeek V4 backend [EXPERIMENTAL] ─────────
-#
-# EXPERIMENTAL: new and lightly road-tested; keys and defaults below may
-# change between releases. llama.cpp stays the stable default and runs
-# DeepSeek-V4 too, so ds4 is never required (set `enabled: false` or use
-# `--backend llamacpp` to opt out).
-#
-# A third backend that runs antirez's `ds4-server` for the DeepSeek-V4
-# Flash/PRO GGUFs. A ds4-compatible GGUF auto-routes to ds4 when the
-# binary resolves; anything else (and any incompatible quant) stays on
-# llama.cpp — ds4 is preferred, never required. You supply the binary:
-# build ds4-server from https://github.com/antirez/ds4 and either put it
-# on PATH or point `binary` at it. Zero footprint when it's absent.
-#
-# Unknown keys inside this block are rejected loudly (no
-# silently-tolerated typos). See docs/usage.md#ds4-backend.
-#
-ds4:
-# Force the backend on or off. Tri-state — leave unset for the
-# default (auto: on whenever `ds4-server` resolves), `true` to force
-# on, `false` to force off even when the binary is present.
-#
-# Sources — CLI: daemon start --ds4 (force on) ·
-#           Env: LLAMASTASH_DS4=1 (force on).
-# (The flag and env only force on; `false` here still wins as an
-# explicit off.)
-enabled: true
-
-# Explicit path to the `ds4-server` binary. Comment out to fall back
-# to a `ds4-server` found on `$PATH`.
-#
-# Sources — CLI: (none) · Env: (none). Config-only.
-binary: /opt/ds4/ds4-server
+    # Explicit path to the `ds4-server` binary. Comment out to fall back
+    # to a `ds4-server` found on `$PATH`.
+    #
+    # Sources — CLI: (none) · Env: (none). Config-only.
+    binary: /opt/ds4/ds4-server
 
 # ─── Keybindings ──────────────────────────────────────────────────
 #

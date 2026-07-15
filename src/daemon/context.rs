@@ -17,7 +17,8 @@ use std::{
 
 use tokio::sync::{Mutex, RwLock};
 
-use crate::config::loader::{LemonadeConfig, PortRange};
+use crate::config::loader::PortRange;
+use crate::config::LemonadeConfig;
 use crate::daemon::host_metrics::{HostMetricsSnapshot, SamplerHandles};
 use crate::daemon::orphans::ExternalProcess;
 use crate::daemon::probe::ProbeOptions;

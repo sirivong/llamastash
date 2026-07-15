@@ -760,7 +760,7 @@ mod tests {
     // existing file satisfies its binary resolver). The guard is generic —
     // asserted via `serves_mode`, not by naming the backend.
     let exe = std::env::current_exe().unwrap();
-    let ds4_cfg = crate::config::loader::Ds4Config {
+    let ds4_cfg = crate::config::Ds4Config {
       enabled: Some(true),
       binary: Some(exe),
     };

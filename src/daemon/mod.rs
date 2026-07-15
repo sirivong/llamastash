@@ -46,7 +46,8 @@ use self::{
   shutdown::{install_signal_handlers, ShutdownToken},
   state_store::{load as load_state, RunningSnapshot},
 };
-use crate::config::loader::{Ds4Config, LemonadeConfig, PortRange, ProxyConfig};
+use crate::config::loader::{PortRange, ProxyConfig};
+use crate::config::{Ds4Config, LemonadeConfig};
 use crate::daemon::context::{LaunchEnv, MethodContext, PersistedState};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;

@@ -146,7 +146,7 @@ pub fn umbrella_process_spec(port: u16, binary: PathBuf, probe: ProbeOptions) ->
 /// PATH entry) still yields an absolute path: the umbrella is spawned and
 /// registered under this path (it doubles as the supervisor's synthetic model
 /// id), so it must not depend on the daemon's CWD.
-pub fn resolve_lemond_binary(cfg: &crate::config::loader::LemonadeConfig) -> Option<PathBuf> {
+pub fn resolve_lemond_binary(cfg: &crate::config::LemonadeConfig) -> Option<PathBuf> {
   // `is_file()` already confirmed the target exists, so canonicalize should
   // succeed; fall back to the verbatim path if it somehow doesn't.
   fn canonical(p: &Path) -> PathBuf {
@@ -885,7 +885,7 @@ mod tests {
 
   #[test]
   fn resolve_binary_prefers_explicit_path_then_path_lookup() {
-    use crate::config::loader::LemonadeConfig;
+    use crate::config::LemonadeConfig;
 
     // Explicit binary that exists resolves to its canonical path.
     let this_exe = std::env::current_exe().expect("current exe");
@@ -945,7 +945,7 @@ mod tests {
     use crate::daemon::context::MethodContext;
     use crate::daemon::shutdown::ShutdownToken;
     let c = MethodContext::new(ShutdownToken::new()).with_lemonade(
-      crate::config::loader::LemonadeConfig {
+      crate::config::LemonadeConfig {
         enabled: Some(false),
         ..Default::default()
       },

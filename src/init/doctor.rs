@@ -718,8 +718,8 @@ async fn ds4_advisory(config: &Config) -> Option<Finding> {
   use crate::gguf::header::{read_path, HeaderReadOptions};
 
   let force = ds4_env_forced();
-  let intends = config.ds4.intends_enabled(force);
-  let binary = crate::backend::ds4::resolve_ds4_binary(config.ds4.binary.as_deref());
+  let intends = config.backend.ds4.intends_enabled(force);
+  let binary = crate::backend::ds4::resolve_ds4_binary(config.backend.ds4.binary.as_deref());
   // Available: intended and installed. Nothing to advise, no scan.
   if intends && binary.is_some() {
     return None;

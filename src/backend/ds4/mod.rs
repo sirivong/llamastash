@@ -26,6 +26,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use super::identity::ModelIdentity;
 use super::{
   Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
@@ -42,6 +44,31 @@ use crate::launch::params::LaunchParams;
 /// The backend id — the stable string used in `BackendChoice`, `status`, the
 /// `list`/`show` badge, and adoption dispatch.
 pub const DS4_BACKEND_ID: &str = "ds4";
+
+/// ds4 (DwarfStar) direct backend config. **Default-on, gated by binary
+/// detection** (D-enable): unlike Lemonade's opt-in `bool`, `enabled` is an
+/// `Option<bool>` — `None` (unset) means "on when `ds4-server` resolves",
+/// `Some(false)` forces off, `Some(true)` forces on. The `--ds4` flag /
+/// `LLAMASTASH_DS4=1` force on regardless. Availability always additionally
+/// requires the binary to resolve, so the footprint is zero when it is absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct Ds4Config {
+  #[serde(default)]
+  pub enabled: Option<bool>,
+  #[serde(default)]
+  pub binary: Option<PathBuf>,
+}
+
+impl Ds4Config {
+  /// Whether the user *intends* ds4 enabled, given the force flag
+  /// (`--ds4` / `LLAMASTASH_DS4`). Actual availability still requires the
+  /// binary to resolve — this only encodes intent (default-on unless
+  /// explicitly `enabled: false`, which the force flag overrides).
+  pub fn intends_enabled(&self, force: bool) -> bool {
+    force || self.enabled != Some(false)
+  }
+}
 
 /// Executable name searched on `PATH` when `ds4.binary` is unset. The PATH
 /// search (and this const) are compiled out under `test-fixtures` so tests
