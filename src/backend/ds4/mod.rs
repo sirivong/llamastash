@@ -785,8 +785,9 @@ mod tests {
 
   #[test]
   fn argv_never_emits_jinja_even_when_params_ask() {
-    let mut p = params_with(None, &[]);
-    p.jinja = true;
+    // ds4's argv builder ignores the llama.cpp-only `jinja` launch knob and
+    // the reasoning toggle — neither surfaces on the ds4 command line.
+    let mut p = params_with(None, &[("jinja", "true")]);
     p.reasoning = true;
     let a = argv_strings(&p, 8000);
     assert!(!a.iter().any(|s| s == "--jinja"));

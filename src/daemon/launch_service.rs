@@ -176,8 +176,6 @@ pub struct LaunchExec {
   pub(crate) arch: Option<String>,
   /// Trained context window, for the strict-fit ctx-clamp gate.
   pub(crate) native_ctx: Option<u32>,
-  pub(crate) fit_ctx_floor: u32,
-  pub(crate) strict_fit: bool,
   /// Shard-aware total weight bytes (admission + probe scaling).
   pub(crate) total_weight_bytes: u64,
   /// The user-supplied knob deltas to persist in `last_params` (not the full
@@ -471,6 +469,13 @@ pub(crate) async fn compose_and_spawn(
   } else {
     std::collections::BTreeMap::new()
   };
+  // Seed the resolved backend's config-derived launch knobs into
+  // `backend_knobs`, fresh each launch (config projection, not user intent) —
+  // llama.cpp projects `jinja` / `strict_fit` / `fit_ctx_floor` here, so the
+  // generic launch path carries no llama.cpp-specific launch scalars. Runs
+  // after `backend_knobs` inheritance settles (overwriting any stale inherited
+  // value) and before native-knob auto-resolution reads the map.
+  inference_backend.seed_launch_knobs(ctx, &mut launch_params);
   // Resolve the multimodal projector: an explicit `mmproj_path` wins;
   // otherwise auto-detect a companion next to the model — unless the
   // caller is already managing the projector through `extras`
@@ -561,13 +566,6 @@ pub(crate) async fn compose_and_spawn(
     .set_value()
     .copied()
     .unwrap_or(false);
-  // `--jinja` default comes from config; `compose` ORs in reasoning so
-  // the reasoning toggle still forces it even when this is `false`.
-  // `--jinja` is a llamastash default, so the bench parity escape hatch
-  // (`LLAMASTASH_BENCH_DISABLE_DEFAULTS`) suppresses it too — keeps
-  // `start` byte-identical to raw `llama-server` for Suite-A overhead.
-  launch_params.jinja =
-    env.jinja_default && !crate::launch::params::bench_disable_defaults_from_env();
   launch_params.knobs = resolved.knobs;
   // Close the `knobs.ctx` bypass of `MAX_CTX_TOKENS` (the early check
   // only saw the top-level `parsed.ctx`): validate the *resolved* ctx,
@@ -585,14 +583,6 @@ pub(crate) async fn compose_and_spawn(
   // selected one it stays `None`, so `compose()` emits no `--device`
   // and `llama-server` keeps its default (auto-select / split across
   // every visible GPU) — the documented backwards-compatible behavior.
-
-  // Context sizing is delegated to llama-server's `--fit`: when `ctx`
-  // is unset (Auto / Inherited), `compose` emits `--fit-ctx <floor>` so
-  // fit sizes the window for the available memory but never collapses
-  // below the floor. llamastash keeps budget *authority* via the
-  // admission gate (the sysfs-backed pool reading), not by computing
-  // ctx here. A pinned `ctx` suppresses the floor (fit honors the pin).
-  launch_params.fit_ctx_floor = Some(env.fit_ctx_floor);
 
   // Reject loopback-breaking / auth-bypass extras flags before
   // spawn. `compose` strips defensively too, but failing fast here
@@ -740,8 +730,6 @@ pub(crate) async fn compose_and_spawn(
     origin,
     arch,
     native_ctx,
-    fit_ctx_floor: env.fit_ctx_floor,
-    strict_fit: env.strict_fit,
     total_weight_bytes,
     user_knobs,
     auto_set_knobs,
@@ -763,6 +751,8 @@ pub(crate) async fn spawn_supervised(
   ctx: &MethodContext,
   exec: LaunchExec,
   spec: crate::backend::ProcessLaunchSpec,
+  admission_floor: Option<u32>,
+  fit_gate: Option<crate::daemon::supervisor::FitGate>,
 ) -> Result<StartedLaunch, ErrorObject> {
   let LaunchExec {
     mut warnings,
@@ -775,9 +765,7 @@ pub(crate) async fn spawn_supervised(
     mode,
     origin,
     arch,
-    native_ctx,
-    fit_ctx_floor,
-    strict_fit,
+    native_ctx: _,
     total_weight_bytes,
     user_knobs,
     auto_set_knobs,
@@ -802,7 +790,12 @@ pub(crate) async fn spawn_supervised(
     if let Some(host_slot) = ctx.host_metrics.as_ref() {
       let snapshot = host_slot.read().await.clone();
       if crate::launch::admission::is_sampled(&snapshot) {
-        let effective_ctx = launch_params.ctx.unwrap_or(fit_ctx_floor);
+        // Project demand against the pinned ctx, else the backend's admission
+        // floor (llama.cpp's `--fit-ctx` floor), else a neutral default.
+        let effective_ctx = launch_params
+          .ctx
+          .or(admission_floor)
+          .unwrap_or(crate::config::DEFAULT_FIT_CTX_FLOOR);
         let free = crate::launch::admission::effective_free_bytes(&snapshot);
         let gpu_backend = snapshot.gpu_backend.clone();
         let model_path = launch_params.model_path.clone();
@@ -852,15 +845,9 @@ pub(crate) async fn spawn_supervised(
     }
   }
 
-  // Strict-fit ctx-clamp gate: only meaningful when ctx is delegated to `--fit`
-  // (`ctx == None`) and we know the trained window to compare against.
-  let fit_gate = (launch_params.ctx.is_none() && native_ctx.is_some()).then(|| {
-    crate::daemon::supervisor::FitGate {
-      floor: fit_ctx_floor,
-      native: native_ctx.unwrap_or(0),
-      strict: strict_fit,
-    }
-  });
+  // The strict-fit ctx-clamp readiness gate is resolved by the backend
+  // (`Backend::readiness_fit_gate`) and passed in — llama.cpp builds it from its
+  // `fit_ctx_floor` / `strict_fit` config; every other backend passes `None`.
   let spawn_result = supervisor_spawn(ManagedSpawn {
     id: id.clone(),
     params: launch_params.clone(),

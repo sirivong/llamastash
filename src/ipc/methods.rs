@@ -849,7 +849,6 @@ fn launch_params_row(p: &LaunchParams) -> Value {
     "ctx": p.ctx,
     "port": p.port,
     "reasoning": p.reasoning,
-    "jinja": p.jinja,
     "knobs": &p.knobs,
     "extras": p.extras.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>(),
   });

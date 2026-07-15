@@ -21,9 +21,30 @@ use super::{
   Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
   ProcessLaunchSpec, Readiness,
 };
+use crate::config::KnobValue;
 use crate::daemon::context::MethodContext;
 use crate::daemon::probe::ProbeOptions;
 use crate::launch::params::{compose, LaunchParams};
+
+/// Config-derived launch-knob keys llama.cpp carries in
+/// [`LaunchParams::backend_knobs`] (string-encoded, like ds4's native knobs).
+/// These are config projections seeded fresh each launch by
+/// [`LlamaCppBackend::seed_launch_knobs`], **not** [`Backend::native_knobs`]
+/// descriptors — they surface no TUI picker row. `compose` and the admission /
+/// readiness hooks read them straight out of the map.
+pub const LLAMACPP_KNOB_JINJA: &str = "jinja";
+pub const LLAMACPP_KNOB_STRICT_FIT: &str = "strict_fit";
+pub const LLAMACPP_KNOB_FIT_CTX_FLOOR: &str = "fit_ctx_floor";
+
+/// The `fit_ctx_floor` launch knob parsed to `u32`, or `None` when unseeded /
+/// unparsable. Shared by the admission-floor and readiness-gate hooks.
+fn fit_ctx_floor_knob(params: &LaunchParams) -> Option<u32> {
+  params
+    .backend_knobs
+    .get(LLAMACPP_KNOB_FIT_CTX_FLOOR)
+    .and_then(|kv| kv.as_set())
+    .and_then(|s| s.parse::<u32>().ok())
+}
 
 /// Environment variables removed before spawning `llama-server`.
 ///
@@ -218,6 +239,66 @@ impl Backend for LlamaCppBackend {
     // The one backend that opts into the default-off `serves_web_ui`.
     true
   }
+
+  fn seed_launch_knobs(&self, ctx: &MethodContext, params: &mut LaunchParams) {
+    // Project the daemon's config-derived launch knobs onto `backend_knobs`,
+    // fresh each launch (config, not user intent) so an inherited last_params
+    // value can never stick them. `--jinja` is a llamastash default, so the
+    // bench parity escape hatch suppresses it (keeps `start` byte-identical to
+    // raw `llama-server` for Suite-A overhead); `compose` ORs reasoning in.
+    let Some(env) = ctx.launch.as_ref() else {
+      return;
+    };
+    let jinja = env.jinja_default && !crate::launch::params::bench_disable_defaults_from_env();
+    if jinja {
+      params.backend_knobs.insert(
+        LLAMACPP_KNOB_JINJA.to_string(),
+        KnobValue::Set("true".into()),
+      );
+    } else {
+      // Jinja off (config `jinja: false` or bench parity): drop the key so
+      // `compose` emits no `--jinja`.
+      params.backend_knobs.remove(LLAMACPP_KNOB_JINJA);
+    }
+    params.backend_knobs.insert(
+      LLAMACPP_KNOB_STRICT_FIT.to_string(),
+      KnobValue::Set(env.strict_fit.to_string()),
+    );
+    params.backend_knobs.insert(
+      LLAMACPP_KNOB_FIT_CTX_FLOOR.to_string(),
+      KnobValue::Set(env.fit_ctx_floor.to_string()),
+    );
+  }
+
+  fn admission_ctx_floor(&self, params: &LaunchParams) -> Option<u32> {
+    // The `--fit-ctx` floor the launch will pass, projected as the admission
+    // demand's ctx when `ctx` is unpinned.
+    fit_ctx_floor_knob(params)
+  }
+
+  fn readiness_fit_gate(
+    &self,
+    params: &LaunchParams,
+    native_ctx: Option<u32>,
+  ) -> Option<crate::daemon::supervisor::FitGate> {
+    // The strict-fit ctx-clamp gate is meaningful only when ctx is delegated to
+    // `--fit` (a pinned ctx suppresses it — fit honors the pin) and the trained
+    // window is known to compare against.
+    if params.ctx.is_some() {
+      return None;
+    }
+    let floor = fit_ctx_floor_knob(params).unwrap_or(crate::config::DEFAULT_FIT_CTX_FLOOR);
+    let strict = params
+      .backend_knobs
+      .get(LLAMACPP_KNOB_STRICT_FIT)
+      .and_then(|kv| kv.as_set())
+      .is_some_and(|s| s == "true");
+    native_ctx.map(|native| crate::daemon::supervisor::FitGate {
+      floor,
+      native,
+      strict,
+    })
+  }
 }
 
 // The cross-backend dispatch enum (`Backends`) lives in the parent module
@@ -336,12 +417,11 @@ mod tests {
   #[test]
   fn minimal_params_emit_no_default_knobs_at_the_backend_layer() {
     // Parity contract (LLAMASTASH_BENCH_DISABLE_DEFAULTS): defaults are a
-    // resolver concern; the backend must not inject any of its own. Empty
-    // knobs in => only the host/port/-m skeleton out. `jinja` is one such
-    // default (factory-on, suppressed under bench parity), so the resolved
-    // params reaching the backend in parity mode carry `jinja = false`.
-    let mut p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
-    p.jinja = false;
+    // resolver / seed concern; the backend must not inject any of its own.
+    // Empty knobs in => only the host/port/-m skeleton out. `jinja` is one
+    // such default (factory-on, suppressed under bench parity); with no
+    // `jinja` key seeded in `backend_knobs`, `compose` emits no `--jinja`.
+    let p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
     let spec = spec_of(LlamaCppBackend::new().prepare_launch(
       &p,
       41100,
@@ -454,4 +534,147 @@ mod tests {
 
   // Cross-backend `Backends` enum-dispatch forwarding is tested in the
   // parent module (`crate::backend`), where the enum now lives.
+
+  // ---- config-derived launch knobs (jinja / strict_fit / fit_ctx_floor) ----
+
+  fn ctx_with_env(jinja_default: bool, strict_fit: bool, fit_ctx_floor: u32) -> MethodContext {
+    use crate::config::loader::PortRange;
+    use crate::daemon::context::LaunchEnv;
+    use crate::daemon::shutdown::ShutdownToken;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    let env = LaunchEnv {
+      binary: PathBuf::from("/bin/llama-server"),
+      port_range: PortRange {
+        start: 41000,
+        end: 41000,
+      },
+      log_dir: PathBuf::from("/tmp"),
+      probe: ProbeOptions::default(),
+      arch_defaults: Default::default(),
+      device_catalog: Arc::new(RwLock::new(Vec::new())),
+      default_launch_mode: Default::default(),
+      fit_ctx_floor,
+      strict_fit,
+      jinja_default,
+    };
+    MethodContext::new(ShutdownToken::new()).with_launch_env(env)
+  }
+
+  #[test]
+  fn seed_launch_knobs_projects_config_into_backend_knobs() {
+    let ctx = ctx_with_env(true, true, 8192);
+    let mut p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    LlamaCppBackend::new().seed_launch_knobs(&ctx, &mut p);
+    assert_eq!(
+      p.backend_knobs.get(LLAMACPP_KNOB_JINJA),
+      Some(&KnobValue::Set("true".into()))
+    );
+    assert_eq!(
+      p.backend_knobs.get(LLAMACPP_KNOB_STRICT_FIT),
+      Some(&KnobValue::Set("true".into()))
+    );
+    assert_eq!(
+      p.backend_knobs.get(LLAMACPP_KNOB_FIT_CTX_FLOOR),
+      Some(&KnobValue::Set("8192".into()))
+    );
+  }
+
+  #[test]
+  fn seed_launch_knobs_drops_jinja_when_config_off() {
+    let ctx = ctx_with_env(false, false, 16384);
+    // A stale inherited jinja knob must be removed, not left set.
+    let mut p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    p.backend_knobs.insert(
+      LLAMACPP_KNOB_JINJA.to_string(),
+      KnobValue::Set("true".into()),
+    );
+    LlamaCppBackend::new().seed_launch_knobs(&ctx, &mut p);
+    assert!(
+      !p.backend_knobs.contains_key(LLAMACPP_KNOB_JINJA),
+      "jinja off => no key seeded, so compose emits no --jinja"
+    );
+    assert_eq!(
+      p.backend_knobs.get(LLAMACPP_KNOB_STRICT_FIT),
+      Some(&KnobValue::Set("false".into()))
+    );
+  }
+
+  #[test]
+  fn seed_launch_knobs_overwrites_inherited_values() {
+    let ctx = ctx_with_env(true, false, 16384);
+    let mut p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    // Inherited (e.g. from last_params) values that must be re-projected.
+    p.backend_knobs.insert(
+      LLAMACPP_KNOB_STRICT_FIT.to_string(),
+      KnobValue::Set("true".into()),
+    );
+    p.backend_knobs.insert(
+      LLAMACPP_KNOB_FIT_CTX_FLOOR.to_string(),
+      KnobValue::Set("999".into()),
+    );
+    LlamaCppBackend::new().seed_launch_knobs(&ctx, &mut p);
+    assert_eq!(
+      p.backend_knobs.get(LLAMACPP_KNOB_STRICT_FIT),
+      Some(&KnobValue::Set("false".into())),
+      "config wins over an inherited strict_fit"
+    );
+    assert_eq!(
+      p.backend_knobs.get(LLAMACPP_KNOB_FIT_CTX_FLOOR),
+      Some(&KnobValue::Set("16384".into())),
+      "config wins over an inherited fit_ctx_floor"
+    );
+  }
+
+  #[test]
+  fn admission_ctx_floor_reads_the_seeded_knob() {
+    let b = LlamaCppBackend::new();
+    let mut p = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    assert_eq!(b.admission_ctx_floor(&p), None, "no knob => no floor");
+    p.backend_knobs.insert(
+      LLAMACPP_KNOB_FIT_CTX_FLOOR.to_string(),
+      KnobValue::Set("16384".into()),
+    );
+    assert_eq!(b.admission_ctx_floor(&p), Some(16384));
+  }
+
+  #[test]
+  fn readiness_fit_gate_reproduces_the_launch_condition() {
+    let b = LlamaCppBackend::new();
+    let seed = |p: &mut LaunchParams, floor: u32, strict: bool| {
+      p.backend_knobs.insert(
+        LLAMACPP_KNOB_FIT_CTX_FLOOR.to_string(),
+        KnobValue::Set(floor.to_string()),
+      );
+      p.backend_knobs.insert(
+        LLAMACPP_KNOB_STRICT_FIT.to_string(),
+        KnobValue::Set(strict.to_string()),
+      );
+    };
+
+    // A pinned ctx suppresses the gate entirely (fit honors the pin).
+    let mut pinned = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    pinned.ctx = Some(32768);
+    seed(&mut pinned, 16384, true);
+    assert!(b.readiness_fit_gate(&pinned, Some(65536)).is_none());
+
+    // Fit-delegated ctx but no trained window known => no gate.
+    let mut unpinned = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    seed(&mut unpinned, 16384, true);
+    assert!(b.readiness_fit_gate(&unpinned, None).is_none());
+
+    // Fit-delegated ctx + known window => gate with the seeded floor/strict.
+    let gate = b
+      .readiness_fit_gate(&unpinned, Some(65536))
+      .expect("gate present");
+    assert_eq!(gate.floor, 16384);
+    assert_eq!(gate.native, 65536);
+    assert!(gate.strict);
+
+    // strict_fit knob off flips only the strict flag.
+    let mut soft = LaunchParams::new(PathBuf::from("/m/model.gguf"), LaunchMode::Chat);
+    seed(&mut soft, 16384, false);
+    let soft_gate = b.readiness_fit_gate(&soft, Some(65536)).expect("gate");
+    assert!(!soft_gate.strict);
+  }
 }

@@ -383,6 +383,29 @@ pub trait Backend {
     false
   }
 
+  /// Seed daemon-config-derived launch knobs into `params.backend_knobs`, fresh
+  /// each launch (config projection, not user intent). Default: no-op. llama.cpp
+  /// projects its `jinja` / `strict_fit` / `fit_ctx_floor` config here so the
+  /// generic launch path carries no llama.cpp-specific launch scalars.
+  fn seed_launch_knobs(&self, _ctx: &MethodContext, _params: &mut LaunchParams) {}
+
+  /// Ctx floor to project admission memory demand against when `ctx` is unpinned,
+  /// or `None` to use a neutral default. Default: `None`.
+  fn admission_ctx_floor(&self, _params: &LaunchParams) -> Option<u32> {
+    None
+  }
+
+  /// The strict-fit ctx-clamp readiness gate for this launch, or `None` when the
+  /// backend has no such gate (a pinned ctx, an unknown trained window, or a
+  /// backend that doesn't delegate ctx to `--fit`). Default `None`.
+  fn readiness_fit_gate(
+    &self,
+    _params: &LaunchParams,
+    _native_ctx: Option<u32>,
+  ) -> Option<crate::daemon::supervisor::FitGate> {
+    None
+  }
+
   /// The model ids a backend's `/v1/models` may advertise for one of its
   /// launches — the adoption/readiness id contract (D-adopt / D-ready).
   /// Empty (the default) means "match by the recorded file path/basename"
@@ -622,7 +645,14 @@ pub trait Backend {
         unreachable!("a managed-multiplexer backend must override start()")
       }
     };
-    crate::daemon::launch_service::spawn_supervised(ctx, exec, spec).await
+    // Backend-owned launch inputs the generic supervised spawn needs but must
+    // not derive itself: the admission ctx floor and the strict-fit readiness
+    // gate. Both default to `None` (a backend with no such concept), so the
+    // spawn path names no backend.
+    let admission_floor = self.admission_ctx_floor(&exec.params);
+    let fit_gate = self.readiness_fit_gate(&exec.params, exec.native_ctx);
+    crate::daemon::launch_service::spawn_supervised(ctx, exec, spec, admission_floor, fit_gate)
+      .await
   }
 
   /// Stop a launch this backend owns, returning the `{launch_id, state}` response
@@ -729,6 +759,22 @@ impl Backend for Backends {
 
   fn serves_web_ui(&self) -> bool {
     for_each_backend!(self, b => b.serves_web_ui())
+  }
+
+  fn seed_launch_knobs(&self, ctx: &MethodContext, params: &mut LaunchParams) {
+    for_each_backend!(self, b => b.seed_launch_knobs(ctx, params))
+  }
+
+  fn admission_ctx_floor(&self, params: &LaunchParams) -> Option<u32> {
+    for_each_backend!(self, b => b.admission_ctx_floor(params))
+  }
+
+  fn readiness_fit_gate(
+    &self,
+    params: &LaunchParams,
+    native_ctx: Option<u32>,
+  ) -> Option<crate::daemon::supervisor::FitGate> {
+    for_each_backend!(self, b => b.readiness_fit_gate(params, native_ctx))
   }
 
   fn adoption_model_ids(&self) -> &'static [&'static str] {

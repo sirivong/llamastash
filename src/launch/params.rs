@@ -234,14 +234,6 @@ pub struct LaunchParams {
   pub ctx: Option<u32>,
   /// Listening port. `None` leaves port allocation to the supervisor.
   pub port: Option<u16>,
-  /// `--fit-ctx` floor, emitted **only when `ctx` is unset** (Auto /
-  /// Inherited) so `--fit` never collapses the window below this size.
-  /// A pinned `ctx` wins and suppresses `--fit-ctx` (fit honors the
-  /// pin). `None` emits no floor. Sourced from `LaunchEnv.fit_ctx_floor`
-  /// by `start_model`. `#[serde(default)]` keeps older `state.json` rows
-  /// loading.
-  #[serde(default)]
-  pub fit_ctx_floor: Option<u32>,
   /// Reasoning bundle on/off. When `true`, supervisor appends
   /// `--jinja --reasoning-format deepseek` to the argv.
   ///
@@ -250,15 +242,6 @@ pub struct LaunchParams {
   /// May differ from `knobs.reasoning`, which keeps the tri-state
   /// `Option<bool>` the user actually supplied.
   pub reasoning: bool,
-  /// Emit `--jinja` on this launch. Resolved from `Config.jinja`
-  /// (factory `true`) by `start_model`; `compose` emits `--jinja`
-  /// whenever this is `true` **or** `reasoning` is on (reasoning forces
-  /// the Jinja engine even if the config default is `false`). `--jinja`
-  /// is what enables tool calling on both the OpenAI and Anthropic
-  /// surfaces. `#[serde(default)]`-true keeps older `state.json` rows
-  /// loading as jinja-on, matching the factory default.
-  #[serde(default = "default_jinja")]
-  pub jinja: bool,
   /// Resolved typed knobs — argvified before `extras` in canonical
   /// flag order. `None`-fields are skipped (no flag emitted).
   #[serde(default)]
@@ -295,14 +278,6 @@ pub struct LaunchParams {
   pub backend_knobs: BTreeMap<String, KnobValue<String>>,
 }
 
-/// Serde default for [`LaunchParams::jinja`] — factory `true`, mirroring
-/// `Config.jinja`, so a `state.json` row written before the field existed
-/// loads as jinja-on rather than silently flipping a returning user's
-/// launches to the built-in chat template.
-fn default_jinja() -> bool {
-  true
-}
-
 impl LaunchParams {
   pub fn new(model_path: PathBuf, mode: LaunchMode) -> Self {
     Self {
@@ -310,9 +285,7 @@ impl LaunchParams {
       mode,
       ctx: None,
       port: None,
-      fit_ctx_floor: None,
       reasoning: false,
-      jinja: true,
       knobs: TypedKnobs::default(),
       extras: Vec::new(),
       mmproj_path: None,
@@ -724,11 +697,17 @@ pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
     LaunchMode::Embedding => argv.push("--embeddings".into()),
     LaunchMode::Rerank => argv.push("--reranking".into()),
   }
-  // `--jinja` rides on the config default (`params.jinja`) *or* the
-  // reasoning toggle — reasoning needs the Jinja chat template, so it
-  // forces the flag on even when the config default is `false`. Emitted
-  // once; reasoning then adds its `--reasoning-format deepseek` pair.
-  if params.jinja || params.reasoning {
+  // `--jinja` rides on the config-derived `jinja` launch knob (carried in
+  // `backend_knobs`, seeded by the backend) *or* the reasoning toggle —
+  // reasoning needs the Jinja chat template, so it forces the flag on even
+  // when the config default is `false`. Emitted once; reasoning then adds its
+  // `--reasoning-format deepseek` pair.
+  let jinja = params
+    .backend_knobs
+    .get("jinja")
+    .and_then(|kv| kv.as_set())
+    .is_some_and(|s| s == "true");
+  if jinja || params.reasoning {
     argv.push("--jinja".into());
   }
   if params.reasoning {
@@ -737,12 +716,18 @@ pub fn compose(params: &LaunchParams, allocated_port: u16) -> Vec<OsString> {
   }
   // Context window: a pinned `ctx` emits `-c <N>` and suppresses
   // `--fit-ctx` (fit honors the pin). An unset `ctx` (Auto / Inherited)
-  // emits `--fit-ctx <floor>` so `--fit` sizes the window for the
-  // available memory but never collapses below the floor.
+  // emits `--fit-ctx <floor>` (floor from the config-derived `fit_ctx_floor`
+  // launch knob) so `--fit` sizes the window for the available memory but
+  // never collapses below the floor.
   if let Some(ctx) = params.ctx {
     argv.push("-c".into());
     argv.push(ctx.to_string().into());
-  } else if let Some(floor) = params.fit_ctx_floor {
+  } else if let Some(floor) = params
+    .backend_knobs
+    .get("fit_ctx_floor")
+    .and_then(|kv| kv.as_set())
+    .and_then(|s| s.parse::<u32>().ok())
+  {
     argv.push("--fit-ctx".into());
     argv.push(floor.to_string().into());
   }
@@ -870,11 +855,12 @@ mod tests {
 
   #[test]
   fn unset_ctx_emits_fit_ctx_floor_and_no_ngl() {
-    // Auto / Inherited ctx (None) + a configured floor → `--fit-ctx`,
-    // no `-c`, and (after de-pin) no `-ngl`.
+    // Auto / Inherited ctx (None) + a configured floor (the `fit_ctx_floor`
+    // launch knob) → `--fit-ctx`, no `-c`, and (after de-pin) no `-ngl`.
     let mut p = base_params();
     p.ctx = None;
-    p.fit_ctx_floor = Some(16384);
+    p.backend_knobs
+      .insert("fit_ctx_floor".into(), KnobValue::Set("16384".into()));
     let argv = strs(&compose(&p, 41100));
     let pos = argv
       .iter()
@@ -890,7 +876,8 @@ mod tests {
     // A user-pinned ctx wins: `-c <N>`, no `--fit-ctx` (fit honors it).
     let mut p = base_params();
     p.ctx = Some(32768);
-    p.fit_ctx_floor = Some(16384);
+    p.backend_knobs
+      .insert("fit_ctx_floor".into(), KnobValue::Set("16384".into()));
     let argv = strs(&compose(&p, 41100));
     let pos = argv.iter().position(|a| a == "-c").expect("-c");
     assert_eq!(argv[pos + 1], "32768");
@@ -936,11 +923,12 @@ mod tests {
   }
 
   #[test]
-  fn jinja_on_by_default_emits_jinja_without_reasoning() {
-    // Factory default: `--jinja` ships even with reasoning off, and no
-    // `--reasoning-format` rides along.
-    let p = base_params();
-    assert!(p.jinja, "LaunchParams::new defaults jinja on");
+  fn jinja_knob_emits_jinja_without_reasoning() {
+    // The `jinja` launch knob (seeded from config) emits `--jinja` even with
+    // reasoning off, and no `--reasoning-format` rides along.
+    let mut p = base_params();
+    p.backend_knobs
+      .insert("jinja".into(), KnobValue::Set("true".into()));
     let argv = strs(&compose(&p, 41100));
     assert_eq!(argv.iter().filter(|a| *a == "--jinja").count(), 1);
     assert!(!argv.iter().any(|a| a == "--reasoning-format"));
@@ -948,10 +936,16 @@ mod tests {
 
   #[test]
   fn jinja_disabled_omits_the_flag() {
+    // Jinja off (config `jinja: false` seeds `Set("false")`, or no key at all)
+    // → no `--jinja`.
     let mut p = base_params();
-    p.jinja = false;
+    p.backend_knobs
+      .insert("jinja".into(), KnobValue::Set("false".into()));
     let argv = strs(&compose(&p, 41100));
     assert!(!argv.iter().any(|a| a == "--jinja"));
+    // A bare params with no jinja knob likewise emits nothing.
+    let bare = base_params();
+    assert!(!strs(&compose(&bare, 41100)).iter().any(|a| a == "--jinja"));
   }
 
   #[test]
@@ -959,7 +953,8 @@ mod tests {
     // The reasoning toggle needs the Jinja engine, so it wins over a
     // `jinja: false` config — and `--jinja` is still emitted exactly once.
     let mut p = base_params();
-    p.jinja = false;
+    p.backend_knobs
+      .insert("jinja".into(), KnobValue::Set("false".into()));
     p.reasoning = true;
     let argv = strs(&compose(&p, 41100));
     assert_eq!(argv.iter().filter(|a| *a == "--jinja").count(), 1);
