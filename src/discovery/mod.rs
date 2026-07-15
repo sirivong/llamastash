@@ -69,13 +69,16 @@ pub struct DiscoveredModel {
   /// scanner (see [`scanner::find_mmproj`]). Surfaced after the model
   /// title in the TUI so the user knows a model launches multimodal.
   pub multimodal: Option<Multimodal>,
-  /// Whether this GGUF passes the ds4-compatibility predicate
-  /// ([`crate::backend::ds4::ds4_compatible`]). Computed once at scan time
-  /// from the same header parse that fills `metadata` (and cached), so the
-  /// hot `list_models` path reads a precomputed boolean instead of re-reading
-  /// the header on every call. `false` for non-GGUF sources and parse
-  /// failures. The `ds4` badge is `this && ds4_available`.
-  pub ds4_compatible: bool,
+  /// The id of the backend that **auto-claims** this model beyond the default
+  /// identity rule (a header-level routing predicate), or `None` when no
+  /// backend does. Computed once at scan time from the same header parse that
+  /// fills `metadata` (and cached), so the hot `list_models` path reads a
+  /// precomputed value instead of re-reading the header on every call. `None`
+  /// for registry sources and parse failures. The `list` badge shows this id
+  /// when that backend is available, and launch routing prefers it. Determined
+  /// generically via [`crate::backend::Backend::auto_routes`] over the backend
+  /// registry, so this field names no backend.
+  pub routed_backend: Option<String>,
 }
 
 /// Multimodal modality a model's mmproj projector advertises. A
@@ -153,7 +156,7 @@ impl ModelSource {
       ModelSource::UserPath
       | ModelSource::HuggingFace
       | ModelSource::Ollama
-      | ModelSource::LmStudio => "llamacpp",
+      | ModelSource::LmStudio => crate::backend::DEFAULT_BACKEND_ID,
     }
   }
 }

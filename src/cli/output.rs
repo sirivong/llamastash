@@ -50,9 +50,11 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
   // Show the BACKEND column only on a multi-backend host — when at least one
   // model routes to something other than the default `llamacpp` (matches the
   // TUI's `multi_backend` gate). Uses the daemon's per-row `backend` prediction.
-  let show_backend = rows
-    .iter()
-    .any(|r| r.backend.as_deref().is_some_and(|b| b != "llamacpp"));
+  let show_backend = rows.iter().any(|r| {
+    r.backend
+      .as_deref()
+      .is_some_and(|b| b != crate::backend::DEFAULT_BACKEND_ID)
+  });
   let mut header: Vec<&str> = vec!["NAME", "ARCH", "PARAMS", "QUANT", "CTX", "SIZE"];
   if show_backend {
     header.push("BACKEND");
@@ -142,10 +144,10 @@ pub(crate) fn display_size(row: &CatalogRow) -> String {
 /// the Lemonade discovery source maps to `lemonade`; every local-file
 /// source (user / huggingface / ollama / lm-studio) to `llamacpp`.
 pub(crate) fn backend_for_source(source: &str) -> &'static str {
-  if source == "lemonade" {
-    "lemonade"
+  if source == crate::discovery::ModelSource::Lemonade.label() {
+    crate::backend::lemonade::LEMONADE_BACKEND_ID
   } else {
-    "llamacpp"
+    crate::backend::DEFAULT_BACKEND_ID
   }
 }
 

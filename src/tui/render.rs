@@ -1150,7 +1150,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     focused_app.go_top();
     let deletable_hints = build_models_hints(&focused_app, FilterChipMode::Inactive, false, true);

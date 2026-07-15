@@ -96,7 +96,16 @@ pub async fn dispatch_request(ctx: &MethodContext, req: Request) -> Response {
       Response::ok(id, json!({"slept_ms": ms}))
     }
     "list_models" => {
-      let body = ctx.catalog.to_list_response(ctx.ds4_available()).await;
+      // The ids of backends currently available on this host, so a row badges
+      // its routed backend only when that backend can actually serve it.
+      // Registry-driven — names no backend.
+      use crate::backend::Backend;
+      let available_routed: std::collections::BTreeSet<String> = crate::backend::Backends::all()
+        .into_iter()
+        .filter(|b| b.available(ctx))
+        .map(|b| b.id().to_string())
+        .collect();
+      let body = ctx.catalog.to_list_response(&available_routed).await;
       Response::ok(id, body)
     }
     "status" => Response::ok(id, crate::ipc::status::status_response(ctx).await),
@@ -168,58 +177,24 @@ async fn stop_model_handler(
 ) -> Result<Value, ErrorObject> {
   let parsed: StopParams = parse_params(params)?;
   check_grace_secs(parsed.grace_secs)?;
-  // A delegated Lemonade model is not a supervised child — "stopping" it
-  // means unloading it from the shared umbrella, which keeps running. The
-  // `L#` → umbrella-model-name binding lives on the running snapshot (delegated
-  // rows have no supervisor to hold it), so reverse-map it there.
-  if let Some(name) = delegated_name_for(ctx, &parsed.launch_id).await {
-    return stop_delegated_lemonade(ctx, &parsed.launch_id, &name).await;
-  }
-  let model = ctx
-    .supervisors
-    .get(&parsed.launch_id)
-    .await
-    .ok_or_else(|| {
-      ErrorObject::new(
-        ErrorCode::InvalidParams,
-        format!("unknown launch_id: {}", parsed.launch_id.as_str()),
-      )
-    })?;
-  let stopped_port = model.port();
-  let final_state = model.stop(Duration::from_secs(parsed.grace_secs)).await;
-  ctx.supervisors.remove(&parsed.launch_id).await;
-  // Drop the running snapshot keyed by `(id, port)` so a second
-  // launch of the same GGUF on a different port keeps its row.
-  let stopped_id: ModelIdentity = model.id().clone().into();
-  let stopped_umbrella = parsed.launch_id == crate::backend::lemonade::umbrella_launch_id();
-  ctx
-    .state
-    .mutate(|s| {
-      s.running
-        .retain(|r| !(r.id == stopped_id && r.port == stopped_port));
-      // Stopping the umbrella takes every delegated model down with it —
-      // their snapshots would otherwise linger as ghost rows the next
-      // `ensure_umbrella` (fresh process, nothing resident) can't honor.
-      if stopped_umbrella {
-        s.running.retain(|r| r.lemonade_backend_id().is_none());
-      }
-    })
-    .await;
-  if stopped_umbrella {
-    ctx.supervisors.clear_delegated().await;
-  }
-  Ok(json!({
-    "launch_id": parsed.launch_id,
-    "state": flatten_state(&final_state),
-  }))
+  // Hand the launch to its owning backend and ask it to stop — the backend
+  // decides *how* (SIGTERM a supervised child, or unload from its umbrella). The
+  // caller resolves the owner (registry lookup by recorded backend id) but never
+  // branches on process-vs-umbrella lifecycle.
+  let backend = crate::daemon::launch_service::backend_for_launch(ctx, &parsed.launch_id).await;
+  crate::backend::Backend::stop(&backend, ctx, &parsed.launch_id, parsed.grace_secs).await
 }
 
-/// The umbrella model name behind a delegated Lemonade launch id, or `None`
-/// when `launch_id` isn't a delegated row. Delegated models have no supervisor
-/// of their own, so the `L#` → name binding is stamped on the running snapshot
-/// at launch; both `stop_model` and `logs_tail` reverse-map through here so the
-/// scan can't drift between them.
-async fn delegated_name_for(ctx: &MethodContext, launch_id: &LaunchId) -> Option<String> {
+/// The `(owning backend, umbrella model name)` behind a delegated launch id, or
+/// `None` when `launch_id` isn't a delegated row. Delegated models have no
+/// supervisor of their own, so the `L#` → (backend, name) binding is read off
+/// the running snapshot stamped at launch; `logs_tail` reverse-maps through here
+/// to find the umbrella whose log a delegated model shares. Names no backend —
+/// the backend is resolved from the row's identity.
+async fn delegated_target(
+  ctx: &MethodContext,
+  launch_id: &LaunchId,
+) -> Option<(crate::backend::Backends, String)> {
   ctx
     .state
     .snapshot()
@@ -227,54 +202,10 @@ async fn delegated_name_for(ctx: &MethodContext, launch_id: &LaunchId) -> Option
     .running
     .into_iter()
     .find(|r| r.launch_id.as_ref() == Some(launch_id))
-    .and_then(|r| r.lemonade_backend_id().map(|b| b.name.clone()))
-}
-
-/// Stop one delegated Lemonade model: best-effort unload from the shared
-/// umbrella, then drop its running snapshot so `status` stops emitting the
-/// row. The umbrella itself keeps running (stop it via its own
-/// `lemonade-umbrella` launch id). An unload refusal is logged but doesn't
-/// fail the stop — the snapshot is the daemon's own bookkeeping, and a
-/// model the umbrella already evicted should always be clearable.
-async fn stop_delegated_lemonade(
-  ctx: &MethodContext,
-  launch_id: &LaunchId,
-  name: &str,
-) -> Result<Value, ErrorObject> {
-  if let Some(umbrella) = ctx
-    .supervisors
-    .get(&crate::backend::lemonade::umbrella_launch_id())
-    .await
-  {
-    match crate::backend::lemonade::LemonadeClient::new(umbrella.port()) {
-      Ok(client) => {
-        if let Err(e) = client.unload(name).await {
-          log::warn!("lemonade: unload of `{name}` failed (dropping the row anyway): {e}");
-        }
-      }
-      Err(e) => log::warn!("lemonade: could not build client to unload `{name}`: {e}"),
-    }
-  }
-  ctx.supervisors.remove_delegated(name).await;
-  let removed = ctx
-    .state
-    .mutate(|s| {
-      let before = s.running.len();
-      s.running
-        .retain(|r| r.lemonade_backend_id().map(|b| b.name.as_str()) != Some(name));
-      before != s.running.len()
+    .and_then(|r| {
+      r.delegated_backend_id()
+        .map(|b| (crate::backend::backend_for_identity(&r.id), b.name.clone()))
     })
-    .await;
-  if !removed {
-    return Err(ErrorObject::new(
-      ErrorCode::InvalidParams,
-      format!("unknown launch_id: {}", launch_id.as_str()),
-    ));
-  }
-  Ok(json!({
-    "launch_id": launch_id,
-    "state": flatten_state(&ManagedState::Stopped),
-  }))
 }
 
 /// Flatten `ManagedState` to a JSON object whose `state` field is a
@@ -530,12 +461,13 @@ async fn logs_tail_handler(
   params: Option<Value>,
 ) -> Result<Value, ErrorObject> {
   let parsed: LogsTailParams = parse_params(params)?;
-  // A delegated Lemonade model has no process of its own — its log *is*
-  // the shared umbrella's log, so tail that one.
-  let lookup_id = if delegated_name_for(ctx, &parsed.launch_id).await.is_some() {
-    crate::backend::lemonade::umbrella_launch_id()
-  } else {
-    parsed.launch_id.clone()
+  // A delegated (managed-multiplexer) model has no process of its own — its log
+  // *is* the shared umbrella's log, so tail that one (the owning backend's infra
+  // launch).
+  let lookup_id = match delegated_target(ctx, &parsed.launch_id).await {
+    Some((backend, _)) => crate::backend::Backend::umbrella_launch_id(&backend)
+      .unwrap_or_else(|| parsed.launch_id.clone()),
+    None => parsed.launch_id.clone(),
   };
   let model = ctx.supervisors.get(&lookup_id).await.ok_or_else(|| {
     ErrorObject::new(
@@ -622,6 +554,11 @@ pub(crate) fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorO
   Ok(id)
 }
 
+/// Header-derived launch inputs from one GGUF read: `(model id, architecture,
+/// trained ctx window, routed-backend tag)`. The routed-backend tag is the
+/// registry's verdict for this header (`None` = the default process backend).
+pub(crate) type ResolvedModelInfo = (ModelId, Option<String>, Option<u32>, Option<String>);
+
 /// One-pass GGUF header read that returns both the canonical model id
 /// and the architecture string. The launch path calls this so the
 /// layered-knob resolver lookup doesn't have to re-read the header to
@@ -629,7 +566,7 @@ pub(crate) fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorO
 /// the `defaults_table` lookup falls back to the `*` row.
 pub(crate) fn resolve_model_id_and_arch(
   path: &std::path::Path,
-) -> Result<(ModelId, Option<String>, Option<u32>, bool), ErrorObject> {
+) -> Result<ResolvedModelInfo, ErrorObject> {
   let header = read_gguf_header(path, HeaderReadOptions::default()).map_err(|e| {
     ErrorObject::new(
       ErrorCode::InvalidParams,
@@ -644,10 +581,11 @@ pub(crate) fn resolve_model_id_and_arch(
   let native_ctx = summary
     .native_ctx
     .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
-  // ds4-compatibility (arch + per-tensor quant contract) computed from the
-  // same header read — the routing signal the selection seam consults.
-  let ds4_compatible = crate::backend::ds4::ds4_compatible(&header.header);
-  Ok((id, summary.arch, native_ctx, ds4_compatible))
+  // The backend that auto-claims this header (registry-driven routing verdict),
+  // or `None` — computed from the same header read the selection seam consults.
+  // Names no backend.
+  let routed_backend = crate::backend::routed_backend_for(&header.header);
+  Ok((id, summary.arch, native_ctx, routed_backend))
 }
 
 /// Project the daemon's catalog into the lean rows preset-key
@@ -1134,7 +1072,7 @@ mod tests {
         split_siblings: Vec::new(),
         display_label: None,
         multimodal: None,
-        ds4_compatible: false,
+        routed_backend: None,
       })
       .await;
 
@@ -1292,10 +1230,12 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn stop_delegated_lemonade_clears_snapshot_even_without_umbrella() {
-    // The umbrella is gone but the snapshot lingers (e.g. it crashed):
-    // the row must still be clearable — the unload is best-effort, the
-    // bookkeeping removal is the contract.
+  async fn stop_model_of_delegated_row_clears_snapshot_even_without_umbrella() {
+    // `stop_model` on a delegated row routes through `backend.stop`, whose
+    // delegated branch unloads from the umbrella and drops the snapshot. The
+    // umbrella is gone but the snapshot lingers (e.g. it crashed): the row must
+    // still be clearable — the unload is best-effort, the bookkeeping removal is
+    // the contract.
     let c = ctx();
     c.state
       .mutate(|s| {
@@ -1316,7 +1256,7 @@ mod tests {
       .await
       .running
       .iter()
-      .any(|r| r.lemonade_backend_id().is_some());
+      .any(|r| r.delegated_backend_id().is_some());
     assert!(!still_there, "snapshot must be dropped");
     // Second stop: the row is unknown now — the snapshot is gone, so it
     // falls through to the supervisor path and errors like a bogus id.

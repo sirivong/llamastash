@@ -79,12 +79,12 @@ pub struct ExternalProcess {
 #[derive(Debug, Clone)]
 pub struct SweepInputs<'a> {
   pub recorded_running: &'a [RunningSnapshot],
-  /// Process basenames matched to detect backend-child invocations the
-  /// daemon doesn't own. Defaults to `["llama-server", "ds4-server"]` in
-  /// production (D-adopt: the sweep learns ds4's process marker alongside
-  /// llama.cpp's); tests inject a unique substring so they don't trip on the
-  /// real binaries.
-  pub external_markers: &'a [&'a str],
+  /// Process basenames matched to detect backend-child invocations the daemon
+  /// doesn't own. In production this is [`crate::backend::external_process_markers`]
+  /// (every backend's `process_marker`), so the sweep learns a new backend's
+  /// server from its registration alone; tests inject a unique substring so they
+  /// don't trip on the real binaries.
+  pub external_markers: Vec<&'static str>,
   /// Per-probe network timeout. Each adoption candidate gets one
   /// `/v1/models` call capped at this budget. Production defaults
   /// to 1s; tests can shorten.
@@ -95,7 +95,7 @@ impl<'a> SweepInputs<'a> {
   pub fn new(recorded: &'a [RunningSnapshot]) -> Self {
     Self {
       recorded_running: recorded,
-      external_markers: &["llama-server", "ds4-server"],
+      external_markers: crate::backend::external_process_markers(),
       probe_timeout: Duration::from_secs(1),
     }
   }
@@ -590,7 +590,7 @@ mod tests {
     snap.resolved_backend = "ds4".to_string();
     let report = sweep(SweepInputs {
       recorded_running: &[snap],
-      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
+      external_markers: vec!["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_secs(1),
     })
     .await;
@@ -704,7 +704,7 @@ mod tests {
     let recorded = vec![fake_snapshot(dead, 41123, "/m/a.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
+      external_markers: vec!["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;
@@ -722,7 +722,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/a.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
+      external_markers: vec!["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;
@@ -743,7 +743,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
+      external_markers: vec!["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_secs(1),
     })
     .await;
@@ -768,7 +768,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/match.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
+      external_markers: vec!["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_secs(1),
     })
     .await;
@@ -797,7 +797,7 @@ mod tests {
     let recorded = vec![fake_snapshot(live, port, "/m/expected.gguf", 1)];
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_markers: &["llamastash-sweep-marker-that-matches-nothing-9f3a"],
+      external_markers: vec!["llamastash-sweep-marker-that-matches-nothing-9f3a"],
       probe_timeout: Duration::from_secs(1),
     })
     .await;
@@ -834,7 +834,7 @@ mod tests {
     let recorded: Vec<RunningSnapshot> = Vec::new();
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_markers: &["sleep"],
+      external_markers: vec!["sleep"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;
@@ -871,7 +871,7 @@ mod tests {
     let recorded: Vec<RunningSnapshot> = Vec::new();
     let report = sweep(SweepInputs {
       recorded_running: &recorded,
-      external_markers: &["llama-server"],
+      external_markers: vec!["llama-server"],
       probe_timeout: Duration::from_millis(100),
     })
     .await;

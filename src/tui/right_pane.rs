@@ -565,7 +565,7 @@ fn render_header_path(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
 /// [`focused_backend_badge`].
 fn render_header_badge(frame: &mut Frame<'_>, area: Rect, badge: &BackendBadge, palette: &Palette) {
   let chip = Span::styled(
-    badge.chip,
+    badge.chip.clone(),
     Style::default()
       .fg(palette.on_accent)
       .bg(palette.accent)
@@ -599,8 +599,9 @@ fn focused_is_lemonade_registry(app: &App) -> bool {
 /// default) returns `None`. Backend-agnostic so a future backend adds a chip
 /// without touching the layout.
 struct BackendBadge {
-  /// Chip text rendered with the accent background (e.g. `" ds4 "`).
-  chip: &'static str,
+  /// Chip text rendered with the accent background (e.g. `" ds4 "`) — the
+  /// resolved backend id, padded. Owned so it can name any backend generically.
+  chip: String,
 }
 
 /// Resolve the header badge for the focused model, or `None` when the backend
@@ -610,34 +611,32 @@ struct BackendBadge {
 fn focused_backend_badge(app: &App) -> Option<BackendBadge> {
   let path = focused_path(app)?;
   let running = app.right_pane_focus();
-  // ds4: a *running* row keys on the launch's real backend, a *selected* row
-  // on the `list_models` routing prediction. Chip only — no alias disclosure:
-  // verified against a real `ds4-server`, `/v1/models` advertises a static
-  // `[deepseek-v4-flash, deepseek-v4-pro]` menu regardless of the loaded model
-  // and `/v1/chat/completions` echoes back the model name the client sent, so
-  // there is no model→alias remap to surface.
-  let is_ds4 = match running {
-    Some(m) => m.is_ds4(),
-    None => app.is_ds4_path(&path),
-  };
-  if is_ds4 {
-    return Some(BackendBadge { chip: " ds4 " });
-  }
-  // Lemonade: a running row keys on the launch's real backend; a selected row
-  // on the model's Lemonade-registry source (a Lemonade model always runs on
-  // the umbrella, a GGUF never does).
-  let is_lemonade = match running {
-    Some(m) => m.is_lemonade(),
+  // The resolved backend id: a *running* row keys on the launch's real backend
+  // (honest even for a compatible file force-run on the default); a *selected*
+  // row on the `list_models` routing prediction, falling back to the model's
+  // discovery-source backend (a registry model always runs on its backend). A
+  // plain id chip — no per-backend special-casing, so a new backend surfaces a
+  // chip without touching this.
+  let backend_id: String = match running {
+    Some(m) => m.backend.clone()?,
     None => app
-      .models
-      .iter()
-      .find(|m| m.path == path)
-      .is_some_and(|m| m.source.backend_id() == crate::backend::lemonade::LEMONADE_BACKEND_ID),
+      .predicted_backend(&path)
+      .map(str::to_string)
+      .or_else(|| {
+        app
+          .models
+          .iter()
+          .find(|m| m.path == path)
+          .map(|m| m.source.backend_id().to_string())
+      })?,
   };
-  if is_lemonade {
-    return Some(BackendBadge { chip: " lemonade " });
+  // The default backend (llama.cpp) is the implicit norm — no chip.
+  if backend_id == crate::backend::DEFAULT_BACKEND_ID {
+    return None;
   }
-  None
+  Some(BackendBadge {
+    chip: format!(" {backend_id} "),
+  })
 }
 
 /// Number of vertical rows the focused path needs at `inner_width`,
@@ -714,8 +713,13 @@ fn render_header_stats(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &P
           palette.muted_style(),
         )
       };
-      // Lemonade delegated rows share the umbrella's port/RAM/CPU — mark them.
-      let mark = if m.is_lemonade() {
+      // Managed-multiplexer delegated rows share the umbrella's port/RAM/CPU —
+      // mark them. Keyed on the backend's lifecycle shape, not a specific id.
+      let mark = if m
+        .backend
+        .as_deref()
+        .is_some_and(crate::backend::is_managed_multiplexer)
+      {
         SHARED_UMBRELLA_MARKER
       } else {
         ""
@@ -1111,7 +1115,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }
   }
 
@@ -1496,7 +1500,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     // Row 0 is the table header, row 1 is the directory group
@@ -1522,7 +1526,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     // Row 0 is the table header, row 1 is the directory group
     // header, row 2 is the model.
@@ -1547,7 +1551,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.list_cursor = 2;
     let palette = app.palette();
@@ -1585,7 +1589,7 @@ mod tests {
         vision: true,
         audio: false,
       }),
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.list_cursor = 2;
     let palette = app.palette();
@@ -1663,7 +1667,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     app.list_cursor = 2;
@@ -1738,7 +1742,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.managed = vec![ready_managed("qwen", None, None)];
     app.list_cursor = 2;

@@ -76,7 +76,7 @@ fn row_for(entry: &ModelEntry) -> DiscoveredModel {
     // companion projector to detect, so no multimodal signal.
     multimodal: None,
     // Registry-served, not a local GGUF — never ds4-routable.
-    ds4_compatible: false,
+    routed_backend: None,
   }
 }
 

@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
-use crate::config::loader::LemonadeConfig;
+use crate::backend::Backend;
 use crate::daemon::context::MethodContext;
 use crate::daemon::host_metrics::HostMetricsSnapshot;
 use crate::ipc::methods::flatten_state;
@@ -68,17 +68,21 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
     // The backend this launch *resolved* to, stamped on the running snapshot
     // at spawn — the honest signal (respects an explicit `--backend llamacpp`
     // on a compatible file), not the `list_models` ds4 badge prediction.
-    // The Lemonade umbrella row keys deterministically on the lemonade backend:
-    // it shares its port with every delegated model's snapshot, so matching by
-    // port picks an arbitrary snapshot (or the `llamacpp` fallback when none is
-    // resident) and the reported backend flip-flops between calls.
-    let resolved_backend = if launch_id == crate::backend::lemonade::umbrella_launch_id() {
-      crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string()
-    } else {
-      running_snap
-        .map(|r| r.resolved_backend.clone())
-        .unwrap_or_else(|| "llamacpp".to_string())
-    };
+    // A managed-multiplexer umbrella row keys deterministically on its own
+    // backend id: the umbrella shares its port with every delegated model's
+    // snapshot, so matching by port would pick an arbitrary snapshot (or the
+    // default-backend fallback when none is resident) and the reported backend
+    // would flip-flop between calls. Resolved via the registry so no backend is
+    // named here.
+    let resolved_backend = crate::backend::Backends::all()
+      .iter()
+      .find(|b| b.umbrella_launch_id().as_ref() == Some(&launch_id))
+      .map(|b| b.id().to_string())
+      .unwrap_or_else(|| {
+        running_snap
+          .map(|r| r.resolved_backend.clone())
+          .unwrap_or_else(|| crate::backend::DEFAULT_BACKEND_ID.to_string())
+      });
     let resolved_ctx = actuals.and_then(|a| a.resolved_ctx);
     let ctx_clamped = actuals.map(|a| a.ctx_clamped).unwrap_or(false);
     let (preset_count, preset_default) = super::methods::preset_hint(
@@ -142,7 +146,7 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
     let u_rss = ulatest.as_ref().map(|r| r.rss_bytes);
     let u_cpu = ulatest.as_ref().map(|r| r.cpu_percent);
     for running_snap in ctx.state.snapshot().await.running.iter() {
-      let Some(backend_id) = running_snap.lemonade_backend_id() else {
+      let Some(backend_id) = running_snap.delegated_backend_id() else {
         continue;
       };
       // The `L#` stamped at launch (delegated rows have no supervisor to hold
@@ -317,20 +321,12 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
 /// GPU backends the live device catalog reveals; Lemonade reports its
 /// static cpu+npu (a live `lemond` system-info probe is deferred).
 async fn backends_status(ctx: &MethodContext) -> Value {
-  use crate::backend::lemonade::LemonadeBackend;
-  use crate::backend::llama_cpp::LlamaCppBackend;
-  use crate::backend::Backend;
+  use crate::backend::{Backend, Backends};
 
-  let llama = LlamaCppBackend::new();
-  let llama_installed = ctx
-    .launch
-    .as_ref()
-    .map(|e| e.binary.exists())
-    .unwrap_or(false);
-  // Live GPU classes the host exposes, from `llama-server --list-devices`.
-  // The same physical GPUs back ds4 (Metal/CUDA/ROCm), so this unions into
-  // both rows below — ds4's static `[cpu]` floor would otherwise report a
-  // ROCm host as cpu-only, the opposite of what ds4-server actually runs on.
+  // Live GPU classes the host exposes (from each configured binary's
+  // `--list-devices`). The default `status_accelerators` unions these into a
+  // backend's static floor; a backend that probes its own installed
+  // accelerators live (a managed multiplexer) overrides and ignores them.
   let device_accels: Vec<crate::backend::Accelerator> = match ctx.launch.as_ref() {
     Some(env) => env
       .device_catalog
@@ -341,69 +337,31 @@ async fn backends_status(ctx: &MethodContext) -> Value {
       .collect(),
     None => Vec::new(),
   };
-  let mut llama_acc = llama.accelerators();
-  for a in &device_accels {
-    llama_acc.insert(*a);
-  }
 
-  let lemonade = LemonadeBackend::new();
-  // Prefer what lemond actually has installed (live `system-info` probe) over
-  // the backend's static capability floor — the static `[cpu, npu]` misses a
-  // ROCm/Vulkan build and claims an NPU the host may not have. Falls back to
-  // the static list when the umbrella is down or the probe fails.
-  let lemonade_acc = lemonade_installed_accelerators(ctx)
-    .await
-    .map(|a| a.labels())
-    .unwrap_or_else(|| lemonade.accelerators().labels());
-  let mut lemonade_row = backend_row(
-    lemonade.id(),
-    lemonade.lifecycle().label(),
-    lemond_installed(&ctx.lemonade),
-    lemonade_acc,
-  );
-  // Managed-multiplexer health: surface whether the umbrella llamastash
-  // supervises is actually up, so `status` distinguishes "installed" (binary on
-  // disk) from "running" (umbrella Ready). When enabled but down — e.g. the
-  // configured port was already taken at boot — this reads `not running`, which
-  // is the only visible signal outside the daemon log.
-  if let Some(obj) = lemonade_row.as_object_mut() {
-    obj.insert("enabled".into(), json!(ctx.lemonade_available()));
-    obj.insert("umbrella".into(), json!(lemonade_umbrella_state(ctx).await));
+  // One row per registered backend, assembled generically from the backend's
+  // status hooks (installed / enabled / accelerators / binary / extra). This
+  // names no backend, so a new backend surfaces in `status` from its
+  // registration alone — no edit here.
+  let mut rows = Vec::new();
+  for b in Backends::all() {
+    let mut row = backend_row(
+      b.id(),
+      b.lifecycle().label(),
+      b.installed(ctx),
+      b.status_accelerators(ctx, &device_accels).await,
+    );
+    if let Some(obj) = row.as_object_mut() {
+      if let Some(enabled) = b.status_enabled(ctx) {
+        obj.insert("enabled".into(), json!(enabled));
+      }
+      for (k, v) in b.status_extra(ctx).await {
+        obj.insert(k, v);
+      }
+    }
+    set_backend_binary(&mut row, b.binary_path(ctx));
+    rows.push(row);
   }
-  // Each row carries its resolved `binary` path when one exists, so
-  // clients (the TUI's Daemon panel server row) can list every enabled
-  // backend's executable generically — no per-backend client code.
-  let mut llama_row = backend_row(
-    llama.id(),
-    llama.lifecycle().label(),
-    llama_installed,
-    llama_acc.labels(),
-  );
-  let llama_binary = ctx.launch.as_ref().map(|e| e.binary.display().to_string());
-  set_backend_binary(&mut llama_row, llama_binary);
-  let lemonade_binary =
-    crate::backend::lemonade::resolve_lemond_binary(&ctx.lemonade).map(|b| b.display().to_string());
-  set_backend_binary(&mut lemonade_row, lemonade_binary);
-
-  // ds4 (DwarfStar): `installed` = the `ds4-server` binary resolves;
-  // `enabled` = intent (default-on unless `ds4.enabled: false`) AND installed.
-  let ds4_backend = crate::backend::ds4::Ds4Backend::new();
-  let ds4_binary = crate::backend::ds4::resolve_ds4_binary(ctx.ds4.binary.as_deref());
-  let mut ds4_acc = ds4_backend.accelerators();
-  for a in &device_accels {
-    ds4_acc.insert(*a);
-  }
-  let mut ds4_row = backend_row(
-    ds4_backend.id(),
-    ds4_backend.lifecycle().label(),
-    ds4_binary.is_some(),
-    ds4_acc.labels(),
-  );
-  if let Some(obj) = ds4_row.as_object_mut() {
-    obj.insert("enabled".into(), json!(ctx.ds4_available()));
-  }
-  set_backend_binary(&mut ds4_row, ds4_binary.map(|b| b.display().to_string()));
-  json!([llama_row, lemonade_row, ds4_row])
+  Value::Array(rows)
 }
 
 /// Attach a backend row's resolved `binary` path; absent when no binary
@@ -414,31 +372,7 @@ fn set_backend_binary(row: &mut Value, binary: Option<String>) {
   }
 }
 
-/// The managed `lemond` umbrella's state for `status`, distinct from the
-/// `installed` (binary-resolvable) signal. `disabled` when the backend is off;
-/// otherwise reflects the supervised umbrella: `running` (Ready), `starting`
-/// (spawned, probing), or `not running` (never came up / exited — commonly a
-/// boot-time port conflict).
-async fn lemonade_umbrella_state(ctx: &MethodContext) -> &'static str {
-  use crate::daemon::supervisor::ManagedState;
-  if !ctx.lemonade_available() {
-    return "disabled";
-  }
-  match ctx
-    .supervisors
-    .get(&crate::backend::lemonade::umbrella_launch_id())
-    .await
-  {
-    Some(m) => match m.state().await {
-      ManagedState::Ready => "running",
-      ManagedState::Launching | ManagedState::Loading => "starting",
-      ManagedState::Error { .. } | ManagedState::Stopping | ManagedState::Stopped => "not running",
-    },
-    None => "not running",
-  }
-}
-
-fn backend_row(id: &str, lifecycle: &str, installed: bool, accelerators: Vec<&str>) -> Value {
+fn backend_row(id: &str, lifecycle: &str, installed: bool, accelerators: Vec<String>) -> Value {
   json!({
     "id": id,
     "lifecycle": lifecycle,
@@ -462,88 +396,6 @@ fn accelerator_from_selector(selector: &str) -> Option<crate::backend::Accelerat
   } else {
     None
   }
-}
-
-/// Map a lemond backend/recipe name (`"rocm"`, `"npu"`, `"vulkan"`, …) to an
-/// accelerator class. Same label vocabulary as [`Accelerator::label`], so it
-/// round-trips.
-fn accelerator_from_label(name: &str) -> Option<crate::backend::Accelerator> {
-  use crate::backend::Accelerator;
-  match name.to_ascii_lowercase().as_str() {
-    "cpu" => Some(Accelerator::Cpu),
-    "cuda" => Some(Accelerator::Cuda),
-    "rocm" => Some(Accelerator::Rocm),
-    "vulkan" => Some(Accelerator::Vulkan),
-    "metal" => Some(Accelerator::Metal),
-    "npu" => Some(Accelerator::Npu),
-    _ => None,
-  }
-}
-
-/// Accelerators lemond actually has installed, from a live `system-info`
-/// probe (the HTTP form of `lemonade backends`): the distinct backend classes
-/// with at least one `state: "installed"` entry across recipes. `None` when
-/// the umbrella isn't registered or the probe fails, so the caller keeps the
-/// backend's static capability floor.
-async fn lemonade_installed_accelerators(
-  ctx: &MethodContext,
-) -> Option<crate::backend::AcceleratorSupport> {
-  if !ctx.lemonade_available() {
-    return None;
-  }
-  // The managed umbrella's live port when llamastash spawned it; otherwise the
-  // configured port, so an externally-run lemond (started outside llamastash)
-  // is probed too.
-  let port = match ctx
-    .supervisors
-    .get(&crate::backend::lemonade::umbrella_launch_id())
-    .await
-  {
-    Some(umbrella) => umbrella.port(),
-    None => ctx.lemonade.port,
-  };
-  let client = crate::backend::lemonade::LemonadeClient::new(port).ok()?;
-  // Bounded independently of the client's own timeout (minutes, tuned for model
-  // loads): a slow/hung lemond must never stall a `status` response.
-  let info = tokio::time::timeout(std::time::Duration::from_secs(2), client.system_info())
-    .await
-    .ok()?
-    .ok()?;
-  let acc = installed_accelerators_from_system_info(&info);
-  (!acc.labels().is_empty()).then_some(acc)
-}
-
-/// Pure parse of a lemond `system-info` body into the accelerator classes it
-/// has installed: the distinct `recipes.*.backends.*` names whose `state` is
-/// `"installed"`. Split out from the HTTP path so it's unit-testable against a
-/// captured body.
-fn installed_accelerators_from_system_info(info: &Value) -> crate::backend::AcceleratorSupport {
-  let mut acc = crate::backend::AcceleratorSupport::default();
-  let Some(recipes) = info.get("recipes").and_then(Value::as_object) else {
-    return acc;
-  };
-  for recipe in recipes.values() {
-    let Some(backends) = recipe.get("backends").and_then(Value::as_object) else {
-      continue;
-    };
-    for (name, body) in backends {
-      if body.get("state").and_then(Value::as_str) != Some("installed") {
-        continue;
-      }
-      if let Some(a) = accelerator_from_label(name) {
-        acc.insert(a);
-      }
-    }
-  }
-  acc
-}
-
-/// The "installed" signal for the Lemonade backend in `status`. Honors the
-/// full resolution order — explicit `lemonade.binary` first, then `lemond` /
-/// `lemonade` on PATH — so a user who points at an off-PATH `lemond` still
-/// reads as installed.
-fn lemond_installed(cfg: &LemonadeConfig) -> bool {
-  crate::backend::lemonade::resolve_lemond_binary(cfg).is_some()
 }
 
 /// Project the proxy listener's status cell into the wire shape
@@ -934,50 +786,5 @@ mod tests {
     // An unrecognised selector contributes no accelerator class.
     assert_eq!(accelerator_from_selector("sycl0"), None);
     assert_eq!(accelerator_from_selector(""), None);
-  }
-
-  #[test]
-  fn installed_accelerators_parses_lemond_system_info() {
-    use super::installed_accelerators_from_system_info;
-    // Shape mirrors the real `/api/v1/system-info` `recipes` block: only the
-    // `state: "installed"` backends count (flm/npu, whispercpp/rocm+vulkan);
-    // `installable` / `unsupported` are ignored. Order is by accelerator class.
-    let info = json!({
-      "recipes": {
-        "flm": { "backends": { "npu": { "state": "installed", "version": "v0.9.44" } } },
-        "whispercpp": { "backends": {
-          "cpu":    { "state": "installable" },
-          "rocm":   { "state": "installed", "version": "v1.8.4" },
-          "vulkan": { "state": "installed", "version": "v1.8.4" }
-        } },
-        "llamacpp": { "backends": {
-          "cpu":  { "state": "installable" },
-          "cuda": { "state": "unsupported" },
-          "rocm": { "state": "installable" }
-        } }
-      }
-    });
-    let acc = installed_accelerators_from_system_info(&info);
-    assert_eq!(acc.labels(), vec!["rocm", "vulkan", "npu"]);
-    // A body with no recipes yields an empty set (caller falls back to static).
-    assert!(installed_accelerators_from_system_info(&json!({}))
-      .labels()
-      .is_empty());
-  }
-
-  #[tokio::test]
-  async fn lemonade_umbrella_state_is_disabled_when_backend_off() {
-    // An explicit `enabled: false` forces Lemonade off (the default is now
-    // on-when-found), so the umbrella state short-circuits to "disabled"
-    // without touching the supervisor registry — regardless of whether a
-    // `lemond` happens to sit on PATH.
-    let c = ctx().with_lemonade(
-      crate::config::loader::LemonadeConfig {
-        enabled: Some(false),
-        ..Default::default()
-      },
-      false,
-    );
-    assert_eq!(super::lemonade_umbrella_state(&c).await, "disabled");
   }
 }

@@ -56,7 +56,7 @@ fn fake_model(path: &str, parent: &str, arch: &str, ctx: u64, weights: u64) -> D
     split_siblings: Vec::new(),
     display_label: None,
     multimodal: None,
-    ds4_compatible: false,
+    routed_backend: None,
   }
 }
 

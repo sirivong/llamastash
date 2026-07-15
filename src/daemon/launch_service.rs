@@ -6,9 +6,11 @@
 //! knob merge → memory admission → supervisor spawn → registry insert →
 //! last-params recorder. The IPC `start_model` handler and the proxy's
 //! auto-start path both call it, so the two surfaces can never drift in
-//! how a launch is composed. Managed-multiplexer (Lemonade) launches
-//! branch off into `start_delegated_lemonade`, anchored on the shared
-//! umbrella rather than a per-model child.
+//! how a launch is composed. It ends by handing a [`LaunchExec`] to the
+//! resolved backend's [`crate::backend::Backend::start`]: a process-per-model
+//! backend runs the default supervised spawn (`spawn_supervised`); a
+//! managed-multiplexer backend overrides `start` to anchor on its shared
+//! umbrella. This path never branches on lifecycle.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -18,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::identity::ModelIdentity;
-use crate::backend::{Backend, LaunchPlan};
+use crate::backend::Backend;
 use crate::config::MAX_CTX_TOKENS;
 use crate::config::{KnobValue, KnobValueOpt};
 use crate::daemon::context::{MethodContext, PersistedState};
@@ -131,21 +133,66 @@ impl From<LaunchModeWire> for LaunchMode {
   }
 }
 
-/// Output of [`compose_and_spawn`] — everything the caller needs to
+/// Output of `compose_and_spawn` — everything the caller needs to
 /// observe the launch from the outside. The IPC handler projects
 /// this onto the JSON-RPC response; the proxy's auto-start path
-///  keeps the `ManagedModel` handle so it can poll the state
+/// keeps the `ManagedModel` handle so it can poll the state
 /// machine without going through the registry snapshot.
-pub(crate) struct StartedLaunch {
+pub struct StartedLaunch {
   pub(crate) launch_id: LaunchId,
   pub(crate) model_id: ModelId,
   pub(crate) port: u16,
   pub(crate) model: ManagedModel,
   pub(crate) log_path: PathBuf,
-  /// Non-fatal advisories surfaced to the caller (CLI human output / TUI
-  /// toast): capability-dropped knobs, the deepseek4 KV-blind admission note,
-  /// and the `ssd_streaming` admission-bypass note. Empty on a clean launch.
+  /// Non-fatal advisories surfaced to the caller (CLI human output / TUI toast):
+  /// capability-dropped knobs, backend admission/knob-resolution notes, and the
+  /// admission-bypass note. Empty on a clean launch.
   pub(crate) warnings: Vec<String>,
+}
+
+/// Everything a backend's [`crate::backend::Backend::start`] needs to execute a
+/// launch, once `compose_and_spawn` has done the backend-agnostic prep
+/// (validation, identity, port reservation, layered knob resolution). The
+/// backend decides *how* to start — a supervised child process (the default) or
+/// a delegation to a managed-multiplexer umbrella — so the caller never branches
+/// on lifecycle. Consumed by value.
+pub struct LaunchExec {
+  /// The fully-resolved launch params (knobs argv-ified from these).
+  pub(crate) params: LaunchParams,
+  /// The reserved launch-pool port. A process-per-model backend spawns on it; a
+  /// managed multiplexer releases it (its umbrella binds a configured port).
+  pub(crate) reserved_port: u16,
+  /// The device-owning default binary the orchestrator chose; a backend with its
+  /// own server overrides via [`crate::backend::Backend::resolve_launch_binary`].
+  pub(crate) default_binary: PathBuf,
+  /// Size-scaled probe budget.
+  pub(crate) probe: crate::daemon::probe::ProbeOptions,
+  pub(crate) id: ModelId,
+  pub(crate) identity: ModelIdentity,
+  pub(crate) log_path: PathBuf,
+  pub(crate) mode: LaunchMode,
+  pub(crate) origin: crate::daemon::supervisor::LaunchOrigin,
+  /// Resolved `general.architecture`, for the admission demand model.
+  pub(crate) arch: Option<String>,
+  /// Trained context window, for the strict-fit ctx-clamp gate.
+  pub(crate) native_ctx: Option<u32>,
+  pub(crate) fit_ctx_floor: u32,
+  pub(crate) strict_fit: bool,
+  /// Shard-aware total weight bytes (admission + probe scaling).
+  pub(crate) total_weight_bytes: u64,
+  /// The user-supplied knob deltas to persist in `last_params` (not the full
+  /// resolved set — keeps source chips meaningful).
+  pub(crate) user_knobs: crate::config::TypedKnobs,
+  /// Native-knob keys the backend auto-resolved this launch — stripped from the
+  /// persisted `last_params` so they re-resolve next launch (see
+  /// [`crate::backend::Backend::resolve_native_knobs`]).
+  pub(crate) auto_set_knobs: std::collections::BTreeSet<String>,
+  /// Whether this launch bypasses the memory admission gate (streams from disk).
+  pub(crate) bypasses_admission: bool,
+  /// Advisories accumulated during composition, extended by the execution.
+  pub(crate) warnings: Vec<String>,
+  /// The backend id this launch resolved to, stamped on the persisted rows.
+  pub(crate) resolved_backend_id: String,
 }
 
 /// The one launch-composition pipeline, for callers that already have a
@@ -183,11 +230,11 @@ pub(crate) async fn compose_and_spawn(
   // managed-multiplexer dispatch below select Lemonade rather than crashing on
   // the missing GGUF. Every other path is a local GGUF: one header read yields
   // both the canonical id and the arch.
-  let (id, arch, native_ctx, ds4_compatible, identity): (
+  let (id, arch, native_ctx, routed_backend, identity): (
     ModelId,
     Option<String>,
     Option<u32>,
-    bool,
+    Option<String>,
     ModelIdentity,
   ) = match crate::backend::lemonade::registry_name_from_path(&parsed.model_path) {
     Some(name) => {
@@ -207,37 +254,26 @@ pub(crate) async fn compose_and_spawn(
         synthetic,
         None,
         None,
-        false,
+        None,
         ModelIdentity::Backend(backend_id),
       )
     }
     None => {
-      let (id, arch, native_ctx, ds4_compatible) = resolve_model_id_and_arch(&parsed.model_path)?;
+      let (id, arch, native_ctx, routed_backend) = resolve_model_id_and_arch(&parsed.model_path)?;
       let identity: ModelIdentity = id.clone().into();
-      (id, arch, native_ctx, ds4_compatible, identity)
+      (id, arch, native_ctx, routed_backend, identity)
     }
   };
 
-  // Split-PRO guard (D-guard): each half of ds4's distributed Q4 GGUF pair is
-  // unloadable *alone* by either engine, and attempting it wastes a 100 GB+
-  // load. Refuse pre-spawn on an auto-routed launch (an explicit `--backend`
-  // passes through so the engine can surface its own error). Gated on the
-  // `deepseek4` arch so an *unrelated* GGUF that merely matches the
-  // `…-Layers00-30` filename pattern is never wrongly refused.
-  if parsed.backend.unwrap_or_default() == crate::launch::params::BackendChoice::Auto
-    && arch.as_deref() == Some("deepseek4")
-  {
-    if let Some(name) = parsed.model_path.file_name().and_then(|n| n.to_str()) {
-      if crate::backend::ds4::is_ds4_split_half(name) {
-        return Err(ErrorObject::new(
-          ErrorCode::InvalidParams,
-          format!(
-            "`{name}` is one half of ds4's distributed/split PRO GGUF — unloadable on its own. \
-             ds4 distributed mode is unsupported; use a single-file DeepSeek-V4 GGUF, or pass \
-             `--backend ds4` to attempt it anyway (ds4-server will surface its own error)."
-          ),
-        ));
-      }
+  // Pre-spawn refusal (D-guard): on an auto-routed launch, ask every backend
+  // whether it declines this model (e.g. a distributed/split GGUF half a
+  // backend recognizes by arch but cannot load alone, wasting a 100 GB+ load).
+  // An explicit `--backend` override passes through so the engine can surface
+  // its own error. Registry-driven — names no backend.
+  if parsed.backend.clone().unwrap_or_default() == crate::launch::params::BackendChoice::Auto {
+    if let Some(msg) = crate::backend::refusal_for_auto_launch(arch.as_deref(), &parsed.model_path)
+    {
+      return Err(ErrorObject::new(ErrorCode::InvalidParams, msg));
     }
   }
 
@@ -327,19 +363,17 @@ pub(crate) async fn compose_and_spawn(
 
   // Resolve the backend up front (D-route) so both the launch plan *and* the
   // cross-backend contamination gate below see the same decision. Selection
-  // honors the per-model override, then the ds4-compatibility signal (a
-  // compatible GGUF prefers ds4 when it's available and the mode fits), then
-  // the identity rule (`Auto` → GGUF binds llama.cpp; a `deepseek4` GGUF still
-  // runs there as fallback on a b9840+ llama.cpp).
-  let sel_ctx = crate::backend::SelectionContext {
-    ds4_compatible,
-    ds4_available: ctx.ds4_available(),
-    // ds4-server serves chat/completions, not embeddings/rerank — a mode
-    // mismatch routes to llama.cpp (a routing input, not an error).
-    ds4_mode_ok: mode == LaunchMode::Chat,
-  };
-  let inference_backend =
-    crate::backend::resolve_backend_for_launch(&identity, launch_params.backend, &sel_ctx);
+  // honors the per-model override, then the header-level routing signal (the
+  // backend that auto-claimed the header wins when it is available and serves
+  // the mode), then the identity rule as fallback. Registry-driven — this site
+  // names no backend.
+  let inference_backend = crate::backend::resolve_backend_for_launch(
+    &identity,
+    launch_params.backend.clone(),
+    routed_backend.as_deref(),
+    mode,
+    ctx,
+  );
   let resolved_backend_id = crate::backend::Backend::id(&inference_backend).to_string();
 
   // The model's last successful launch params + the backend it resolved to.
@@ -674,138 +708,106 @@ pub(crate) async fn compose_and_spawn(
     }
   }
 
-  // ds4 auto-streaming (D-admission): ds4 holds the full model plus a
-  // cached-expert/KV working set the deepseek4 demand model can't see (~1.25×
-  // weights in practice). When that won't fit, a non-streaming launch OOM-kills
-  // mid-load — ds4-server marks itself the first OOM victim (oom_score_adj=1000).
-  // So on a host where residency won't fit, auto-enable `ssd_streaming` before
-  // `prepare_launch` composes argv, letting the launch succeed from a bounded
-  // disk cache. Skipped when the user set the knob either way (explicit wins).
-  let mut ssd_streaming_auto = false;
-  if inference_backend.id() == crate::backend::ds4::DS4_BACKEND_ID
-    && !matches!(
-      launch_params.backend_knobs.get("ssd_streaming"),
-      Some(crate::config::KnobValue::Set(_))
-    )
-  {
-    if let Some(host_slot) = ctx.host_metrics.as_ref() {
-      let snapshot = host_slot.read().await.clone();
-      if crate::launch::admission::is_sampled(&snapshot) {
-        let free = crate::launch::admission::effective_free_bytes(&snapshot);
-        if ds4_should_auto_stream(total_weight_bytes, free) {
-          launch_params.backend_knobs.insert(
-            "ssd_streaming".to_string(),
-            crate::config::KnobValue::Set("true".to_string()),
-          );
-          ssd_streaming_auto = true;
-          let gib = crate::init::detection::fmt_gib;
-          let msg = format!(
-            "ds4 needs ~{} resident but only {} is free — enabled SSD streaming to launch \
-             from disk (slower). Set `ssd_streaming: false` to force full residency.",
-            gib(ds4_resident_estimate(total_weight_bytes)),
-            gib(free)
-          );
-          log::warn!("{msg}");
-          warnings.push(msg);
-        }
-      }
-    }
+  // Native-knob auto-resolution: a backend resolves its own **Auto** native
+  // knobs from live host context (e.g. enabling disk streaming when residency
+  // won't fit), mutating `backend_knobs` in place — the uniform knob
+  // auto-behavior, not a special case. A user on/off is left untouched.
+  // Registry-driven, so this path names no backend or knob.
+  let native_resolution = inference_backend
+    .resolve_native_knobs(ctx, &mut launch_params, total_weight_bytes)
+    .await;
+  for msg in &native_resolution.warnings {
+    log::warn!("{msg}");
   }
+  warnings.extend(native_resolution.warnings);
+  let auto_set_knobs = native_resolution.auto_set;
+  // Whether this launch skips the memory admission gate (streams from disk).
+  let bypasses_admission = inference_backend.bypasses_admission(&launch_params);
 
-  // Per-backend binary pick for the spawn. A managed-multiplexer backend
-  // (Lemonade) supervises its own umbrella executable on its own loopback
-  // port; ds4 spawns `ds4-server` (not `llama-server`) on the reserved pool
-  // port; llama.cpp uses the device-owning binary chosen above. Byte-identical
-  // to the prior llama.cpp / Lemonade paths — the ds4 arm is purely additive.
-  let (plan_binary, plan_port) =
-    if inference_backend.lifecycle() == crate::backend::Lifecycle::ManagedMultiplexer {
-      match crate::backend::lemonade::resolve_lemond_binary(&ctx.lemonade) {
-        Some(bin) => (bin, ctx.lemonade.port),
-        None => {
-          ctx.supervisors.release_reserved_port(port).await;
-          return Err(ErrorObject::new(
-            ErrorCode::InvalidParams,
-            "lemonade backend selected but no `lemond` binary found; set `lemonade.binary` \
-             or put `lemond` on PATH (see docs/lemonade-setup.md)"
-              .to_string(),
-          ));
-        }
-      }
-    } else if inference_backend.id() == crate::backend::ds4::DS4_BACKEND_ID {
-      match crate::backend::ds4::resolve_ds4_binary(ctx.ds4.binary.as_deref()) {
-        Some(bin) => (bin, port),
-        None => {
-          ctx.supervisors.release_reserved_port(port).await;
-          return Err(ErrorObject::new(
-            ErrorCode::InvalidParams,
-            "ds4 backend selected but no `ds4-server` binary found; set `ds4.binary` \
-             or put `ds4-server` on PATH (see docs/usage.md)"
-              .to_string(),
-          ));
-        }
-      }
-    } else {
-      (launch_binary, port)
-    };
+  // Hand the launch to the resolved backend: it decides *how* to start — a
+  // supervised child process (the default `start`) or a delegation to its
+  // managed-multiplexer umbrella — so this path never branches on lifecycle and
+  // names no backend.
+  let exec = LaunchExec {
+    params: launch_params,
+    reserved_port: port,
+    default_binary: launch_binary,
+    probe: scaled_probe,
+    id,
+    identity,
+    log_path,
+    mode,
+    origin,
+    arch,
+    native_ctx,
+    fit_ctx_floor: env.fit_ctx_floor,
+    strict_fit: env.strict_fit,
+    total_weight_bytes,
+    user_knobs,
+    auto_set_knobs,
+    bypasses_admission,
+    warnings,
+    resolved_backend_id,
+  };
+  inference_backend.start(ctx, exec).await
+}
 
-  let launch_spec =
-    match inference_backend.prepare_launch(&launch_params, plan_port, plan_binary, scaled_probe) {
-      LaunchPlan::SpawnProcess(spec) => spec,
-      LaunchPlan::DelegateToManager(spec) => {
-        // Managed-multiplexer (Lemonade): ensure the shared umbrella is up on
-        // `plan_port` and delegate the model to it, rather than spawning a
-        // per-model child. The umbrella binds its own configured port, not the
-        // launch-pool reservation, so release `port` first (holding it would
-        // leak a pool slot). Routing of a Lemonade model's requests through the
-        // proxy is handled separately (catalog-source-based; see
-        // `proxy::route`).
-        ctx.supervisors.release_reserved_port(port).await;
-        return start_delegated_lemonade(
-          ctx,
-          spec,
-          plan_port,
-          id,
-          identity,
-          log_path,
-          launch_params,
-        )
-        .await;
-      }
-    };
+/// Execute a **process-per-model** launch: the pre-spawn memory admission gate,
+/// the supervised spawn, the persisted running snapshot, and the background
+/// last-params + admission-settle recorders. This is the backend-agnostic body
+/// of a process backend's [`crate::backend::Backend::start`] — a managed
+/// multiplexer overrides `start` and never reaches here. `spec` is the argv the
+/// backend composed. Consumes `exec` (destructured back into the original local
+/// names, so this body is a verbatim lift of the old inline spawn path).
+pub(crate) async fn spawn_supervised(
+  ctx: &MethodContext,
+  exec: LaunchExec,
+  spec: crate::backend::ProcessLaunchSpec,
+) -> Result<StartedLaunch, ErrorObject> {
+  let LaunchExec {
+    mut warnings,
+    params: launch_params,
+    reserved_port: port,
+    probe: scaled_probe,
+    id,
+    identity,
+    log_path,
+    mode,
+    origin,
+    arch,
+    native_ctx,
+    fit_ctx_floor,
+    strict_fit,
+    total_weight_bytes,
+    user_knobs,
+    auto_set_knobs,
+    bypasses_admission,
+    resolved_backend_id,
+    default_binary: _,
+  } = exec;
+  let launch_spec = spec;
 
-  // Pre-spawn admission: project this launch's demand floor and
-  // refuse *before* spawn if it won't fit the sampled budget minus the
-  // bytes other in-flight launches already reserved. This is the safety
-  // net `--fit` can't provide on UMA (its free reading conflates GTT
-  // with system RAM). Keyed by the reserved `port` (unique per in-flight
-  // launch); released when the child settles or on any failure below.
-  // Best-effort: skipped entirely when there is no host-metrics sample
-  // yet (the `port` reservation still gates the pool). Only the
-  // process-spawn path reaches here — Lemonade's umbrella returned
-  // above.
-  // ds4's `ssd_streaming` native knob (D-admission): on-disk bytes ≠ memory
-  // demand when weights stream from disk, so the hard OOM refusal is skipped
-  // for that launch (logged + surfaced). Keys on the native knob only — an
-  // extras-spelled `--ssd-streaming` still hits the gate (documented).
-  let ssd_streaming = matches!(
-    launch_params.backend_knobs.get("ssd_streaming"),
-    Some(crate::config::KnobValue::Set(v)) if v == "true"
-  );
+  // Pre-spawn admission: project this launch's demand floor and refuse *before*
+  // spawn if it won't fit the sampled budget minus the bytes other in-flight
+  // launches already reserved. This is the safety net `--fit` can't provide on
+  // UMA (its free reading conflates GTT with system RAM). Keyed by the reserved
+  // `port`; released when the child settles or on any failure below. Best-effort:
+  // skipped when there is no host-metrics sample yet. A backend that streams from
+  // disk (`bypasses_admission`) skips the hard OOM refusal — logged + surfaced.
+  // The bypass note is suppressed when the daemon auto-resolved the streaming
+  // knob (that path already warned, in memory terms).
+  let bypass_note_suppressed = !auto_set_knobs.is_empty();
   let mut admitted = false;
   if identity.as_gguf().is_some() {
     if let Some(host_slot) = ctx.host_metrics.as_ref() {
       let snapshot = host_slot.read().await.clone();
       if crate::launch::admission::is_sampled(&snapshot) {
-        let effective_ctx = launch_params.ctx.unwrap_or(env.fit_ctx_floor);
+        let effective_ctx = launch_params.ctx.unwrap_or(fit_ctx_floor);
         let free = crate::launch::admission::effective_free_bytes(&snapshot);
         let gpu_backend = snapshot.gpu_backend.clone();
         let model_path = launch_params.model_path.clone();
         let knobs = launch_params.knobs.clone();
         let arch_owned = arch.clone();
-        // Shard-aware weight total (sums every split sibling); the
-        // per-shard `weights_bytes(header)` would only see the primary
-        // shard. Computed above for probe scaling — reused here so a
-        // split GGUF is not under-projected and wrongly admitted.
         let weights_total = total_weight_bytes;
         let demand = tokio::task::spawn_blocking(move || {
           let header = read_gguf_header(&model_path, HeaderReadOptions::default())
@@ -825,14 +827,10 @@ pub(crate) async fn compose_and_spawn(
         .flatten();
         if let Some(demand) = demand {
           if let Err(refusal) = ctx.admission.try_admit(u64::from(port), demand, free) {
-            if ssd_streaming {
-              // Bypass the OOM refusal: streaming weights don't need full
-              // residency. Not admitted (no ledger reservation held); spawn
-              // proceeds. Skip the note when streaming was auto-enabled just
-              // above — that path already explained why, in memory terms.
-              if !ssd_streaming_auto {
+            if bypasses_admission {
+              if !bypass_note_suppressed {
                 let msg = format!(
-                  "ssd_streaming is set — skipped the memory admission gate ({})",
+                  "this launch bypasses the memory admission gate (streaming from disk) — {}",
                   format_admission_refusal(&refusal)
                 );
                 log::warn!("{msg}");
@@ -854,16 +852,13 @@ pub(crate) async fn compose_and_spawn(
     }
   }
 
-  // Strict-fit ctx-clamp gate: only meaningful when ctx is
-  // delegated to `--fit` (`ctx == None`) and we know the trained window
-  // to compare its resolution against. A pinned ctx or unknown window
-  // leaves the gate off. `strict_fit` then decides whether a floor-pinned
-  // resolution withholds Ready (refuse) or just flags a soft notice.
+  // Strict-fit ctx-clamp gate: only meaningful when ctx is delegated to `--fit`
+  // (`ctx == None`) and we know the trained window to compare against.
   let fit_gate = (launch_params.ctx.is_none() && native_ctx.is_some()).then(|| {
     crate::daemon::supervisor::FitGate {
-      floor: env.fit_ctx_floor,
+      floor: fit_ctx_floor,
       native: native_ctx.unwrap_or(0),
-      strict: env.strict_fit,
+      strict: strict_fit,
     }
   });
   let spawn_result = supervisor_spawn(ManagedSpawn {
@@ -880,7 +875,6 @@ pub(crate) async fn compose_and_spawn(
   let model = match spawn_result {
     Ok(m) => m,
     Err(e) => {
-      // Free the reserved port + admission hold so a retry can re-use them.
       ctx.supervisors.release_reserved_port(port).await;
       if admitted {
         ctx.admission.release(u64::from(port));
@@ -897,13 +891,10 @@ pub(crate) async fn compose_and_spawn(
     .supervisors
     .insert(launch_id.clone(), model.clone())
     .await;
-  // Live supervisor now owns the port; drop the in-flight reservation.
   ctx.supervisors.release_reserved_port(port).await;
 
-  // Persist running snapshot. Retain by `(id, port)` so the same
-  // GGUF launched twice against different ports persists both
-  // snapshots — the orphan sweep can then re-adopt either one on
-  // daemon restart instead of silently dropping the older.
+  // Persist running snapshot, retained by `(id, port)` so the same GGUF launched
+  // twice on different ports persists both (the orphan sweep re-adopts either).
   let pid = model.pid().await.unwrap_or(0) as i32;
   let started_at = SystemTime::now()
     .duration_since(UNIX_EPOCH)
@@ -918,8 +909,6 @@ pub(crate) async fn compose_and_spawn(
         pid,
         port,
         started_at,
-        // Process launches key their L# off the live supervisor map; the
-        // snapshot doesn't carry it (stays `None`, omitted from `state.json`).
         launch_id: None,
         params: launch_params.clone(),
         actuals: Default::default(),
@@ -928,54 +917,25 @@ pub(crate) async fn compose_and_spawn(
     })
     .await;
 
-  // Background task: when the supervisor reaches Ready, stamp
-  // last_params — only updated on a *successful* Loading → Ready
-  // transition. We poll because ManagedModel doesn't expose a
-  // transition channel yet.
-  //
-  // Persist the *user-supplied* knob deltas, not the full resolved set
-  // — so source chips in the picker stay meaningful (a knob the user
-  // never touched keeps re-resolving from yaml / built-in / model
-  // default instead of being frozen as `(last used)`). "Remembered
-  // values win" depends on this: only what the user actually set
-  // (including an explicit `Auto` sentinel) is remembered, so the
-  // resolver re-derives the rest next launch. The resolved top-level
-  // `ctx`/`reasoning` and the force-copied `device` are dropped too —
-  // they were resolver output, not user intent, and re-pinning them
-  // would freeze a value the user never chose.
+  // Persist the *user-supplied* knob deltas on the Loading → Ready transition
+  // (source chips stay meaningful; resolver output isn't frozen).
   let mut persist_params = launch_params.clone();
   persist_params.knobs = user_knobs;
   persist_params.ctx = None;
   persist_params.reasoning = false;
   persist_params.backend_knobs =
-    backend_knobs_for_persist(&launch_params.backend_knobs, ssd_streaming_auto);
-  // `jinja` is config-derived (set from `Config.jinja` after resolution)
-  // and re-read from config on every launch — `resolve_layered` never
-  // consults the persisted value. So the clone's resolved value is kept
-  // as-is: it makes the `last-params` view report what this launch
-  // actually used (honest for `jinja: false`) without ever freezing a
-  // value, since the next launch overwrites it from the live config.
+    backend_knobs_for_persist(&launch_params.backend_knobs, &auto_set_knobs);
   spawn_last_params_recorder(
     ctx.state.clone(),
     model.clone(),
     identity.clone(),
     persist_params,
-    // Tag the recorded row with the backend this launch resolved to
-    // (D-contamination) so a future cross-backend launch of the same model
-    // skips the LastUsed layer + extras inheritance.
     resolved_backend_id,
-    // Slow HIP/Metal loads routinely exceed the old fixed 180 s wall
-    // clock; key the recorder's deadline off the same size-scaled probe
-    // budget the supervisor uses (base +2 h cap) so a slow load still
-    // reaches Ready *and* gets its params recorded — otherwise the next
-    // launch finds no remembered value and wrongly seeds Auto.
     scaled_probe.timeout,
     ctx.shutdown.clone(),
   );
 
-  // Settle the admission reservation when the child leaves Loading
-  // (Ready: real allocation is now visible to the sampler; Error /
-  // Stopped: the slot is freed). Keyed by `port`; idempotent.
+  // Settle the admission reservation when the child leaves Loading.
   if admitted {
     spawn_admission_settle(
       ctx.admission.clone(),
@@ -996,6 +956,72 @@ pub(crate) async fn compose_and_spawn(
   })
 }
 
+/// Stop a **supervised child process** launch: SIGTERM (bounded by `grace_secs`),
+/// deregister it, and drop its running snapshot. The backend-agnostic body of a
+/// process backend's [`crate::backend::Backend::stop`] (the default) — the
+/// counterpart to [`spawn_supervised`]. A managed multiplexer overrides `stop`
+/// and calls this only to tear its own umbrella process down. Returns the
+/// `{launch_id, state}` stop response, or `InvalidParams` for an unknown id.
+pub(crate) async fn stop_supervised(
+  ctx: &MethodContext,
+  launch_id: &LaunchId,
+  grace_secs: u64,
+) -> Result<serde_json::Value, ErrorObject> {
+  let model = ctx.supervisors.get(launch_id).await.ok_or_else(|| {
+    ErrorObject::new(
+      ErrorCode::InvalidParams,
+      format!("unknown launch_id: {}", launch_id.as_str()),
+    )
+  })?;
+  let stopped_port = model.port();
+  let final_state = model.stop(Duration::from_secs(grace_secs)).await;
+  ctx.supervisors.remove(launch_id).await;
+  // Drop the running snapshot keyed by `(id, port)` so a second launch of the
+  // same GGUF on a different port keeps its row.
+  let stopped_id: ModelIdentity = model.id().clone().into();
+  ctx
+    .state
+    .mutate(move |s| {
+      s.running
+        .retain(|r| !(r.id == stopped_id && r.port == stopped_port));
+    })
+    .await;
+  Ok(serde_json::json!({
+    "launch_id": launch_id,
+    "state": crate::ipc::methods::flatten_state(&final_state),
+  }))
+}
+
+/// The backend that owns a running launch: an umbrella's owner (via
+/// [`crate::backend::umbrella_owner`]), else the resolved backend recorded on
+/// the launch's running snapshot, else the default backend. Lets the stop path
+/// hand a launch to its backend without the caller knowing whether it is a
+/// supervised child or a delegated model — the registry resolves the owner, the
+/// backend decides *how* to stop.
+pub(crate) async fn backend_for_launch(
+  ctx: &MethodContext,
+  launch_id: &LaunchId,
+) -> crate::backend::Backends {
+  if let Some(owner) = crate::backend::umbrella_owner(launch_id) {
+    return owner;
+  }
+  let backend_id = ctx
+    .state
+    .snapshot()
+    .await
+    .running
+    .into_iter()
+    .find(|r| r.launch_id.as_ref() == Some(launch_id))
+    .map(|r| r.resolved_backend);
+  match backend_id {
+    Some(id) => crate::backend::Backends::all()
+      .into_iter()
+      .find(|b| b.id() == id)
+      .unwrap_or_else(crate::backend::default_backend),
+    None => crate::backend::default_backend(),
+  }
+}
+
 /// Whether `field` holds a concrete (`Set`) value in `knobs` — the view the
 /// dropped-knob warning needs (an `Auto` / unset knob emits nothing, so it is
 /// not "dropped" in any user-visible sense).
@@ -1009,246 +1035,21 @@ fn field_is_set(
     || knobs.slot(field).as_str().is_some()
 }
 
-/// Start a model on a managed-multiplexer backend (Lemonade): ensure the
-/// shared `lemond` umbrella is supervised + ready, then preload the model
-/// through its API. Returns a [`StartedLaunch`] anchored on the umbrella
-/// (the supervised process), so status + stop see one umbrella for all
-/// Lemonade models. Routing of inference is handled by the proxy
-/// (catalog-source-based; see [`crate::proxy::route`]).
-async fn start_delegated_lemonade(
-  ctx: &MethodContext,
-  spec: crate::backend::ManagerLaunchSpec,
-  umbrella_port: u16,
-  id: ModelId,
-  identity: ModelIdentity,
-  log_path: PathBuf,
-  params: LaunchParams,
-) -> Result<StartedLaunch, ErrorObject> {
-  use crate::backend::lemonade::{ensure_umbrella, LemonadeClient};
-
-  // The preload must not POST `/api/v1/load` until the umbrella's HTTP
-  // server is actually accepting connections; bound the readiness wait by
-  // the umbrella's own probe budget (its probe resolves to Ready/Error
-  // first, so this is only a backstop for an umbrella that never settles).
-  let ready_timeout = spec.umbrella.probe.timeout + Duration::from_secs(2);
-
-  let umbrella = match ensure_umbrella(
-    &ctx.supervisors,
-    umbrella_port,
-    spec.umbrella,
-    log_path.clone(),
-  )
-  .await
-  {
-    Ok(m) => m,
-    Err(e) => {
-      return Err(ErrorObject::new(
-        ErrorCode::InternalError,
-        format!("lemonade umbrella failed to start: {e}"),
-      ));
-    }
-  };
-  // An already-running umbrella keeps its own port; trust the handle over the
-  // requested `umbrella_port` so a reused umbrella routes to the right place.
-  let serving_port = umbrella.port();
-
-  // One id source for every backend: draw the delegated model's `L#` from the
-  // same registry counter the process path uses (`next_id`), so a Lemonade row
-  // reads `L3` like any llama.cpp / ds4 launch — no per-backend id scheme. The
-  // model name stays the umbrella's internal load/unload key; the L# is the
-  // user-facing handle, stamped on the snapshot below (delegated models have no
-  // supervisor to hold it) and reverse-mapped to the name on stop.
-  let launch_id = ctx.supervisors.next_id();
-
-  // Preload the model so an explicit launch makes it resident (chat would
-  // autoload too), forwarding the launch params lemond honors: `ctx_size`
-  // plus the free-form extras as the recipe-scoped `*_args` string.
-  //
-  // The load runs as a background task: a cold load can take lemond's
-  // full 120 s budget, which is far past the CLI's IPC reply timeout —
-  // awaiting it here meant the client hung up and hyper cancelled this
-  // handler mid-preload, silently dropping the launch. The task records
-  // its outcome in the registry's delegated-state map (`Loading` →
-  // `Ready` / `Error{cause}`), which is what `status` reports for the
-  // row — so a model lemond can't load shows `error` with lemond's
-  // message instead of a phantom `ready`.
-  ctx
-    .supervisors
-    .set_delegated_state(&spec.model.name, ManagedState::Loading)
-    .await;
-  {
-    let registry = ctx.supervisors.clone();
-    let name = spec.model.name.clone();
-    let params = params.clone();
-    let umbrella = umbrella.clone();
-    // Record `last_params` on preload success so a Lemonade model shows up in
-    // the TUI's `↺ Recent` section like any other launch. Keyed on the synthetic
-    // GGUF id (path = `lemonade://<name>`) because `last_params_list` only emits
-    // `model_path` for the GGUF shape — the same synthetic-id convention this
-    // path already uses for its running snapshot.
-    let state = ctx.state.clone();
-    let last_params_id = ModelIdentity::Gguf(id.clone());
-    tokio::spawn(async move {
-      // `ensure_umbrella` returns at `Loading`; the load POST would race
-      // the umbrella's bind and hit connection-refused on a cold start.
-      // Wait for `/live` to pass (Ready) before talking to it.
-      if let Err(cause) = umbrella.wait_until_ready(ready_timeout).await {
-        let cause = format!("lemonade umbrella not ready: {cause}");
-        log::warn!("lemonade: preload of `{name}` aborted: {cause}");
-        registry
-          .set_delegated_state(&name, ManagedState::Error { cause })
-          .await;
-        return;
-      }
-      let outcome = match LemonadeClient::new(serving_port) {
-        Ok(client) => {
-          let opts = lemonade_load_options(&client, &name, &params).await;
-          client.load_with(&name, &opts).await
-        }
-        Err(e) => Err(e),
-      };
-      match outcome {
-        Ok(()) => {
-          registry
-            .set_delegated_state(&name, ManagedState::Ready)
-            .await;
-          state
-            .mutate(|s| {
-              s.upsert_last_params(
-                last_params_id.clone(),
-                params.clone(),
-                crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
-              )
-            })
-            .await;
-        }
-        Err(e) => {
-          log::warn!("lemonade: preload of `{name}` failed: {e}");
-          registry
-            .set_delegated_state(
-              &name,
-              ManagedState::Error {
-                cause: e.to_string(),
-              },
-            )
-            .await;
-        }
-      }
-    });
-  }
-
-  // Persist a running snapshot at the umbrella port for status visibility.
-  let pid = umbrella.pid().await.unwrap_or(0) as i32;
-  let started_at = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .map(|d| d.as_secs())
-    .unwrap_or_default();
-  ctx
-    .state
-    .mutate(|s| {
-      s.running
-        .retain(|r| !(r.id == identity && r.port == serving_port));
-      s.running.push(RunningSnapshot {
-        id: identity.clone(),
-        pid,
-        port: serving_port,
-        started_at,
-        launch_id: Some(launch_id.clone()),
-        params: params.clone(),
-        actuals: Default::default(),
-        resolved_backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
-      });
-    })
-    .await;
-
-  Ok(StartedLaunch {
-    // The model's own `L#` (not the umbrella's id) — the handle the client
-    // shows and later stops by.
-    launch_id,
-    model_id: id,
-    port: serving_port,
-    model: umbrella,
-    log_path,
-    // Lemonade's delegated path carries no ds4/deepseek4 advisories.
-    warnings: Vec::new(),
-  })
-}
-
-/// Project the launch params onto lemond's load-option surface: `ctx`
-/// (when the user set one) becomes `ctx_size`; non-empty extras become
-/// the recipe-scoped args string (`llamacpp_args` / `whispercpp_args` /
-/// `flm_args` — lemond names the field after the model's recipe, read
-/// from the umbrella's own model list). Extras are dropped with a
-/// warning when the recipe can't be resolved — guessing the field would
-/// silently feed flags to the wrong engine.
-async fn lemonade_load_options(
-  client: &crate::backend::lemonade::LemonadeClient,
-  name: &str,
-  params: &LaunchParams,
-) -> crate::backend::lemonade::LoadOptions {
-  let recipe_args = if params.extras.is_empty() {
-    None
-  } else {
-    let joined = params
-      .extras
-      .iter()
-      .map(|s| s.to_string_lossy())
-      .collect::<Vec<_>>()
-      .join(" ");
-    let recipe = client
-      .list_model_entries()
-      .await
-      .ok()
-      .and_then(|entries| entries.into_iter().find(|e| e.id == name))
-      .and_then(|e| e.recipe);
-    match recipe {
-      Some(recipe) => Some((format!("{recipe}_args"), joined)),
-      None => {
-        log::warn!(
-          "lemonade: dropping extras for `{name}` — could not resolve its recipe \
-           from the umbrella's model list"
-        );
-        None
-      }
-    }
-  };
-  crate::backend::lemonade::LoadOptions {
-    ctx_size: params.ctx,
-    recipe_args,
-  }
-}
-
-/// ds4's resident working set estimate: ~1.25× raw weights, covering the
-/// cached-expert pool + KV + runtime the deepseek4 demand model can't see.
-/// Its own auto budget targets ~99 GiB for an 80 GiB Flash quant, which this
-/// tracks. Saturating so a pathological weight total can't overflow.
-fn ds4_resident_estimate(weights_total: u64) -> u64 {
-  weights_total.saturating_add(weights_total / 4)
-}
-
-/// Whether a ds4 launch should auto-enable SSD streaming: its resident
-/// estimate exceeds the effective free memory, so a full-residency spawn
-/// would OOM-kill mid-load (ds4-server marks itself the first OOM victim).
-/// Pure so the memory decision is unit-testable without a live host sampler.
-fn ds4_should_auto_stream(weights_total: u64, free: u64) -> bool {
-  ds4_resident_estimate(weights_total) > free
-}
-
 /// The `backend_knobs` to persist into `last_params`: the resolved set, minus
-/// the *auto-enabled* `ssd_streaming`. That knob is a one-time response to the
-/// launch's current memory pressure, not a user opt-in — freezing it into
-/// `last_params` would make the next no-selection relaunch inherit it as
-/// explicit (skipping the pressure re-evaluation *and* the OOM admission gate)
-/// even after RAM frees up. A user-set / inherited `ssd_streaming` (i.e. auto
-/// did not fire) is preserved. Pure so the invariant is unit-testable.
+/// any knob the backend auto-resolved this launch (`auto_set`). An auto-resolved
+/// knob is a one-time response to live conditions, not a user opt-in — freezing
+/// it would make the next no-selection relaunch inherit it as explicit even after
+/// conditions change. A user-set / inherited knob is preserved. Pure so the
+/// invariant is unit-testable.
 fn backend_knobs_for_persist(
   resolved: &std::collections::BTreeMap<String, KnobValue<String>>,
-  ssd_streaming_auto: bool,
+  auto_set: &std::collections::BTreeSet<String>,
 ) -> std::collections::BTreeMap<String, KnobValue<String>> {
+  // Drop any knob the daemon auto-resolved this launch (`auto_set`): those
+  // re-resolve from live conditions next launch, so persisting them would freeze
+  // a value the user never chose. Generic — the key set comes from the backend.
   let mut out = resolved.clone();
-  if ssd_streaming_auto {
-    out.remove("ssd_streaming");
-  }
+  out.retain(|k, _| !auto_set.contains(k));
   out
 }
 
@@ -1479,46 +1280,34 @@ mod tests {
   use crate::daemon::registry::SupervisorRegistry;
 
   #[test]
-  fn ds4_auto_stream_triggers_only_when_residency_exceeds_free() {
-    let gib = |g: u64| g * 1024 * 1024 * 1024;
-    // 80 GiB Flash weights → ~100 GiB resident estimate.
-    assert_eq!(ds4_resident_estimate(gib(80)), gib(100));
-    // Won't fit: 100 GiB resident > 95 GiB free → stream (the Strix Halo case).
-    assert!(ds4_should_auto_stream(gib(80), gib(95)));
-    // Fits with headroom: 100 GiB resident < 200 GiB free → full residency.
-    assert!(!ds4_should_auto_stream(gib(80), gib(200)));
-    // Exact boundary is not a shortfall (estimate == free → no stream).
-    assert!(!ds4_should_auto_stream(gib(80), gib(100)));
-    // A pathological weight total saturates instead of overflowing.
-    assert!(ds4_should_auto_stream(u64::MAX, gib(100)));
-  }
-
-  #[test]
-  fn auto_ssd_streaming_is_not_persisted_but_explicit_and_others_are() {
+  fn auto_resolved_knobs_are_stripped_from_persisted_last_params() {
     use crate::config::KnobValue;
     let mut resolved = std::collections::BTreeMap::new();
-    resolved.insert("power".to_string(), KnobValue::Set("80".to_string()));
-    resolved.insert(
-      "ssd_streaming".to_string(),
-      KnobValue::Set("true".to_string()),
-    );
+    resolved.insert("user_knob".to_string(), KnobValue::Set("80".to_string()));
+    resolved.insert("auto_knob".to_string(), KnobValue::Set("true".to_string()));
 
-    // Auto-enabled → the `ssd_streaming` key is stripped from what we persist,
-    // so a later relaunch re-evaluates memory pressure and the OOM gate isn't
-    // silently disabled; unrelated native knobs survive.
-    let auto = backend_knobs_for_persist(&resolved, true);
+    // A knob the backend auto-resolved this launch is stripped from what we
+    // persist, so a later no-selection relaunch re-evaluates from live conditions
+    // instead of inheriting a value the user never chose; unrelated (user-set /
+    // inherited) knobs survive verbatim.
+    let auto_set: std::collections::BTreeSet<String> =
+      ["auto_knob".to_string()].into_iter().collect();
+    let persisted = backend_knobs_for_persist(&resolved, &auto_set);
     assert!(
-      !auto.contains_key("ssd_streaming"),
-      "auto-enabled ssd_streaming must not be frozen into last_params"
+      !persisted.contains_key("auto_knob"),
+      "an auto-resolved knob must not be frozen into last_params"
     );
-    assert_eq!(auto.get("power"), Some(&KnobValue::Set("80".to_string())));
-
-    // User-set / inherited (auto did not fire) → preserved verbatim.
-    let explicit = backend_knobs_for_persist(&resolved, false);
     assert_eq!(
-      explicit.get("ssd_streaming"),
+      persisted.get("user_knob"),
+      Some(&KnobValue::Set("80".to_string()))
+    );
+
+    // Nothing auto-resolved → every knob persists verbatim.
+    let none_auto = backend_knobs_for_persist(&resolved, &std::collections::BTreeSet::new());
+    assert_eq!(
+      none_auto.get("auto_knob"),
       Some(&KnobValue::Set("true".to_string())),
-      "a user-set ssd_streaming must persist"
+      "with no auto-set keys, all knobs persist"
     );
   }
 
@@ -1612,7 +1401,7 @@ mod tests {
       model_path,
       // Force the managed-multiplexer seam: an explicit Lemonade override
       // outranks the GGUF identity rule.
-      backend: Some(BackendChoice::Lemonade),
+      backend: Some(BackendChoice::Explicit("lemonade".into())),
       ..Default::default()
     };
 

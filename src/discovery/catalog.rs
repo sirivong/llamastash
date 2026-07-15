@@ -9,7 +9,7 @@
 //! Clone is cheap (`Arc` under the hood) so handler code can hand
 //! catalogs around without worrying about lifetimes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -71,25 +71,14 @@ impl ModelCatalog {
   /// Serialise the catalog into the JSON shape `list_models` returns.
   /// Pulled out of the dispatcher so it can be unit-tested with
   /// hand-built fixtures.
-  pub async fn to_list_response(&self, ds4_available: bool) -> Value {
+  pub async fn to_list_response(&self, available_routed: &BTreeSet<String>) -> Value {
     let snap = self.snapshot().await;
     let rows: Vec<Value> = snap
       .iter()
-      .map(|m| model_row(m, ds4_badge_for(m, ds4_available)))
+      .map(|m| model_row(m, available_routed))
       .collect();
     json!({ "models": rows })
   }
-}
-
-/// Whether the `backend` badge for `m` should read `ds4` (R14 honest badge):
-/// ds4 is available **and** the file passed the ds4 quant-contract predicate.
-/// The verdict is precomputed at scan time (`DiscoveredModel::ds4_compatible`)
-/// from the same header parse that fills `metadata`, so this hot-path helper
-/// (called per row on every `list_models`) reads a boolean instead of
-/// re-reading tensor info. It's the *same* predicate the daemon routes on, so
-/// a row badges `ds4` exactly when a plain launch would.
-pub(crate) fn ds4_badge_for(m: &DiscoveredModel, ds4_available: bool) -> bool {
-  ds4_available && m.ds4_compatible
 }
 
 /// JSON projection of a single [`DiscoveredModel`] for the
@@ -100,16 +89,19 @@ pub(crate) fn ds4_badge_for(m: &DiscoveredModel, ds4_available: bool) -> bool {
 /// is still emitted for backwards compatibility with any caller
 /// that pinned against the original name; a future v2 release
 /// will drop it.
-fn model_row(m: &DiscoveredModel, ds4_badge: bool) -> Value {
+fn model_row(m: &DiscoveredModel, available_routed: &BTreeSet<String>) -> Value {
   json!({
     "path": m.path,
     "parent": m.parent,
     "source": m.source.label(),
-    // Backend that serves this row (R14 badge / R13 routing, R13-amended for
-    // ds4). GGUF rows report "llamacpp"; a backend-registry source reports its
-    // own backend id; a ds4-compatible GGUF reports "ds4" when ds4 is
-    // available (the honest badge — it routes there on a plain launch).
-    "backend": if ds4_badge { "ds4" } else { m.source.backend_id() },
+    // Backend that serves this row (R14 badge / R13 routing): the model's
+    // routed backend when it is in the available set, else the source's default
+    // backend. Reads the precomputed routing verdict, so this names no backend.
+    "backend": m
+      .routed_backend
+      .as_deref()
+      .filter(|rb| available_routed.contains(*rb))
+      .unwrap_or_else(|| m.source.backend_id()),
     "split_siblings": m.split_siblings,
     "metadata": m.metadata.as_ref().map(|md| {
       json!({
@@ -177,7 +169,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }
   }
 
@@ -186,12 +178,20 @@ mod tests {
     // Disk (GGUF) rows report the direct llama.cpp backend — the R14 badge /
     // R13 routing tag. GGUF JSON is otherwise unchanged (additive field). A
     // backend-registry source adds its own tag.
-    let gguf = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath), false);
+    let none = BTreeSet::new();
+    let gguf = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath), &none);
     assert_eq!(gguf["backend"], "llamacpp");
     assert_eq!(gguf["path"], "/m/a.gguf");
-    // With the ds4 badge on, the same row reports ds4 (R14 honest badge).
-    let ds4 = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath), true);
-    assert_eq!(ds4["backend"], "ds4");
+    // A model that auto-routes to some backend reports *that* backend when it is
+    // in the available set — the badge just echoes `routed_backend`, so it is
+    // backend-agnostic (a synthetic id proves the mechanism, not a specific
+    // engine).
+    let mut routed = fake_model("/m/a.gguf", ModelSource::UserPath);
+    routed.routed_backend = Some("some-engine".to_string());
+    let available = BTreeSet::from(["some-engine".to_string()]);
+    assert_eq!(model_row(&routed, &available)["backend"], "some-engine");
+    // ...but not when that backend is unavailable — falls back to the source.
+    assert_eq!(model_row(&routed, &none)["backend"], "llamacpp");
   }
 
   #[tokio::test]
@@ -263,7 +263,7 @@ mod tests {
     }
     cat.upsert(m).await;
 
-    let v = cat.to_list_response(false).await;
+    let v = cat.to_list_response(&BTreeSet::new()).await;
     let models = v.get("models").and_then(Value::as_array).expect("array");
     assert_eq!(models.len(), 1);
     let row = &models[0];
@@ -292,10 +292,10 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     };
     cat.upsert(m).await;
-    let v = cat.to_list_response(false).await;
+    let v = cat.to_list_response(&BTreeSet::new()).await;
     let row = &v["models"][0];
     assert!(row["metadata"].is_null());
     assert_eq!(row["parse_error"], json!("BadMagic"));
@@ -317,7 +317,7 @@ mod tests {
     });
     cat.upsert(vis).await;
 
-    let v = cat.to_list_response(false).await;
+    let v = cat.to_list_response(&BTreeSet::new()).await;
     let rows = v["models"].as_array().unwrap();
     let plain = rows.iter().find(|r| r["path"] == "/m/plain.gguf").unwrap();
     let vision = rows.iter().find(|r| r["path"] == "/m/vision.gguf").unwrap();

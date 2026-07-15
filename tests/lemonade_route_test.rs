@@ -79,7 +79,7 @@ fn lemonade_model(name: &str) -> DiscoveredModel {
     split_siblings: Vec::new(),
     display_label: Some(name.to_string()),
     multimodal: None,
-    ds4_compatible: false,
+    routed_backend: None,
   }
 }
 
@@ -299,7 +299,13 @@ async fn idle_lemonade_model_is_unloaded_but_umbrella_stays_up() {
           pid: 0,
           port,
           started_at: 0,
-          launch_id: None,
+          // Real delegated rows always carry the `L#` stamped by the launch;
+          // idle eviction reads it off the snapshot and hands it to `stop`, which
+          // unloads the model from the umbrella. (A `None` here is treated as an
+          // unreachable leftover everywhere, `status` included.)
+          launch_id: Some(llamastash::daemon::registry::LaunchId(
+            "evict-L1".to_string(),
+          )),
           params: LaunchParams::new(
             PathBuf::from("lemonade://Qwen2.5-0.5B-Instruct"),
             LaunchMode::Chat,

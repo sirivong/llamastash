@@ -103,13 +103,7 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     }
   }
 
-  let payload = build_payload(
-    &row.path,
-    mode,
-    &params,
-    args.backend.map(|b| b.wire()),
-    selection,
-  );
+  let payload = build_payload(&row.path, mode, &params, args.backend.as_deref(), selection);
   let resp = client
     .call("start_model", Some(payload))
     .await
@@ -361,12 +355,10 @@ fn resolve_mode(
   if let Some(m) = override_mode {
     return Ok(m.as_label());
   }
-  // Backend-managed rows (Lemonade) are served by an umbrella that picks the
-  // recipe from the model name; llama.cpp launch modes don't apply, so don't
-  // force `--mode`. The daemon ignores the mode for these, so default to chat.
-  if crate::cli::output::backend_for_source(&row.source)
-    == crate::backend::lemonade::LEMONADE_BACKEND_ID
-  {
+  // A managed-multiplexer row is served by an umbrella that picks the recipe
+  // from the model name; llama.cpp launch modes don't apply, so don't force
+  // `--mode`. The daemon ignores the mode for these, so default to chat.
+  if crate::backend::is_managed_multiplexer(crate::cli::output::backend_for_source(&row.source)) {
     return Ok("chat");
   }
   match row.mode_hint.as_deref() {

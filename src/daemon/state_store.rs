@@ -72,16 +72,16 @@ pub struct LastParamsEntry {
   pub resolved_backend: String,
 }
 
-/// Serde default for [`LastParamsEntry::resolved_backend`]: `llamacpp`, the
-/// only backend that could have written a pre-tag `state.json` row.
+/// Serde default for [`LastParamsEntry::resolved_backend`]: the default
+/// backend, the only one that could have written a pre-tag `state.json` row.
 fn default_resolved_backend() -> String {
-  "llamacpp".to_string()
+  crate::backend::DEFAULT_BACKEND_ID.to_string()
 }
 
-/// Whether `s` is the `llamacpp` default — omitted from the serialized shape
-/// for byte-stability, so only a non-default (`ds4` / `lemonade`) tag persists.
+/// Whether `s` is the default-backend tag — omitted from the serialized shape
+/// for byte-stability, so only a non-default tag persists.
 fn is_default_backend(s: &str) -> bool {
-  s == "llamacpp"
+  s == crate::backend::DEFAULT_BACKEND_ID
 }
 
 /// One entry in `presets` — a model's named-preset list.
@@ -202,16 +202,17 @@ impl RunningSnapshot {
     SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(self.started_at)
   }
 
-  /// The lemonade [`BackendModelId`](crate::backend::identity::BackendModelId)
-  /// behind this row, or `None` for any other identity (GGUF, other
-  /// backends). The one predicate shared by the `status` projection, the
-  /// `stop_model` snapshot sweeps, and the proxy eviction filter, so "is
-  /// this a delegated lemonade row" can't drift between them.
-  pub fn lemonade_backend_id(&self) -> Option<&crate::backend::identity::BackendModelId> {
+  /// The [`BackendModelId`](crate::backend::identity::BackendModelId) behind a
+  /// delegated (managed-multiplexer) row, or `None` for a process-per-model row
+  /// (GGUF identity). The one predicate shared by the `status` projection, the
+  /// `stop_model` snapshot sweeps, and the proxy eviction filter, so "is this a
+  /// delegated row" can't drift between them. Names no backend — a delegated row
+  /// is any backend-identity row whose backend is a managed multiplexer.
+  pub fn delegated_backend_id(&self) -> Option<&crate::backend::identity::BackendModelId> {
     self
       .id
       .as_backend()
-      .filter(|b| b.backend == crate::backend::lemonade::LEMONADE_BACKEND_ID)
+      .filter(|b| crate::backend::is_managed_multiplexer(&b.backend))
   }
 }
 

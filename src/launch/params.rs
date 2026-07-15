@@ -153,35 +153,56 @@ pub fn redact_for_display(extras: &[OsString]) -> String {
 /// identity rule (GGUF → llama.cpp, registry → its owning backend); an
 /// explicit variant overrides it. Resolved by
 /// [`crate::backend::resolve_backend`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BackendChoice {
-  /// Pick automatically from the model's identity.
+  /// Pick automatically from the model's identity + the header routing signal.
   #[default]
   Auto,
-  /// Force the direct, zero-overhead llama.cpp backend. Wire value pinned
-  /// to `"llamacpp"` so it matches the backend id + the `start --backend`
-  /// flag (snake_case would give `llama_cpp`).
-  #[serde(rename = "llamacpp")]
-  LlamaCpp,
-  /// Force the Lemonade (`lemond`) managed-multiplexer backend.
-  Lemonade,
-  /// Force the ds4 (DwarfStar) direct backend. Wire value `"ds4"` matches
-  /// the backend id + the `start --backend ds4` flag. On a
-  /// predicate-rejected or non-deepseek4 file, ds4-server surfaces its own
-  /// fast header-validation error (the override is honored verbatim).
-  Ds4,
+  /// Force a specific backend by its **id** (`--backend <id>`, or a persisted
+  /// resolved-backend tag). Backend-agnostic: the id is validated against the
+  /// registry at the CLI / IPC boundary, and an unknown id falls back to the
+  /// identity rule in [`crate::backend::resolve_backend`]. Adding a backend
+  /// needs no edit here — the id is just data.
+  Explicit(String),
 }
 
 impl BackendChoice {
-  /// Stable lowercase label for CLI parsing / JSON projection.
-  pub fn label(self) -> &'static str {
+  /// Stable lowercase label for CLI parsing / JSON projection — `"auto"` or the
+  /// backend id. The wire form (the custom [`serde::Serialize`] below) is
+  /// exactly this string, so a persisted `"ds4"` / `"llamacpp"` round-trips
+  /// byte-for-byte with the old enum encoding.
+  pub fn label(&self) -> &str {
     match self {
       BackendChoice::Auto => "auto",
-      BackendChoice::LlamaCpp => "llamacpp",
-      BackendChoice::Lemonade => "lemonade",
-      BackendChoice::Ds4 => "ds4",
+      BackendChoice::Explicit(id) => id,
     }
+  }
+
+  /// Parse a backend id (or `"auto"`) into a choice — the inverse of
+  /// [`Self::label`]. `"auto"` → [`Self::Auto`]; any other id →
+  /// [`Self::Explicit`]. Names no backend.
+  pub fn from_id(id: &str) -> BackendChoice {
+    if id == "auto" {
+      BackendChoice::Auto
+    } else {
+      BackendChoice::Explicit(id.to_string())
+    }
+  }
+}
+
+// Persisted / wired as the bare id string (`"auto"`, `"ds4"`, `"llamacpp"`, …),
+// identical to the old externally-tagged unit-variant encoding, so `state.json`
+// and preset rows stay byte-stable across this refactor.
+impl serde::Serialize for BackendChoice {
+  fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(self.label())
+  }
+}
+
+impl<'de> serde::Deserialize<'de> for BackendChoice {
+  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(Self::from_id(&s))
   }
 }
 
@@ -799,23 +820,30 @@ mod tests {
   }
 
   #[test]
-  fn backend_choice_serde_is_snake_case() {
+  fn backend_choice_serde_round_trips_as_id_strings() {
     for c in [
       BackendChoice::Auto,
-      BackendChoice::LlamaCpp,
-      BackendChoice::Lemonade,
+      BackendChoice::Explicit("llamacpp".into()),
+      BackendChoice::Explicit("lemonade".into()),
+      BackendChoice::Explicit("ds4".into()),
     ] {
       let s = serde_json::to_string(&c).unwrap();
       let back: BackendChoice = serde_json::from_str(&s).unwrap();
       assert_eq!(c, back);
     }
+    // Wire value is the bare id string — byte-stable with the old unit-variant
+    // encoding, so existing `state.json` / preset rows keep parsing.
     assert_eq!(
-      serde_json::to_string(&BackendChoice::LlamaCpp).unwrap(),
+      serde_json::to_string(&BackendChoice::Auto).unwrap(),
+      "\"auto\""
+    );
+    assert_eq!(
+      serde_json::to_string(&BackendChoice::Explicit("llamacpp".into())).unwrap(),
       "\"llamacpp\""
     );
     assert_eq!(
-      serde_json::to_string(&BackendChoice::Lemonade).unwrap(),
-      "\"lemonade\""
+      serde_json::from_str::<BackendChoice>("\"ds4\"").unwrap(),
+      BackendChoice::Explicit("ds4".into())
     );
   }
 

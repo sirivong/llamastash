@@ -176,30 +176,38 @@ async fn forward_request(state: Arc<ProxyState>, req: Request<Incoming>) -> Prox
   };
 
   let decision = route::decide(&state, parsed.model).await;
-  // ds4 serves chat/completions, not embeddings/rerank (D-ui scope). Refuse
-  // such a request bound for ds4 with a clear JSON error instead of forwarding
-  // into ds4-server's bare 404 — covering both a *running* ds4 model and a
-  // *not-running* compatible model that would auto-start on ds4 (a
-  // multi-minute load that still couldn't serve the request).
+  // Some backends serve chat/completions but not embeddings/rerank. Refuse such
+  // a request bound for a backend that doesn't serve the mode with a clear JSON
+  // error instead of forwarding into the backend's bare 404 — covering both a
+  // *running* model (its real backend) and a *not-running* model that would
+  // auto-start (its would-be backend). Registry-driven via `serves_mode`.
+  use crate::backend::Backend;
   let req_path = uri.path().to_string();
-  let is_embed_or_rerank = req_path == "/v1/embeddings" || req_path == "/v1/rerank";
-  if is_embed_or_rerank {
-    let hits_ds4 = match &decision {
+  let req_mode = match req_path.as_str() {
+    "/v1/embeddings" => Some(crate::launch::mode::LaunchMode::Embedding),
+    "/v1/rerank" => Some(crate::launch::mode::LaunchMode::Rerank),
+    _ => None,
+  };
+  if let Some(mode) = req_mode {
+    let target = match &decision {
       RouteDecision::ReadyAt {
         served_model_key, ..
-      } => route::running_model_is_ds4(&state, served_model_key).await,
+      } => route::running_model_backend(&state, served_model_key).await,
       RouteDecision::NotRunning { resolved_row, .. } => {
-        route::row_would_route_ds4(&state, resolved_row).await
+        route::would_route_backend(&state, resolved_row).await
       }
-      _ => false,
+      _ => None,
     };
-    if hits_ds4 {
-      return error_response(
-        StatusCode::BAD_REQUEST,
-        "unsupported_endpoint",
-        "the ds4 backend serves chat/completions only, not embeddings or rerank; \
-         launch an embedding-capable model (it routes to llama.cpp) for this endpoint",
-      );
+    if let Some(b) = target {
+      if !b.serves_mode(mode) {
+        // Name the actual backend for the user (dynamic, so the code names none).
+        let msg = format!(
+          "the {} backend serves chat/completions only, not embeddings or rerank; \
+           launch an embedding-capable model for this endpoint",
+          b.id()
+        );
+        return error_response(StatusCode::BAD_REQUEST, "unsupported_endpoint", &msg);
+      }
     }
   }
   // Both the Ready and NotRunning arms need the same inbound bundle;
@@ -405,13 +413,12 @@ async fn ollama_ps(state: Arc<ProxyState>) -> ProxyResponse {
   let sup_snap = state.ctx.supervisors.snapshot().await;
   let cat_snap = state.ctx.catalog.snapshot().await;
   let by_path = route::index_catalog_by_path(&cat_snap);
-  let umbrella_id = crate::backend::lemonade::umbrella_launch_id();
   let mut models: Vec<PsModel> = Vec::new();
   for (launch_id, sup) in sup_snap.into_iter() {
-    // The Lemonade umbrella is a multiplexer process, not a servable
-    // model — exclude it from /api/ps just as the fallback and /ui
-    // walkers do.
-    if launch_id == umbrella_id {
+    // An infrastructure launch (a managed-multiplexer umbrella) is a supervised
+    // process, not a servable model — exclude it from /api/ps just as the
+    // fallback and /ui walkers do.
+    if crate::backend::is_infra_launch(&launch_id) {
       continue;
     }
     if !matches!(sup.state().await, ManagedState::Ready) {
@@ -793,7 +800,7 @@ mod tests {
       source: ModelSource::HuggingFace,
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
       parse_error: None,
       split_siblings: vec![],
       metadata: Some(ModelMetadata {

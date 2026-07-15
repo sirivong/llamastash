@@ -325,13 +325,13 @@ impl MethodContext {
     self
   }
 
-  /// Whether Lemonade is **available** on this daemon: the user intends it
-  /// enabled (default-on unless `lemonade.enabled: false`, `--lemonade`/env
-  /// override) **and** the `lemond` binary resolves. Mirrors
-  /// [`Self::ds4_available`]; `status` reads it for the umbrella state.
+  /// Whether the Lemonade backend is available on this daemon. Thin wrapper
+  /// over [`crate::backend::Backend::available`] — the availability logic lives
+  /// in the backend's own file. Retained only for the remaining direct callers;
+  /// prefer iterating the registry (`Backends::all()` + `available`).
   pub fn lemonade_available(&self) -> bool {
-    self.lemonade.intends_enabled(self.lemonade_force)
-      && crate::backend::lemonade::resolve_lemond_binary(&self.lemonade).is_some()
+    use crate::backend::Backend;
+    crate::backend::lemonade::LemonadeBackend::new().available(self)
   }
 
   /// Builder helper: attach the ds4 backend config + force flag so the
@@ -342,12 +342,12 @@ impl MethodContext {
     self
   }
 
-  /// Whether ds4 is **available** on this daemon: the user intends it enabled
-  /// (default-on unless `ds4.enabled: false`, `--ds4`/env override) **and**
-  /// the `ds4-server` binary resolves. The single availability predicate the
-  /// selection seam, the split-file guard, and `status.backends` all consult.
+  /// Whether the ds4 backend is available on this daemon. Thin wrapper over
+  /// [`crate::backend::Backend::available`] — the availability logic lives in
+  /// the backend's own file. Retained only for the remaining direct callers;
+  /// prefer iterating the registry (`Backends::all()` + `available`).
   pub fn ds4_available(&self) -> bool {
-    self.ds4.intends_enabled(self.ds4_force)
-      && crate::backend::ds4::resolve_ds4_binary(self.ds4.binary.as_deref()).is_some()
+    use crate::backend::Backend;
+    crate::backend::ds4::Ds4Backend::new().available(self)
   }
 }

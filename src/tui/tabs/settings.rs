@@ -118,20 +118,31 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
   // window read from `/props`; no chip, since a live value has no
   // inheritance layer to name.
   let resolved_ctx = managed.map(|m| m.resolved_ctx.or(m.knobs.ctx.set_value().copied()));
-  // A running ds4 model ignores the llama.cpp typed knobs — render its own
-  // native rows (ctx + the six ds4 tunables) from the live params instead of
-  // the empty llama.cpp groups. Keyed on the launch's *actual* backend (not
-  // the routing prediction), so a compatible file launched with
-  // `--backend llamacpp` still shows the llama.cpp knobs it ran with.
-  // Editable launches keep the picker path.
-  let ds4_readonly = managed.is_some_and(|m| m.is_ds4());
-  if ds4_readonly {
-    let m = managed.expect("ds4_readonly implies a managed row");
-    push_ds4_readonly_rows(&mut lines, m, resolved_ctx.flatten(), palette, show_source);
+  // A running model on a backend that has its own native knobs (not the
+  // llama.cpp typed IR) renders those native rows (ctx + its tunables) from the
+  // live params instead of the empty llama.cpp groups. Keyed on the launch's
+  // *actual* backend (not the routing prediction), so a compatible file launched
+  // with `--backend llamacpp` still shows the llama.cpp knobs it ran with.
+  // Registry-driven — names no backend. Editable launches keep the picker path.
+  let native_descriptors: &[crate::launch::native_knobs::NativeKnobDescriptor] = managed
+    .and_then(|m| m.backend.as_deref())
+    .map(crate::backend::native_knobs_for)
+    .unwrap_or(&[]);
+  let native_readonly = !native_descriptors.is_empty();
+  if native_readonly {
+    let m = managed.expect("native_readonly implies a managed row");
+    push_native_readonly_rows(
+      &mut lines,
+      m,
+      native_descriptors,
+      resolved_ctx.flatten(),
+      palette,
+      show_source,
+    );
   }
   for group in knob_display_groups() {
-    // The ds4 read-only view rendered its rows above; skip the llama.cpp groups.
-    if ds4_readonly {
+    // The native read-only view rendered its rows above; skip the llama.cpp groups.
+    if native_readonly {
       break;
     }
     // Skip the whole group — header included — when it has no visible row
@@ -384,9 +395,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
 /// knobs read from the recorded `last_params` (value or `inherited`). ds4
 /// ignores the llama.cpp typed knobs, so the running view shows these — the
 /// same set the launch picker offers — instead of a wall of `inherited`.
-fn push_ds4_readonly_rows(
+fn push_native_readonly_rows(
   lines: &mut Vec<Line<'static>>,
   m: &ManagedRow,
+  descriptors: &[crate::launch::native_knobs::NativeKnobDescriptor],
   resolved_ctx: Option<u32>,
   palette: &Palette,
   show_source: bool,
@@ -410,12 +422,17 @@ fn push_ds4_readonly_rows(
     palette,
     show_source,
   ));
-  lines.push(group_header("ds4 native", palette));
-  // Read the six values from the launch's *live* `backend_knobs` (the running
-  // row, sourced from `status`), so the panel reflects what the server is
-  // actually running with — including an auto-enabled `ssd_streaming` — rather
-  // than the saved `last_params` delta.
-  for d in crate::backend::ds4::DS4_NATIVE_KNOBS {
+  let header = m
+    .backend
+    .as_deref()
+    .map(|b| format!("{b} native"))
+    .unwrap_or_else(|| "native".to_string());
+  lines.push(group_header(&header, palette));
+  // Read the values from the launch's *live* `backend_knobs` (the running row,
+  // sourced from `status`), so the panel reflects what the server is actually
+  // running with — including an auto-enabled knob — rather than the saved
+  // `last_params` delta.
+  for d in descriptors {
     let value = m
       .backend_knobs
       .get(d.id)
@@ -652,7 +669,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }
   }
 
@@ -709,7 +726,7 @@ mod tests {
     use ratatui::Terminal;
     let mut app = App::new(AppOptions::default());
     let mut picker = LaunchPickerState::for_model("DeepSeek-V4-Flash");
-    picker.model_backend = crate::launch::params::BackendChoice::Ds4;
+    picker.model_backend = crate::launch::params::BackendChoice::Explicit("ds4".into());
     picker.native_descriptors = crate::backend::ds4::DS4_NATIVE_KNOBS;
     app.launch_picker = Some(picker);
     let palette = app.palette();
@@ -756,7 +773,14 @@ mod tests {
     };
     let palette = app.palette();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    push_ds4_readonly_rows(&mut lines, &m, Some(32768), palette, true);
+    push_native_readonly_rows(
+      &mut lines,
+      &m,
+      crate::backend::ds4::DS4_NATIVE_KNOBS,
+      Some(32768),
+      palette,
+      true,
+    );
     let text: String = lines
       .iter()
       .flat_map(|l| l.spans.iter())

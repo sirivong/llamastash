@@ -17,6 +17,8 @@ use super::super::{
   Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
   ManagerLaunchSpec, ManagerModelRef, ProcessLaunchSpec, Readiness,
 };
+use super::{umbrella_launch_id, LemonadeClient};
+use crate::daemon::context::MethodContext;
 use crate::daemon::probe::ProbeOptions;
 use crate::launch::params::LaunchParams;
 
@@ -271,6 +273,461 @@ impl Backend for LemonadeBackend {
   ) -> LaunchPlan {
     LaunchPlan::DelegateToManager(self.manager_spec(params, port, binary, probe))
   }
+
+  fn available(&self, ctx: &MethodContext) -> bool {
+    // Intent (default-on unless `lemonade.enabled: false`, `--lemonade`/env
+    // force) AND the `lemond` binary resolves. Consulted by selection and
+    // `status`.
+    ctx.lemonade.intends_enabled(ctx.lemonade_force)
+      && resolve_lemond_binary(&ctx.lemonade).is_some()
+  }
+
+  fn installed(&self, ctx: &MethodContext) -> bool {
+    // Presence of the binary, independent of the enablement toggle. Honors the
+    // full resolution order (explicit path, then PATH).
+    resolve_lemond_binary(&ctx.lemonade).is_some()
+  }
+
+  fn status_enabled(&self, ctx: &MethodContext) -> Option<bool> {
+    Some(self.available(ctx))
+  }
+
+  fn binary_path(&self, ctx: &MethodContext) -> Option<String> {
+    resolve_lemond_binary(&ctx.lemonade).map(|b| b.display().to_string())
+  }
+
+  async fn status_accelerators(&self, ctx: &MethodContext, _device: &[Accelerator]) -> Vec<String> {
+    // Prefer what lemond actually has installed (live `system-info` probe) over
+    // the static capability floor — the static `[cpu, npu]` misses a
+    // ROCm/Vulkan build and claims an NPU the host may not have. Falls back to
+    // the floor when the umbrella is down or the probe fails. The device catalog
+    // is *not* unioned here (unlike the default): the live probe already
+    // reflects the real installed accelerators.
+    let support = self
+      .installed_accelerators(ctx)
+      .await
+      .unwrap_or_else(|| self.accelerators());
+    support.labels().into_iter().map(str::to_string).collect()
+  }
+
+  async fn status_extra(&self, ctx: &MethodContext) -> Vec<(String, serde_json::Value)> {
+    // Managed-multiplexer health: whether the umbrella llamastash supervises is
+    // actually up, so `status` distinguishes "installed" from "running".
+    vec![(
+      "umbrella".to_string(),
+      serde_json::json!(umbrella_state(ctx).await),
+    )]
+  }
+
+  fn umbrella_launch_id(&self) -> Option<crate::daemon::registry::LaunchId> {
+    // The one long-lived `lemond` process llamastash supervises — an infra
+    // launch, not a servable model, so the running-launch walkers skip it.
+    Some(umbrella_launch_id())
+  }
+
+  async fn stop(
+    &self,
+    ctx: &MethodContext,
+    launch_id: &crate::daemon::registry::LaunchId,
+    grace_secs: u64,
+  ) -> Result<serde_json::Value, crate::ipc::protocol::ErrorObject> {
+    use crate::daemon::supervisor::ManagedState;
+    use crate::ipc::protocol::{ErrorCode, ErrorObject};
+    // The umbrella itself → stop the shared `lemond` process, then reap every
+    // delegated row it took down with it (ghost rows the next fresh umbrella
+    // can't honor) and clear the delegated-state map.
+    if self.umbrella_launch_id().as_ref() == Some(launch_id) {
+      let resp = crate::daemon::launch_service::stop_supervised(ctx, launch_id, grace_secs).await?;
+      ctx
+        .state
+        .mutate(|s| s.running.retain(|r| r.delegated_backend_id().is_none()))
+        .await;
+      ctx.supervisors.clear_delegated().await;
+      return Ok(resp);
+    }
+    // A delegated model → best-effort unload from the umbrella (which keeps
+    // running), then drop its running snapshot so `status` stops emitting the
+    // row. Reverse-map the `L#` → model name off the snapshot (delegated rows
+    // have no supervisor to hold it). An unload refusal is logged but doesn't
+    // fail the stop — the snapshot is the daemon's own bookkeeping, and a model
+    // the umbrella already evicted should always be clearable.
+    let name = ctx
+      .state
+      .snapshot()
+      .await
+      .running
+      .into_iter()
+      .find(|r| r.launch_id.as_ref() == Some(launch_id))
+      .and_then(|r| r.delegated_backend_id().map(|b| b.name.clone()));
+    let Some(name) = name else {
+      return Err(ErrorObject::new(
+        ErrorCode::InvalidParams,
+        format!("unknown launch_id: {}", launch_id.as_str()),
+      ));
+    };
+    if let Err(e) = self.unload_delegated(ctx, &name).await {
+      log::warn!("lemonade: unload of `{name}` failed (dropping the row anyway): {e}");
+    }
+    ctx.supervisors.remove_delegated(&name).await;
+    ctx
+      .state
+      .mutate(move |s| {
+        s.running
+          .retain(|r| r.delegated_backend_id().map(|b| b.name.as_str()) != Some(name.as_str()));
+      })
+      .await;
+    Ok(serde_json::json!({
+      "launch_id": launch_id,
+      "state": crate::ipc::methods::flatten_state(&ManagedState::Stopped),
+    }))
+  }
+
+  fn resolve_launch_binary(
+    &self,
+    ctx: &MethodContext,
+    _default_binary: PathBuf,
+    _port: u16,
+  ) -> Result<(PathBuf, u16), String> {
+    // The umbrella supervises its own `lemond` executable on its own configured
+    // loopback port, not the launch-pool reservation.
+    match resolve_lemond_binary(&ctx.lemonade) {
+      Some(bin) => Ok((bin, ctx.lemonade.port)),
+      None => Err(
+        "lemonade backend selected but no `lemond` binary found; set `lemonade.binary` \
+         or put `lemond` on PATH (see docs/lemonade-setup.md)"
+          .to_string(),
+      ),
+    }
+  }
+
+  /// Delegate the launch to the shared `lemond` umbrella instead of spawning a
+  /// child per model: ensure the one umbrella is up, then preload the model
+  /// behind it. This is the managed-multiplexer half of the `start` contract —
+  /// the whole reason a Lemonade model never touches the process-per-model path.
+  async fn start(
+    &self,
+    ctx: &MethodContext,
+    exec: crate::daemon::launch_service::LaunchExec,
+  ) -> Result<crate::daemon::launch_service::StartedLaunch, crate::ipc::protocol::ErrorObject> {
+    use super::ensure_umbrella;
+    use crate::daemon::launch_service::StartedLaunch;
+    use crate::daemon::state_store::RunningSnapshot;
+    use crate::daemon::supervisor::ManagedState;
+    use crate::ipc::protocol::{ErrorCode, ErrorObject};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    // The umbrella supervises its own `lemond` on its configured loopback port,
+    // not the launch-pool reservation — release the reserved slot (holding it
+    // would leak a port from the pool for the umbrella's lifetime).
+    let (binary, umbrella_port) =
+      match self.resolve_launch_binary(ctx, exec.default_binary.clone(), exec.reserved_port) {
+        Ok(bp) => bp,
+        Err(msg) => {
+          ctx
+            .supervisors
+            .release_reserved_port(exec.reserved_port)
+            .await;
+          return Err(ErrorObject::new(ErrorCode::InvalidParams, msg));
+        }
+      };
+    ctx
+      .supervisors
+      .release_reserved_port(exec.reserved_port)
+      .await;
+
+    let mgr = self.manager_spec(&exec.params, umbrella_port, binary, exec.probe);
+    let model_name = mgr.model.name.clone();
+    let umbrella_spec = mgr.umbrella;
+
+    // The preload must not POST `/api/v1/load` until the umbrella's HTTP server
+    // is accepting connections; bound the readiness wait by the umbrella's own
+    // probe budget (its probe resolves to Ready/Error first, so this is only a
+    // backstop for an umbrella that never settles).
+    let ready_timeout = umbrella_spec.probe.timeout + Duration::from_secs(2);
+
+    let umbrella = match ensure_umbrella(
+      &ctx.supervisors,
+      umbrella_port,
+      umbrella_spec,
+      exec.log_path.clone(),
+    )
+    .await
+    {
+      Ok(m) => m,
+      Err(e) => {
+        return Err(ErrorObject::new(
+          ErrorCode::InternalError,
+          format!("lemonade umbrella failed to start: {e}"),
+        ));
+      }
+    };
+    // An already-running umbrella keeps its own port; trust the handle over the
+    // requested `umbrella_port` so a reused umbrella routes to the right place.
+    let serving_port = umbrella.port();
+
+    // One id source for every backend: draw the delegated model's `L#` from the
+    // same registry counter the process path uses (`next_id`), so a Lemonade row
+    // reads `L3` like any other launch. The model name stays the umbrella's
+    // internal load/unload key; the `L#` is the user-facing handle, stamped on
+    // the snapshot below (delegated models have no supervisor to hold it) and
+    // reverse-mapped to the name on stop.
+    let launch_id = ctx.supervisors.next_id();
+
+    // Preload so an explicit launch makes the model resident (chat would autoload
+    // too), forwarding the params lemond honors: `ctx_size` plus the free-form
+    // extras as the recipe-scoped `*_args` string.
+    //
+    // Runs as a background task: a cold load can take lemond's full 120 s budget,
+    // far past the CLI's IPC reply timeout — awaiting here meant the client hung
+    // up and hyper cancelled the handler mid-preload, silently dropping the
+    // launch. The task records its outcome in the delegated-state map (`Loading`
+    // → `Ready` / `Error{cause}`), which is what `status` reports for the row.
+    ctx
+      .supervisors
+      .set_delegated_state(&model_name, ManagedState::Loading)
+      .await;
+    {
+      let registry = ctx.supervisors.clone();
+      let name = model_name.clone();
+      let params = exec.params.clone();
+      let umbrella = umbrella.clone();
+      // Record `last_params` on preload success so a Lemonade model shows up in
+      // the TUI's `↺ Recent` section like any other launch. Keyed on the
+      // synthetic GGUF id (path = `lemonade://<name>`) because `last_params_list`
+      // only emits `model_path` for the GGUF shape.
+      let state = ctx.state.clone();
+      let last_params_id = ModelIdentity::Gguf(exec.id.clone());
+      let backend_tag = exec.resolved_backend_id.clone();
+      tokio::spawn(async move {
+        // `ensure_umbrella` returns at `Loading`; the load POST would race the
+        // umbrella's bind and hit connection-refused on a cold start. Wait for
+        // `/live` to pass (Ready) before talking to it.
+        if let Err(cause) = umbrella.wait_until_ready(ready_timeout).await {
+          let cause = format!("lemonade umbrella not ready: {cause}");
+          log::warn!("lemonade: preload of `{name}` aborted: {cause}");
+          registry
+            .set_delegated_state(&name, ManagedState::Error { cause })
+            .await;
+          return;
+        }
+        let outcome = match LemonadeClient::new(serving_port) {
+          Ok(client) => {
+            let opts = lemonade_load_options(&client, &name, &params).await;
+            client.load_with(&name, &opts).await
+          }
+          Err(e) => Err(e),
+        };
+        match outcome {
+          Ok(()) => {
+            registry
+              .set_delegated_state(&name, ManagedState::Ready)
+              .await;
+            state
+              .mutate(|s| {
+                s.upsert_last_params(last_params_id.clone(), params.clone(), backend_tag.clone())
+              })
+              .await;
+          }
+          Err(e) => {
+            log::warn!("lemonade: preload of `{name}` failed: {e}");
+            registry
+              .set_delegated_state(
+                &name,
+                ManagedState::Error {
+                  cause: e.to_string(),
+                },
+              )
+              .await;
+          }
+        }
+      });
+    }
+
+    // Persist a running snapshot at the umbrella port for status visibility.
+    let pid = umbrella.pid().await.unwrap_or(0) as i32;
+    let started_at = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map(|d| d.as_secs())
+      .unwrap_or_default();
+    let identity = exec.identity.clone();
+    let snapshot_params = exec.params.clone();
+    let snapshot_backend = exec.resolved_backend_id.clone();
+    let snapshot_launch_id = launch_id.clone();
+    ctx
+      .state
+      .mutate(move |s| {
+        s.running
+          .retain(|r| !(r.id == identity && r.port == serving_port));
+        s.running.push(RunningSnapshot {
+          id: identity.clone(),
+          pid,
+          port: serving_port,
+          started_at,
+          launch_id: Some(snapshot_launch_id),
+          params: snapshot_params,
+          actuals: Default::default(),
+          resolved_backend: snapshot_backend,
+        });
+      })
+      .await;
+
+    Ok(StartedLaunch {
+      // The model's own `L#` (not the umbrella's id) — the handle the client
+      // shows and later stops by.
+      launch_id,
+      model_id: exec.id,
+      port: serving_port,
+      model: umbrella,
+      log_path: exec.log_path,
+      // Lemonade's delegated path carries no admission advisories.
+      warnings: Vec::new(),
+    })
+  }
+}
+
+/// Project the launch params onto lemond's load-option surface: `ctx` (when the
+/// user set one) becomes `ctx_size`; non-empty extras become the recipe-scoped
+/// args string (`llamacpp_args` / `whispercpp_args` / `flm_args` — lemond names
+/// the field after the model's recipe, read from the umbrella's own model list).
+/// Extras are dropped with a warning when the recipe can't be resolved — guessing
+/// the field would silently feed flags to the wrong engine.
+async fn lemonade_load_options(
+  client: &LemonadeClient,
+  name: &str,
+  params: &LaunchParams,
+) -> super::LoadOptions {
+  let recipe_args = if params.extras.is_empty() {
+    None
+  } else {
+    let joined = params
+      .extras
+      .iter()
+      .map(|s| s.to_string_lossy())
+      .collect::<Vec<_>>()
+      .join(" ");
+    let recipe = client
+      .list_model_entries()
+      .await
+      .ok()
+      .and_then(|entries| entries.into_iter().find(|e| e.id == name))
+      .and_then(|e| e.recipe);
+    match recipe {
+      Some(recipe) => Some((format!("{recipe}_args"), joined)),
+      None => {
+        log::warn!(
+          "lemonade: dropping extras for `{name}` — could not resolve its recipe \
+           from the umbrella's model list"
+        );
+        None
+      }
+    }
+  };
+  super::LoadOptions {
+    ctx_size: params.ctx,
+    recipe_args,
+  }
+}
+
+impl LemonadeBackend {
+  /// Free a model from the shared umbrella via its API; the umbrella stays up and
+  /// autoloads on the next request. Private to this backend — the delegated-unload
+  /// is an internal step of [`Backend::stop`]'s delegated branch (and idle
+  /// eviction, which routes through `stop`), not a concept the generic tree names.
+  /// A missing umbrella means nothing is resident: a no-op success (the stop's row
+  /// cleanup still runs).
+  async fn unload_delegated(&self, ctx: &MethodContext, name: &str) -> Result<(), String> {
+    let Some(umbrella) = ctx.supervisors.get(&umbrella_launch_id()).await else {
+      return Ok(());
+    };
+    let client = LemonadeClient::new(umbrella.port()).map_err(|e| e.to_string())?;
+    client.unload(name).await.map_err(|e| e.to_string())
+  }
+
+  /// Accelerators lemond actually has installed, from a live `system-info`
+  /// probe (the HTTP form of `lemonade backends`): the distinct backend classes
+  /// with at least one `state: "installed"` entry across recipes. `None` when
+  /// the umbrella isn't registered or the probe fails, so the caller keeps the
+  /// static capability floor.
+  async fn installed_accelerators(&self, ctx: &MethodContext) -> Option<AcceleratorSupport> {
+    if !self.available(ctx) {
+      return None;
+    }
+    // The managed umbrella's live port when llamastash spawned it; otherwise the
+    // configured port, so an externally-run lemond is probed too.
+    let port = match ctx.supervisors.get(&umbrella_launch_id()).await {
+      Some(umbrella) => umbrella.port(),
+      None => ctx.lemonade.port,
+    };
+    let client = LemonadeClient::new(port).ok()?;
+    // Bounded independently of the client's own (minutes-long, model-load) timeout:
+    // a slow/hung lemond must never stall a `status` response.
+    let info = tokio::time::timeout(std::time::Duration::from_secs(2), client.system_info())
+      .await
+      .ok()?
+      .ok()?;
+    let acc = installed_accelerators_from_system_info(&info);
+    (!acc.labels().is_empty()).then_some(acc)
+  }
+}
+
+/// Pure parse of a lemond `system-info` body into the accelerator classes it
+/// has installed: the distinct `recipes.*.backends.*` names whose `state` is
+/// `"installed"`. Split out from the HTTP path so it's unit-testable against a
+/// captured body.
+fn installed_accelerators_from_system_info(info: &serde_json::Value) -> AcceleratorSupport {
+  let mut acc = AcceleratorSupport::default();
+  let Some(recipes) = info.get("recipes").and_then(|v| v.as_object()) else {
+    return acc;
+  };
+  for recipe in recipes.values() {
+    let Some(backends) = recipe.get("backends").and_then(|v| v.as_object()) else {
+      continue;
+    };
+    for (name, body) in backends {
+      if body.get("state").and_then(|v| v.as_str()) != Some("installed") {
+        continue;
+      }
+      if let Some(a) = accelerator_from_label(name) {
+        acc.insert(a);
+      }
+    }
+  }
+  acc
+}
+
+/// Map a lemond backend/recipe name (`"rocm"`, `"npu"`, `"vulkan"`, …) to an
+/// accelerator class. Same label vocabulary as [`Accelerator::label`], so it
+/// round-trips.
+fn accelerator_from_label(name: &str) -> Option<Accelerator> {
+  match name.to_ascii_lowercase().as_str() {
+    "cpu" => Some(Accelerator::Cpu),
+    "cuda" => Some(Accelerator::Cuda),
+    "rocm" => Some(Accelerator::Rocm),
+    "vulkan" => Some(Accelerator::Vulkan),
+    "metal" => Some(Accelerator::Metal),
+    "npu" => Some(Accelerator::Npu),
+    _ => None,
+  }
+}
+
+/// The managed umbrella's state for `status`, distinct from the `installed`
+/// (binary-resolvable) signal. `disabled` when the backend is off; otherwise
+/// reflects the supervised umbrella: `running` (Ready), `starting` (spawned,
+/// probing), or `not running` (never came up / exited — commonly a boot-time
+/// port conflict).
+async fn umbrella_state(ctx: &MethodContext) -> &'static str {
+  use crate::daemon::supervisor::ManagedState;
+  if !LemonadeBackend::new().available(ctx) {
+    return "disabled";
+  }
+  match ctx.supervisors.get(&umbrella_launch_id()).await {
+    Some(m) => match m.state().await {
+      ManagedState::Ready => "running",
+      ManagedState::Launching | ManagedState::Loading => "starting",
+      ManagedState::Error { .. } | ManagedState::Stopping | ManagedState::Stopped => "not running",
+    },
+    None => "not running",
+  }
 }
 
 #[cfg(test)]
@@ -448,5 +905,52 @@ mod tests {
       port: 13305,
     };
     assert_eq!(resolve_lemond_binary(&cfg_missing), None);
+  }
+
+  #[test]
+  fn installed_accelerators_parses_lemond_system_info() {
+    use serde_json::json;
+    // Shape mirrors the real `/api/v1/system-info` `recipes` block: only the
+    // `state: "installed"` backends count (flm/npu, whispercpp/rocm+vulkan);
+    // `installable` / `unsupported` are ignored. Order is by accelerator class.
+    let info = json!({
+      "recipes": {
+        "flm": { "backends": { "npu": { "state": "installed", "version": "v0.9.44" } } },
+        "whispercpp": { "backends": {
+          "cpu":    { "state": "installable" },
+          "rocm":   { "state": "installed", "version": "v1.8.4" },
+          "vulkan": { "state": "installed", "version": "v1.8.4" }
+        } },
+        "llamacpp": { "backends": {
+          "cpu":  { "state": "installable" },
+          "cuda": { "state": "unsupported" },
+          "rocm": { "state": "installable" }
+        } }
+      }
+    });
+    let acc = installed_accelerators_from_system_info(&info);
+    assert_eq!(acc.labels(), vec!["rocm", "vulkan", "npu"]);
+    // A body with no recipes yields an empty set (caller falls back to static).
+    assert!(installed_accelerators_from_system_info(&json!({}))
+      .labels()
+      .is_empty());
+  }
+
+  #[tokio::test]
+  async fn umbrella_state_is_disabled_when_backend_off() {
+    // An explicit `enabled: false` forces Lemonade off (the default is
+    // on-when-found), so the umbrella state short-circuits to "disabled" without
+    // touching the supervisor registry — regardless of whether a `lemond`
+    // happens to sit on PATH.
+    use crate::daemon::context::MethodContext;
+    use crate::daemon::shutdown::ShutdownToken;
+    let c = MethodContext::new(ShutdownToken::new()).with_lemonade(
+      crate::config::loader::LemonadeConfig {
+        enabled: Some(false),
+        ..Default::default()
+      },
+      false,
+    );
+    assert_eq!(super::umbrella_state(&c).await, "disabled");
   }
 }

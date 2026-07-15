@@ -25,7 +25,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::lemonade::{umbrella_launch_id, LemonadeClient};
 use crate::daemon::shutdown::ShutdownToken;
 use crate::daemon::supervisor::{LaunchOrigin, ManagedModel, ManagedState};
 use crate::proxy::ProxyState;
@@ -120,15 +119,15 @@ pub(crate) fn decide(
 /// watcher drives Ready → Stopping → Stopped regardless of who's
 /// awaiting the stop future.
 pub async fn sweep_once(state: &Arc<ProxyState>, ttl: Duration) {
-  let umbrella_id = umbrella_launch_id();
   let snap = state.ctx.supervisors.snapshot().await;
   for (launch_id, model) in snap {
-    // Managed-multiplexer (Lemonade) umbrella: lifecycle-aware eviction.
-    // Never SIGTERM the shared umbrella — instead free its idle loaded
-    // model via `/api/v1/unload` (the umbrella stays Ready and autoloads
-    // on the next request). This is the `model.stop` vs API-unload branch.
-    if launch_id == umbrella_id {
-      unload_idle_umbrella_model(state, &model, ttl).await;
+    // An infrastructure launch (a managed-multiplexer umbrella) gets
+    // lifecycle-aware eviction: never SIGTERM the shared process — free its
+    // idle loaded model via the backend's unload API instead (the umbrella
+    // stays Ready and autoloads on the next request). This is the `model.stop`
+    // vs API-unload branch.
+    if let Some(backend) = crate::backend::umbrella_owner(&launch_id) {
+      unload_idle_umbrella_model(state, &model, backend, ttl).await;
       continue;
     }
     let current_state = model.state().await;
@@ -159,23 +158,31 @@ pub async fn sweep_once(state: &Arc<ProxyState>, ttl: Duration) {
   }
 }
 
-/// Lifecycle-aware eviction for the Lemonade umbrella (R-eviction). Unlike a
-/// process-per-model child, the umbrella is shared and long-lived, so idle
-/// eviction unloads its *loaded model* via the API rather than killing the
-/// process — freeing the accelerator while keeping the umbrella Ready for an
-/// instant autoload on the next request. The umbrella process is never
-/// stopped here (it persists regardless of `LaunchOrigin`); only the in-NPU
-/// weights are released. The same idle gates as process eviction apply:
-/// Ready, no in-flight requests, and idle for >= TTL.
+/// Lifecycle-aware eviction for a managed-multiplexer umbrella (R-eviction).
+/// Unlike a process-per-model child, the umbrella is shared and long-lived, so
+/// when it goes idle we free its resident model(s) via the agnostic
+/// [`Backend::stop`] rather than killing the process — for a delegated model
+/// `stop` unloads it from the umbrella (which stays Ready for an instant
+/// autoload on the next request) instead of a SIGTERM. The umbrella process is
+/// never stopped here (it persists regardless of `LaunchOrigin`); only the
+/// delegated models it serves are released. The same idle gates as process
+/// eviction apply: Ready, no in-flight requests, and idle for >= TTL.
+///
+/// Idle is umbrella-granular: every delegated request flows through the umbrella
+/// and takes its inflight guard + MRU touch (see `proxy::forward`), so a quiet
+/// umbrella means every model it serves is quiet. The delegated models are read
+/// off the running snapshots on the umbrella's port — `stop` reverse-maps and
+/// unloads each, keeping no delegation vocabulary in this sweep.
 async fn unload_idle_umbrella_model(
   state: &Arc<ProxyState>,
   umbrella: &ManagedModel,
+  backend: crate::backend::Backends,
   ttl: Duration,
 ) {
   if !matches!(umbrella.state().await, ManagedState::Ready) {
     return;
   }
-  // A Lemonade request takes an inflight guard on the umbrella (see
+  // A delegated request takes an inflight guard on the umbrella (see
   // `proxy::forward`), so this skips unloading mid-generation.
   if umbrella.inflight() > 0 {
     return;
@@ -184,41 +191,31 @@ async fn unload_idle_umbrella_model(
     Some(t) if t.elapsed() >= ttl => {}
     _ => return,
   }
-  let port = umbrella.port();
-  let persisted = state.ctx.state.clone();
-  let supervisors = state.ctx.supervisors.clone();
+  let ctx = state.ctx.clone();
+  let umbrella_port = umbrella.port();
   tokio::spawn(async move {
-    let client = match LemonadeClient::new(port) {
-      Ok(c) => c,
-      Err(e) => {
-        log::debug!("proxy eviction: lemonade client build failed: {e}");
-        return;
-      }
-    };
-    // Ask the umbrella which model is resident, then unload it. `health`
-    // failing (umbrella mid-restart) just skips this sweep.
-    let loaded = match client.health().await {
-      Ok(h) => h.model_loaded,
-      Err(e) => {
-        log::debug!("proxy eviction: lemonade health failed: {e}");
-        return;
-      }
-    };
-    if let Some(name) = loaded {
-      log::info!("proxy eviction: unloading idle lemonade model `{name}` (umbrella stays up)");
-      if client.unload(&name).await.is_ok() {
-        // Drop the model's running snapshot + recorded state so `status`
-        // stops listing an evicted model as running — same end state as
-        // a process eviction, where the supervisor row is pruned. The
-        // catalog row stays; the next request autoloads it.
-        supervisors.remove_delegated(&name).await;
-        persisted
-          .mutate(|s| {
-            s.running
-              .retain(|r| r.lemonade_backend_id().map(|b| b.name.as_str()) != Some(name.as_str()));
-          })
-          .await;
-      }
+    use crate::backend::Backend;
+    // The delegated models this umbrella serves (running snapshots on its port).
+    // `stop` unloads each from the umbrella and drops its snapshot — the same end
+    // state as a process eviction pruning a supervisor row; the umbrella stays up
+    // and the catalog row stays, so the next request autoloads it.
+    let targets: Vec<crate::daemon::registry::LaunchId> = ctx
+      .state
+      .snapshot()
+      .await
+      .running
+      .iter()
+      .filter(|r| r.port == umbrella_port && r.delegated_backend_id().is_some())
+      .filter_map(|r| r.launch_id.clone())
+      .collect();
+    for launch_id in targets {
+      log::info!(
+        "proxy eviction: unloading idle {} (umbrella stays up)",
+        launch_id.as_str()
+      );
+      let _ = backend
+        .stop(&ctx, &launch_id, EVICT_STOP_GRACE.as_secs())
+        .await;
     }
   });
 }

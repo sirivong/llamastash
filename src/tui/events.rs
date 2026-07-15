@@ -3425,7 +3425,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.list_cursor = 2;
     let original_focus = app.focus;
@@ -3614,7 +3614,7 @@ mod tests {
         split_siblings: Vec::new(),
         display_label: None,
         multimodal: None,
-        ds4_compatible: false,
+        routed_backend: None,
       })
       .collect();
     app.focus = Focus::List;
@@ -3805,7 +3805,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.go_top();
     // Open picker and tweak ctx + reasoning so we can assert they
@@ -3872,7 +3872,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }];
     app.go_top();
     let (tx, mut rx) = mpsc::channel::<WriterCmd>(8);
@@ -3922,7 +3922,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }
   }
 

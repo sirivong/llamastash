@@ -19,6 +19,7 @@ use super::{
   Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
   ProcessLaunchSpec, Readiness,
 };
+use crate::daemon::context::MethodContext;
 use crate::daemon::probe::ProbeOptions;
 use crate::launch::params::{compose, LaunchParams};
 
@@ -132,6 +133,32 @@ impl Backend for LlamaCppBackend {
     probe: ProbeOptions,
   ) -> LaunchPlan {
     LaunchPlan::SpawnProcess(self.process_spec(params, port, binary, probe))
+  }
+
+  fn available(&self, ctx: &MethodContext) -> bool {
+    // Installed = the resolved `llama-server` binary exists. GPU capability is
+    // surfaced separately (the live device catalog); this is just presence.
+    ctx
+      .launch
+      .as_ref()
+      .map(|e| e.binary.exists())
+      .unwrap_or(false)
+  }
+
+  fn binary_path(&self, ctx: &MethodContext) -> Option<String> {
+    // The daemon-resolved server path, surfaced verbatim (present even when the
+    // file is missing, so `status` can show *what* it looked for vs `installed`).
+    ctx.launch.as_ref().map(|e| e.binary.display().to_string())
+  }
+
+  fn process_marker(&self) -> Option<&'static str> {
+    Some("llama-server")
+  }
+
+  fn serves_web_ui(&self) -> bool {
+    // llama-server ships a stock browser web UI the proxy's `/ui` reverse-proxies.
+    // The one backend that opts into the default-off `serves_web_ui`.
+    true
   }
 }
 

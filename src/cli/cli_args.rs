@@ -400,10 +400,10 @@ pub struct StartArgs {
   #[arg(last = true, value_name = "ARG")]
   pub extra: Vec<OsString>,
   /// Backend to run this model on. `auto` (default) picks by model
-  /// identity; override with `llamacpp` (or another installed backend) to
-  /// force one per launch.
-  #[arg(long, value_enum)]
-  pub backend: Option<BackendArg>,
+  /// identity; override with a backend id (`llamacpp` or another installed
+  /// backend) to force one per launch. Validated against the live registry.
+  #[arg(long, value_parser = parse_backend_id)]
+  pub backend: Option<String>,
   /// Emit JSON instead of human-readable success prose. Stable
   /// shape: `{ "name", "launch_id", "port", "pid", "preset",
   /// "path" }`. With `--wait`, also carries `state` and `resolved_ctx`.
@@ -418,27 +418,22 @@ pub struct StartArgs {
   pub wait: bool,
 }
 
-/// CLI surface for the per-model backend override. Wire labels match
-/// [`crate::launch::params::BackendChoice`] so `start --backend <id>`
-/// round-trips to the daemon unchanged. Additional backends add a variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum BackendArg {
-  Auto,
-  #[value(name = "llamacpp")]
-  LlamaCpp,
-  Lemonade,
-  Ds4,
-}
-
-impl BackendArg {
-  /// Wire label sent to the daemon (matches `BackendChoice` serde).
-  pub fn wire(self) -> &'static str {
-    match self {
-      BackendArg::Auto => "auto",
-      BackendArg::Ds4 => "ds4",
-      BackendArg::LlamaCpp => "llamacpp",
-      BackendArg::Lemonade => "lemonade",
-    }
+/// Validate a `--backend <id>` value against the live registry (plus `auto`),
+/// returning the id verbatim — it's sent to the daemon, which parses it into a
+/// [`crate::launch::params::BackendChoice`]. Registry-driven: no backend is
+/// named here and adding one needs no edit. A bad value is a clap usage error
+/// (exit 64) listing the valid ids.
+fn parse_backend_id(s: &str) -> Result<String, String> {
+  use crate::backend::Backend;
+  let mut valid: Vec<&str> = vec!["auto"];
+  valid.extend(crate::backend::Backends::all().iter().map(|b| b.id()));
+  if valid.contains(&s) {
+    Ok(s.to_string())
+  } else {
+    Err(format!(
+      "unknown backend `{s}`; valid: {}",
+      valid.join(", ")
+    ))
   }
 }
 

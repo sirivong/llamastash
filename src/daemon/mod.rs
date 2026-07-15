@@ -376,13 +376,10 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       continue;
     }
     let start_time_secs = lookup_start_time(adopted.pid as u32).unwrap_or(0);
-    // Name the binary by the recorded backend so a re-adopted ds4 child reads
-    // as `ds4-server`, not a synthetic `llama-server` invocation.
-    let adopted_bin = if adopted.resolved_backend == crate::backend::ds4::DS4_BACKEND_ID {
-      "ds4-server"
-    } else {
-      "llama-server"
-    };
+    // Name the binary by the recorded backend's process marker so a re-adopted
+    // child reads as its real server, not a synthetic default invocation.
+    // Registry-driven — names no backend.
+    let adopted_bin = crate::backend::adopted_process_name(&adopted.resolved_backend);
     external_combined.push(orphans::ExternalProcess {
       pid: adopted.pid as u32,
       cmdline: format!(

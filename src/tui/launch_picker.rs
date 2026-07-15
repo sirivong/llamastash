@@ -296,7 +296,7 @@ impl LaunchPickerState {
       extras_input: crate::tui::input_field::InputField::default(),
       inline_edit: InlineEdit::default(),
       field: PickerField::Knob(KnobField::Ctx),
-      model_backend: BackendChoice::LlamaCpp,
+      model_backend: BackendChoice::from_id(crate::backend::DEFAULT_BACKEND_ID),
       active_instances: 0,
       prefer_port: None,
       device_catalog: Vec::new(),
@@ -568,33 +568,39 @@ impl LaunchPickerState {
   }
 
   /// The model's concrete backend, resolved from `model_backend`. The single
-  /// `BackendChoice` dispatch in the picker — `knob_supported`,
-  /// `seed_native_descriptors`, and `active_backend_id` all go through it, so
-  /// adding a backend means editing one **exhaustive** match (no wildcard), a
-  /// compile error until every variant is handled.
+  /// backend resolution in the picker — `knob_supported`,
+  /// `seed_native_descriptors`, and `active_backend_id` all go through it.
+  /// Registry-driven: an explicit id resolves to that backend, `Auto` / an
+  /// unknown id to the default. Names no backend.
   fn resolved_backend(&self) -> crate::backend::Backends {
-    use crate::backend::ds4::Ds4Backend;
-    use crate::backend::lemonade::LemonadeBackend;
-    use crate::backend::llama_cpp::LlamaCppBackend;
-    use crate::backend::Backends;
-    match self.model_backend {
-      BackendChoice::Lemonade => Backends::Lemonade(LemonadeBackend::new()),
-      BackendChoice::Ds4 => Backends::Ds4(Ds4Backend::new()),
-      BackendChoice::Auto | BackendChoice::LlamaCpp => Backends::LlamaCpp(LlamaCppBackend::new()),
+    use crate::backend::{Backend, Backends};
+    match &self.model_backend {
+      BackendChoice::Explicit(id) => Backends::all()
+        .into_iter()
+        .find(|b| b.id() == id.as_str())
+        .unwrap_or_else(crate::backend::default_backend),
+      BackendChoice::Auto => crate::backend::default_backend(),
     }
   }
 
   /// The `backend` override to send on the wire. `model_backend` is a *scoping*
   /// value the picker derives from the row's badge, not a user-chosen override
-  /// (the picker exposes no backend cycle). A `Ds4` scope is downgraded to
-  /// `Auto` so the daemon re-derives the route — it still lands on ds4 for a
-  /// compatible file, but the split-PRO half-file guard (Auto-only, since the
-  /// plan lets a *deliberate* `--backend ds4` pass) fires instead of a doomed
-  /// 100 GB+ load. `LlamaCpp`/`Lemonade` scopes pass through unchanged.
+  /// (the picker exposes no backend cycle). A scope for a **direct routing**
+  /// backend (a non-default backend the daemon picks by header) is downgraded to
+  /// `Auto` so the daemon re-derives the route — it still lands there for a
+  /// compatible file, but the daemon's Auto-only pre-spawn guards (e.g. a
+  /// split-file refusal) fire instead of a doomed load. The default backend and
+  /// a managed-multiplexer (identity-bound) scope pass through unchanged. Names
+  /// no backend.
   pub fn launch_backend(&self) -> BackendChoice {
-    match self.model_backend {
-      BackendChoice::Ds4 => BackendChoice::Auto,
-      other => other,
+    match &self.model_backend {
+      BackendChoice::Explicit(id)
+        if id != crate::backend::DEFAULT_BACKEND_ID
+          && !crate::backend::is_managed_multiplexer(id) =>
+      {
+        BackendChoice::Auto
+      }
+      other => other.clone(),
     }
   }
 
@@ -1256,7 +1262,7 @@ mod tests {
   #[test]
   fn lemonade_model_shows_only_ctx_and_extras() {
     let mut s = LaunchPickerState::for_model("Qwen2.5-7B");
-    s.model_backend = BackendChoice::Lemonade;
+    s.model_backend = BackendChoice::Explicit("lemonade".into());
     // Lemonade honors `ctx` (lemond's `ctx_size` load option) and the
     // free-form extras (`*_args`) — every other llama.cpp knob row is
     // hidden outright. There is no Backend row: a model lives in exactly
@@ -1892,11 +1898,11 @@ mod tests {
     // until it does.)
     for choice in [
       BackendChoice::Auto,
-      BackendChoice::LlamaCpp,
-      BackendChoice::Lemonade,
+      BackendChoice::Explicit("llamacpp".into()),
+      BackendChoice::Explicit("lemonade".into()),
     ] {
       let mut s = LaunchPickerState::for_model("m");
-      s.model_backend = choice;
+      s.model_backend = choice.clone();
       s.seed_native_descriptors();
       assert!(
         s.native_descriptors.is_empty(),
@@ -1904,7 +1910,7 @@ mod tests {
       );
     }
     let mut s = LaunchPickerState::for_model("m");
-    s.model_backend = BackendChoice::Ds4;
+    s.model_backend = BackendChoice::Explicit("ds4".into());
     s.seed_native_descriptors();
     assert_eq!(
       s.native_descriptors.len(),

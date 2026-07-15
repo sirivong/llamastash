@@ -165,10 +165,11 @@ async fn collect_running(state: &Arc<ProxyState>) -> Vec<RunningEntry> {
   let cat_snap = state.ctx.catalog.snapshot().await;
   let by_path = route::index_catalog_by_path(&cat_snap);
 
-  let umbrella_id = crate::backend::lemonade::umbrella_launch_id();
   let mut out = Vec::new();
   for (launch_id, model) in sup_snap.into_iter() {
-    if launch_id == umbrella_id {
+    // An infrastructure launch (a managed-multiplexer umbrella) is not a
+    // servable model — skip it in the /ui walk.
+    if crate::backend::is_infra_launch(&launch_id) {
       continue;
     }
     if !matches!(model.state().await, ManagedState::Ready) {
@@ -184,11 +185,18 @@ async fn collect_running(state: &Arc<ProxyState>) -> Vec<RunningEntry> {
           .unwrap_or_else(|| crate::util::paths::model_display_name(&m.path))
       })
       .unwrap_or_else(|| crate::util::paths::model_display_name(&id.path));
-    // ds4-backed models serve no web UI (D-ui). Uses the running model's
-    // *actual* resolved backend (last_params tag, falling back to the static
-    // compat badge) so a ds4-compatible file force-run on llama.cpp still
-    // serves its UI.
-    let serves_ui = !route::running_model_is_ds4(state, &id).await;
+    // Whether this model's backend serves a web UI. Uses the running model's
+    // *actual* resolved backend (last_params tag, falling back to the routing
+    // verdict) via `Backend::serves_web_ui`, so a compatible file force-run on a
+    // different backend still reflects that backend's UI. An unresolved backend
+    // falls back to the default backend's own verdict. Names no backend.
+    let serves_ui = {
+      use crate::backend::Backend;
+      route::running_model_backend(state, &id)
+        .await
+        .map(|b| b.serves_web_ui())
+        .unwrap_or_else(|| crate::backend::default_backend().serves_web_ui())
+    };
     out.push(RunningEntry {
       launch_id: launch_id.as_str().to_string(),
       model_id: id,

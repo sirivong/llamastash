@@ -29,11 +29,13 @@ use std::path::{Path, PathBuf};
 use super::identity::ModelIdentity;
 use super::{
   Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
-  ProcessLaunchSpec, Readiness, CREDENTIAL_ENV_STRIP,
+  NativeKnobResolution, ProcessLaunchSpec, Readiness, CREDENTIAL_ENV_STRIP,
 };
+use crate::daemon::context::MethodContext;
 use crate::daemon::probe::ProbeOptions;
-use crate::gguf::header::GgufHeader;
+use crate::gguf::header::{GgufHeader, GgufValue};
 use crate::launch::flag_aliases::KnobField;
+use crate::launch::mode::LaunchMode;
 use crate::launch::native_knobs::{translate, NativeKnobDescriptor, NativeKnobKind};
 use crate::launch::params::LaunchParams;
 
@@ -152,6 +154,52 @@ pub fn is_ds4_split_half(filename: &str) -> bool {
     }
   }
   false
+}
+
+/// ds4's KV-cache byte model, computed from the header. Lives with the backend
+/// (moved out of `gguf::memory`) so the ds4-specific cache geometry is
+/// self-contained; `gguf::memory::kv_bytes` reaches it through the
+/// [`Backend::kv_bytes`] hook, which gates it on the `deepseek4` arch — a
+/// deepseek4 GGUF gets this figure even on the llama.cpp fallback, matching the
+/// pre-seam behavior. This function itself is ungated (the caller decides), so
+/// it stays byte-identical to the estimator code it replaced.
+///
+/// ds4 keeps, per layer, a small uncompressed recent window plus a compressed
+/// cache of `ctx / compress_ratio[layer]` rows; every row is
+/// `attention.key_length` F32 latents (mirrors ds4.c's KV policy). Reading the
+/// per-layer `attention.compress_ratios` + `key_length` sizes both Flash and
+/// PRO from their own headers (~0.5 GiB at 8k ctx, ~11 GiB at 1M for Flash)
+/// instead of the naive GQA figure (`head_count_kv=1 × key_length × full ctx`),
+/// which ignores the sequence compression and over-counts ~8x at long context.
+pub fn ds4_kv_bytes(header: &GgufHeader, ctx: u64) -> u64 {
+  let key_length = header.u64(&["deepseek4.attention.key_length"]).unwrap_or(0);
+  // ds4 caches F32 latents (`sizeof(float)` in ds4.c).
+  const BYTES_PER_ELEM: u64 = 4;
+  // Per-layer uncompressed recent window; ds4 sizes it from the prefill chunk
+  // (~4k rows). A fixed conservative floor, capped at the context length.
+  const RAW_CAP_ROWS: u64 = 4096;
+  let raw_rows = RAW_CAP_ROWS.min(ctx.max(1));
+  let ratios: Vec<u64> = match header.get("deepseek4.attention.compress_ratios") {
+    Some(GgufValue::Array(a)) => a.iter().filter_map(GgufValue::as_u64).collect(),
+    _ => Vec::new(),
+  };
+  let mut rows: u64 = 0;
+  if ratios.is_empty() {
+    // No per-layer ratios (unexpected for a real ds4 GGUF): fall back to the
+    // arch's densest ratio (4) across every layer.
+    let n_layers = header.u64(&["deepseek4.block_count"]).unwrap_or(0);
+    rows = n_layers.saturating_mul(raw_rows.saturating_add(ctx / 4));
+  } else {
+    for r in &ratios {
+      rows = rows.saturating_add(raw_rows); // uncompressed recent window
+      if *r != 0 {
+        rows = rows.saturating_add(ctx / r); // compressed rows
+      }
+    }
+  }
+  rows
+    .saturating_mul(key_length)
+    .saturating_mul(BYTES_PER_ELEM)
 }
 
 /// Routed-expert tensor marker: `ffn_gate_exps` / `ffn_up_exps` /
@@ -378,10 +426,8 @@ impl Backend for Ds4Backend {
     DS4_FORBIDDEN_EXTRA_HEADS
   }
 
-  fn serves_web_ui(&self) -> bool {
-    // ds4-server has no web UI — `/ui` must never auto-pin a ds4 model.
-    false
-  }
+  // serves_web_ui: keeps the trait default (`false`) — ds4-server has no web UI,
+  // so `/ui` never auto-pins a ds4 model.
 
   fn accelerators(&self) -> AcceleratorSupport {
     // CPU is the always-available floor; whether a given ds4-server build
@@ -409,6 +455,154 @@ impl Backend for Ds4Backend {
   fn adoption_model_ids(&self) -> &'static [&'static str] {
     DS4_ALIAS_IDS
   }
+
+  fn kv_bytes(&self, header: &GgufHeader, arch: Option<&str>, ctx_len: u64) -> Option<u64> {
+    // The compressed-cache model, gated on the `deepseek4` arch exactly as the
+    // pre-seam `if a == "deepseek4"` estimator branch was.
+    (arch == Some("deepseek4")).then(|| ds4_kv_bytes(header, ctx_len))
+  }
+
+  fn auto_routes(&self, header: &GgufHeader) -> bool {
+    // The header-level routing predicate: arch `deepseek4` + the per-tensor
+    // quant contract. A compatible GGUF prefers ds4 (available + chat mode);
+    // otherwise it falls back to llama.cpp — never a refusal.
+    ds4_compatible(header)
+  }
+
+  fn serves_mode(&self, mode: LaunchMode) -> bool {
+    // ds4-server serves chat/completions, not embeddings/rerank — a mode
+    // mismatch routes to the fallback engine (a routing input, not an error).
+    matches!(mode, LaunchMode::Chat)
+  }
+
+  fn refuses(&self, arch: Option<&str>, path: &Path) -> Option<String> {
+    // Each half of the distributed/split PRO GGUF pair is unloadable *alone* by
+    // any engine, and attempting it wastes a 100 GB+ load. Gated on the
+    // `deepseek4` arch so an unrelated GGUF that merely matches the
+    // `…-Layers00-30` filename pattern is never wrongly refused.
+    if arch != Some("deepseek4") {
+      return None;
+    }
+    let name = path.file_name().and_then(|n| n.to_str())?;
+    is_ds4_split_half(name).then(|| {
+      format!(
+        "`{name}` is one half of ds4's distributed/split PRO GGUF — unloadable on its own. \
+         ds4 distributed mode is unsupported; use a single-file DeepSeek-V4 GGUF, or pass \
+         `--backend ds4` to attempt it anyway (ds4-server will surface its own error)."
+      )
+    })
+  }
+
+  fn available(&self, ctx: &MethodContext) -> bool {
+    // Intent (default-on unless `ds4.enabled: false`, `--ds4`/env force) AND the
+    // `ds4-server` binary resolves. The single availability predicate selection,
+    // the split-file guard, and `status` all consult.
+    ctx.ds4.intends_enabled(ctx.ds4_force)
+      && resolve_ds4_binary(ctx.ds4.binary.as_deref()).is_some()
+  }
+
+  fn installed(&self, ctx: &MethodContext) -> bool {
+    // Presence of the binary, independent of the enablement toggle.
+    resolve_ds4_binary(ctx.ds4.binary.as_deref()).is_some()
+  }
+
+  fn status_enabled(&self, ctx: &MethodContext) -> Option<bool> {
+    Some(self.available(ctx))
+  }
+
+  fn binary_path(&self, ctx: &MethodContext) -> Option<String> {
+    resolve_ds4_binary(ctx.ds4.binary.as_deref()).map(|b| b.display().to_string())
+  }
+
+  fn process_marker(&self) -> Option<&'static str> {
+    Some("ds4-server")
+  }
+
+  fn resolve_launch_binary(
+    &self,
+    ctx: &MethodContext,
+    _default_binary: PathBuf,
+    port: u16,
+  ) -> Result<(PathBuf, u16), String> {
+    // ds4 spawns `ds4-server` (not the device-owning `llama-server`) on the
+    // reserved pool port.
+    match resolve_ds4_binary(ctx.ds4.binary.as_deref()) {
+      Some(bin) => Ok((bin, port)),
+      None => Err(
+        "ds4 backend selected but no `ds4-server` binary found; set `ds4.binary` \
+         or put `ds4-server` on PATH (see docs/usage.md)"
+          .to_string(),
+      ),
+    }
+  }
+
+  async fn resolve_native_knobs(
+    &self,
+    ctx: &MethodContext,
+    params: &mut LaunchParams,
+    weights_bytes: u64,
+  ) -> NativeKnobResolution {
+    // `ssd_streaming` Auto → on when residency won't fit. ds4 holds the full
+    // model plus a cached-expert/KV working set the deepseek4 demand model can't
+    // see (~1.25× weights), so a full-residency spawn OOM-kills mid-load
+    // (ds4-server sets its own oom_score_adj=1000) — disk-stream instead. A user
+    // on/off wins; only the unset/Auto knob resolves here.
+    let mut out = NativeKnobResolution::default();
+    if matches!(
+      params.backend_knobs.get("ssd_streaming"),
+      Some(crate::config::KnobValue::Set(_))
+    ) {
+      return out;
+    }
+    let Some(host_slot) = ctx.host_metrics.as_ref() else {
+      return out;
+    };
+    let snapshot = host_slot.read().await.clone();
+    if !crate::launch::admission::is_sampled(&snapshot) {
+      return out;
+    }
+    let free = crate::launch::admission::effective_free_bytes(&snapshot);
+    if ds4_should_auto_stream(weights_bytes, free) {
+      params.backend_knobs.insert(
+        "ssd_streaming".to_string(),
+        crate::config::KnobValue::Set("true".to_string()),
+      );
+      out.auto_set.insert("ssd_streaming".to_string());
+      let gib = crate::init::detection::fmt_gib;
+      out.warnings.push(format!(
+        "ds4 needs ~{} resident but only {} is free — enabled SSD streaming to launch \
+         from disk (slower). Set `ssd_streaming: false` to force full residency.",
+        gib(ds4_resident_estimate(weights_bytes)),
+        gib(free)
+      ));
+    }
+    out
+  }
+
+  fn bypasses_admission(&self, params: &LaunchParams) -> bool {
+    // Streaming weights from disk skips the hard OOM refusal (on-disk bytes ≠
+    // memory demand). Reads the resolved `ssd_streaming` knob.
+    matches!(
+      params.backend_knobs.get("ssd_streaming"),
+      Some(crate::config::KnobValue::Set(v)) if v == "true"
+    )
+  }
+}
+
+/// ds4's resident working set estimate: ~1.25× raw weights (the cached-expert
+/// pool + KV + runtime the `deepseek4` demand model can't see). Its own auto
+/// budget targets ~99 GiB for an 80 GiB Flash quant, which this tracks.
+/// Saturating so a pathological weight total can't overflow.
+fn ds4_resident_estimate(weights_total: u64) -> u64 {
+  weights_total.saturating_add(weights_total / 4)
+}
+
+/// Whether a ds4 launch should auto-enable SSD streaming: its resident estimate
+/// exceeds the effective free memory, so a full-residency spawn would OOM-kill
+/// mid-load. Pure so the memory decision is unit-testable without a live host
+/// sampler.
+fn ds4_should_auto_stream(weights_total: u64, free: u64) -> bool {
+  ds4_resident_estimate(weights_total) > free
 }
 
 #[cfg(test)]
@@ -723,5 +917,20 @@ mod tests {
       ds4_compatible(&read.header),
       "real published Flash must be ds4-compatible"
     );
+  }
+
+  #[test]
+  fn auto_stream_triggers_only_when_residency_exceeds_free() {
+    let gib = |g: u64| g * 1024 * 1024 * 1024;
+    // 80 GiB Flash weights → ~100 GiB resident estimate.
+    assert_eq!(ds4_resident_estimate(gib(80)), gib(100));
+    // Won't fit: 100 GiB resident > 95 GiB free → stream (the Strix Halo case).
+    assert!(ds4_should_auto_stream(gib(80), gib(95)));
+    // Fits with headroom: 100 GiB resident < 200 GiB free → full residency.
+    assert!(!ds4_should_auto_stream(gib(80), gib(200)));
+    // Exact boundary is not a shortfall (estimate == free → no stream).
+    assert!(!ds4_should_auto_stream(gib(80), gib(100)));
+    // A pathological weight total saturates instead of overflowing.
+    assert!(ds4_should_auto_stream(u64::MAX, gib(100)));
   }
 }

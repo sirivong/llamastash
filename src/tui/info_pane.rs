@@ -223,7 +223,7 @@ fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a>
       // binary name — the discriminating part — always survives.
       let mut entries: Vec<(&str, String)> = vec![(p, flavor_chunk)];
       for b in &app.daemon_info.backend_binaries {
-        if b.id != "llamacpp" {
+        if b.id != crate::backend::DEFAULT_BACKEND_ID {
           entries.push((b.binary.as_str(), format!(" ({})", b.id)));
         }
       }
@@ -497,7 +497,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }
   }
 

@@ -11,6 +11,7 @@
 //! advanced KV quantisation modes where the byte-per-element factor
 //! changes. Consumers should display these as "estimate" not "exact".
 
+use crate::backend::Backend;
 use crate::gguf::header::{GgufHeader, GgufValue};
 use crate::gguf::metadata::Quant;
 
@@ -178,11 +179,16 @@ pub fn weights_bytes(header: &GgufHeader) -> u64 {
 /// independently via `--cache-type-k` / `--cache-type-v`.
 pub fn kv_bytes(header: &GgufHeader, arch: Option<&str>, opts: EstimateOptions) -> u64 {
   let Some(a) = arch else { return 0 };
-  // DeepSeek-V4 (ds4): neither standard GQA nor V2-style MLA. Modeled from the
-  // header (`compress_ratios` + `key_length`) because the generic paths would
-  // over-count ~8x at long context — see `deepseek4_kv_bytes`.
-  if a == "deepseek4" {
-    return deepseek4_kv_bytes(header, opts.ctx_len);
+  // A backend may model a header's KV cache better than the generic GQA/MLA
+  // math (some compressed caches over-count heavily on the naive path). The
+  // backend registry owns the header→model mapping and keys on the header
+  // itself, so the right figure applies even when the model falls back to a
+  // different backend — and this path names no backend.
+  if let Some(bytes) = crate::backend::Backends::all()
+    .iter()
+    .find_map(|b| b.kv_bytes(header, Some(a), opts.ctx_len))
+  {
+    return bytes;
   }
   // MLA (deepseek2, kimi-k2): caches one compressed latent per token per
   // layer, not per-head K/V — the standard formula over-estimates ~10x.
@@ -246,46 +252,6 @@ fn mla_kv_elements(header: &GgufHeader, arch: &str) -> Option<u128> {
     .u64(&[format!("{arch}.rope.dimension_count")])
     .unwrap_or(0);
   Some((n_layers as u128).saturating_mul((kv_lora_rank + rope_dim) as u128))
-}
-
-/// DeepSeek-V4 (ds4) KV cache bytes, modeled from the header rather than the
-/// generic GQA/MLA paths. ds4 keeps, per layer, a small uncompressed recent
-/// window plus a *compressed* cache of `ctx / compress_ratio[layer]` rows;
-/// every row is `attention.key_length` F32 latents (mirrors ds4.c's KV
-/// policy). Reading the per-layer `attention.compress_ratios` + `key_length`
-/// sizes both Flash and PRO from their own headers — no per-model constants —
-/// and tracks reality (~0.5 GiB at 8k ctx, ~11 GiB at 1M for Flash) instead
-/// of the naive GQA figure (`head_count_kv=1 × key_length × full ctx`), which
-/// ignores the sequence compression and over-counts ~8x at long context.
-fn deepseek4_kv_bytes(header: &GgufHeader, ctx: u64) -> u64 {
-  let key_length = header.u64(&["deepseek4.attention.key_length"]).unwrap_or(0);
-  // ds4 caches F32 latents (`sizeof(float)` in ds4.c).
-  const BYTES_PER_ELEM: u64 = 4;
-  // Per-layer uncompressed recent window; ds4 sizes it from the prefill chunk
-  // (~4k rows). A fixed conservative floor, capped at the context length.
-  const RAW_CAP_ROWS: u64 = 4096;
-  let raw_rows = RAW_CAP_ROWS.min(ctx.max(1));
-  let ratios: Vec<u64> = match header.get("deepseek4.attention.compress_ratios") {
-    Some(GgufValue::Array(a)) => a.iter().filter_map(GgufValue::as_u64).collect(),
-    _ => Vec::new(),
-  };
-  let mut rows: u64 = 0;
-  if ratios.is_empty() {
-    // No per-layer ratios (unexpected for a real ds4 GGUF): fall back to the
-    // arch's densest ratio (4) across every layer.
-    let n_layers = header.u64(&["deepseek4.block_count"]).unwrap_or(0);
-    rows = n_layers.saturating_mul(raw_rows.saturating_add(ctx / 4));
-  } else {
-    for r in &ratios {
-      rows = rows.saturating_add(raw_rows); // uncompressed recent window
-      if *r != 0 {
-        rows = rows.saturating_add(ctx / r); // compressed rows
-      }
-    }
-  }
-  rows
-    .saturating_mul(key_length)
-    .saturating_mul(BYTES_PER_ELEM)
 }
 
 /// Per-layer attention geometry for the KV estimate.

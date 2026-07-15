@@ -120,18 +120,6 @@ pub struct ManagedRow {
   pub backend: Option<String>,
 }
 
-impl ManagedRow {
-  /// Whether this running launch actually dispatched to ds4.
-  pub fn is_ds4(&self) -> bool {
-    self.backend.as_deref() == Some(crate::backend::ds4::DS4_BACKEND_ID)
-  }
-
-  /// Whether this running launch actually dispatched to the Lemonade umbrella.
-  pub fn is_lemonade(&self) -> bool {
-    self.backend.as_deref() == Some(crate::backend::lemonade::LEMONADE_BACKEND_ID)
-  }
-}
-
 /// Persisted "last successful launch params" for one model, fetched
 /// via the daemon's `last_params_list` method. The TUI consults this
 /// when opening the launch picker so the user lands on the same
@@ -854,18 +842,15 @@ impl App {
     self.backend_by_path.get(path).map(String::as_str)
   }
 
-  /// Whether a plain launch of `path` would route to ds4 — the daemon's badge,
-  /// not a TUI-side re-derivation.
-  pub fn is_ds4_path(&self, path: &std::path::Path) -> bool {
-    self.predicted_backend(path) == Some(crate::backend::ds4::DS4_BACKEND_ID)
-  }
-
   /// True when more than one backend is actually in play — any model routes to
   /// something other than the default `llamacpp`. Gates the Models-list Backend
   /// column (like `multi_device` gates the Device column) so a single-backend
   /// host never sees a redundant all-`llamacpp` column.
   pub fn multi_backend(&self) -> bool {
-    self.backend_by_path.values().any(|b| b != "llamacpp")
+    self
+      .backend_by_path
+      .values()
+      .any(|b| b != crate::backend::DEFAULT_BACKEND_ID)
   }
 
   /// Apply a `status` IPC response. Refreshes the supervisor's
@@ -1566,13 +1551,13 @@ impl App {
     // picker can't force a cross-backend launch — straight off the daemon's
     // per-row prediction (`backend_by_path`), no TUI-side re-derivation.
     use crate::launch::params::BackendChoice;
-    state.model_backend = match path.as_ref().and_then(|p| self.predicted_backend(p)) {
-      Some(b) if b == crate::backend::ds4::DS4_BACKEND_ID => BackendChoice::Ds4,
-      Some(b) if b == crate::backend::lemonade::LEMONADE_BACKEND_ID => BackendChoice::Lemonade,
-      _ => BackendChoice::LlamaCpp,
-    };
-    // Surface the model's backend native knobs (six for ds4, none for
-    // llama.cpp / Lemonade).
+    state.model_backend = path
+      .as_ref()
+      .and_then(|p| self.predicted_backend(p))
+      .map(BackendChoice::from_id)
+      .unwrap_or_else(|| BackendChoice::from_id(crate::backend::DEFAULT_BACKEND_ID));
+    // Surface the model's backend native knobs (its own set, or none for a
+    // backend with no native-knob channel).
     state.seed_native_descriptors();
     // Populate the Device row from the launch device catalog — the
     // exact `--device` selectors the daemon's configured binaries
@@ -1906,21 +1891,26 @@ impl App {
       Some(m) => m,
       None => return vec![RightTab::Settings],
     };
-    // The lemonade umbrella row is infrastructure, not a model: it has
+    // A managed-multiplexer umbrella row is infrastructure, not a model: it has
     // no launch params to edit and chatting with the bare umbrella is
     // meaningless. Its log tail is the one useful surface.
-    if managed.launch_id == crate::backend::lemonade::umbrella_launch_id().as_str() {
+    if crate::backend::is_infra_launch(&crate::daemon::registry::LaunchId(
+      managed.launch_id.clone(),
+    )) {
       return vec![RightTab::Logs];
     }
-    // A delegated lemonade model (resident in the umbrella): the umbrella
+    // A delegated multiplexer model (resident in the umbrella): the umbrella
     // honors no launch knobs, so Settings is dropped; the mode surface
     // (Chat / Embed / Rerank) stays — requests ride the umbrella's
-    // OpenAI-compat port directly — and Logs tails the shared `lemond`
-    // log. A model with no mode surface (e.g. Whisper transcription,
-    // hint `Unknown`) gets Logs alone. Keys on the resolved `backend`
-    // (the umbrella row is already dropped at ingest), since the launch id
-    // is now a plain `L#` shared with every other backend.
-    if managed.backend.as_deref() == Some(crate::backend::lemonade::LEMONADE_BACKEND_ID) {
+    // OpenAI-compat port directly — and Logs tails the shared umbrella log. A
+    // model with no mode surface (hint `Unknown`) gets Logs alone. Keys on the
+    // resolved `backend`'s lifecycle (the umbrella row is already dropped at
+    // ingest), since the launch id is a plain `L#` shared with every backend.
+    if managed
+      .backend
+      .as_deref()
+      .is_some_and(crate::backend::is_managed_multiplexer)
+    {
       if managed.state != SurfaceState::Ready {
         return vec![RightTab::Logs];
       }
@@ -2170,7 +2160,7 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
       .and_then(Value::as_str)
       .map(String::from),
     multimodal: row.get("multimodal").and_then(parse_multimodal),
-    ds4_compatible: false,
+    routed_backend: None,
   })
 }
 
@@ -2260,12 +2250,12 @@ fn parse_proxy_info(v: &Value) -> Option<ProxyInfo> {
 
 fn parse_status_row(row: &Value) -> Option<ManagedRow> {
   let launch_id = row.get("launch_id")?.as_str()?.to_string();
-  // The Lemonade umbrella is the multiplexer *process*, not a model: the daemon
-  // tracks it as a managed launch, but its path is the `lemond` binary, so it
-  // would render as a bogus "lemond" running row and yank an invalid model id.
-  // Drop it from the TUI — specific `lemonade://<id>` launches still surface as
-  // their own rows. (The daemon `status` / CLI keep it; this is TUI-only.)
-  if launch_id == crate::backend::lemonade::umbrella_launch_id().as_str() {
+  // A managed-multiplexer umbrella is the multiplexer *process*, not a model:
+  // the daemon tracks it as a managed launch, but its path is the umbrella
+  // binary, so it would render as a bogus running row and yank an invalid model
+  // id. Drop it from the TUI — delegated model launches still surface as their
+  // own rows. (The daemon `status` / CLI keep it; this is TUI-only.)
+  if crate::backend::is_infra_launch(&crate::daemon::registry::LaunchId(launch_id.clone())) {
     return None;
   }
   let port = row.get("port")?.as_u64()? as u16;
@@ -2401,7 +2391,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      ds4_compatible: false,
+      routed_backend: None,
     }
   }
 
@@ -2474,7 +2464,7 @@ mod tests {
     let picker = app.build_default_picker().expect("picker builds");
     assert_eq!(
       picker.model_backend,
-      crate::launch::params::BackendChoice::Lemonade
+      crate::launch::params::BackendChoice::Explicit("lemonade".into())
     );
     let visible: Vec<PickerField> = PickerField::all()
       .iter()
@@ -2527,9 +2517,16 @@ mod tests {
     app
       .backend_by_path
       .insert(PathBuf::from("/m/b.gguf"), "ds4".into());
-    assert!(app.multi_backend(), "a ds4/lemonade row flips it on");
-    assert!(app.is_ds4_path(&PathBuf::from("/m/b.gguf")));
-    assert!(!app.is_ds4_path(&PathBuf::from("/m/a.gguf")));
+    assert!(app.multi_backend(), "a non-default backend row flips it on");
+    // The per-path backend prediction comes straight off the daemon's badge.
+    assert_eq!(
+      app.predicted_backend(&PathBuf::from("/m/b.gguf")),
+      Some("ds4")
+    );
+    assert_eq!(
+      app.predicted_backend(&PathBuf::from("/m/a.gguf")),
+      Some("llamacpp")
+    );
   }
 
   #[test]
