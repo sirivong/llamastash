@@ -169,13 +169,13 @@ pub struct RunningSnapshot {
   /// JSON stays human-readable.
   pub started_at: u64,
   /// The `L#` launch handle assigned by [`crate::daemon::registry::SupervisorRegistry::next_id`].
-  /// Only stamped on **delegated** (Lemonade) rows: they have no supervisor of
-  /// their own, so the snapshot is the sole home for their launch id — `status`
-  /// reads it here and `stop_model` reverse-maps it to the umbrella model name.
-  /// Process launches key their id off the live supervisor map instead, so this
-  /// stays `None` for them (and is omitted from `state.json`, keeping those rows
-  /// byte-stable). The boot sweep clears `running`, so a persisted id never
-  /// survives a restart to collide with the fresh counter.
+  /// Stamped on every row: a **delegated** (Lemonade) row has no supervisor of
+  /// its own, so the snapshot is the sole home for its id (`status` reads it,
+  /// `stop_model` reverse-maps it to the umbrella model name); a **process** row
+  /// records it too so `backend_for_launch` can resolve the launch's backend and
+  /// dispatch its stop to the right one. The boot sweep clears `running`, so a
+  /// persisted id never survives a restart to collide with the fresh counter.
+  /// `None` only on a legacy/adopted row that predates the stamp.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub launch_id: Option<LaunchId>,
   pub params: LaunchParams,

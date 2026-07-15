@@ -4,6 +4,11 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ## [Unreleased]
 
+### Fixed
+
+- Lemonade models no longer appear in the `/ui` chooser as web-UI-capable — they serve no browser UI, so the chooser lists them non-selectable. (`22fc76f`)
+- Stopping a busy Lemonade umbrella no longer times out mid-teardown and leaves a ghost running row; the stop client now waits out the grace window. (`22fc76f`)
+
 ## [0.0.6] — 2026-07-13
 
 ### Added

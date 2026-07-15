@@ -895,6 +895,10 @@ pub(crate) async fn spawn_supervised(
 
   // Persist running snapshot, retained by `(id, port)` so the same GGUF launched
   // twice on different ports persists both (the orphan sweep re-adopts either).
+  // Stamp the live `L#` (same value keying the supervisor map above) so
+  // `backend_for_launch` can resolve *this* launch's backend from the snapshot
+  // and hand its stop to the right backend — a process backend that overrides
+  // `stop` is then dispatched correctly, not silently routed to the default.
   let pid = model.pid().await.unwrap_or(0) as i32;
   let started_at = SystemTime::now()
     .duration_since(UNIX_EPOCH)
@@ -909,7 +913,7 @@ pub(crate) async fn spawn_supervised(
         pid,
         port,
         started_at,
-        launch_id: None,
+        launch_id: Some(launch_id.clone()),
         params: launch_params.clone(),
         actuals: Default::default(),
         resolved_backend: resolved_backend_id.clone(),
@@ -1308,6 +1312,60 @@ mod tests {
       none_auto.get("auto_knob"),
       Some(&KnobValue::Set("true".to_string())),
       "with no auto-set keys, all knobs persist"
+    );
+  }
+
+  #[tokio::test]
+  async fn backend_for_launch_resolves_process_launch_from_its_snapshot() {
+    use crate::backend::Backend;
+    // A process launch stamps its `L#` + resolved backend on the running
+    // snapshot, so `backend_for_launch` hands the stop to the launch's *real*
+    // backend rather than defaulting — the guard for a process-per-model backend
+    // that overrides `stop`. (llama.cpp and ds4 share the default stop today, so
+    // this is latent-correctness, not observable yet.)
+    let ctx = MethodContext::new(ShutdownToken::new());
+    let push = |id_path: &'static str, lid: &'static str, backend: &'static str, port: u16| {
+      let identity = ModelIdentity::Gguf(crate::gguf::identity::compute(id_path, b"hdr"));
+      let params = LaunchParams::new(PathBuf::from(id_path), LaunchMode::Chat);
+      RunningSnapshot {
+        id: identity,
+        pid: 1,
+        port,
+        started_at: 0,
+        launch_id: Some(LaunchId(lid.to_string())),
+        params,
+        actuals: Default::default(),
+        resolved_backend: backend.to_string(),
+      }
+    };
+    ctx
+      .state
+      .mutate(|s| {
+        s.running.push(push("/m/ds4.gguf", "L1", "ds4", 41100));
+        s.running
+          .push(push("/m/llama.gguf", "L2", "llamacpp", 41101));
+      })
+      .await;
+
+    assert_eq!(
+      backend_for_launch(&ctx, &LaunchId("L1".to_string()))
+        .await
+        .id(),
+      "ds4",
+      "a ds4-tagged process launch resolves to ds4, not the default backend"
+    );
+    assert_eq!(
+      backend_for_launch(&ctx, &LaunchId("L2".to_string()))
+        .await
+        .id(),
+      "llamacpp"
+    );
+    // An unknown id falls back to the default backend.
+    assert_eq!(
+      backend_for_launch(&ctx, &LaunchId("L9".to_string()))
+        .await
+        .id(),
+      crate::backend::DEFAULT_BACKEND_ID
     );
   }
 
