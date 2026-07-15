@@ -264,6 +264,23 @@ impl Backend for LemonadeBackend {
     })
   }
 
+  fn synthetic_identity(&self, path: &Path) -> Option<ModelIdentity> {
+    // Only a `lemonade://<name>` synthetic path yields an identity; a local
+    // GGUF (or any other path) is `None`, so the generic launch / status path
+    // falls through to the file-keyed branch for it.
+    registry_name_from_path(path).map(|name| {
+      ModelIdentity::Backend(BackendModelId {
+        backend: LEMONADE_BACKEND_ID.to_string(),
+        name: name.to_string(),
+      })
+    })
+  }
+
+  fn umbrella_openai_prefix(&self) -> Option<&'static str> {
+    // lemond serves its OpenAI surface under `/api` (`/api/v1/...`).
+    Some("/api")
+  }
+
   fn prepare_launch(
     &self,
     params: &LaunchParams,

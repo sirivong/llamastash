@@ -13,6 +13,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::backend::Backend;
+
 /// Inputs to [`locate`]. Each source is optional; the function
 /// applies the priority order described in the module docs.
 #[derive(Debug, Clone, Default)]
@@ -58,8 +60,13 @@ pub fn locate(inputs: LocateInputs) -> Result<PathBuf, LocateError> {
   }
   // Fall back to `$PATH`. `which::which_all` returns *every* match in
   // path order; we take the first and log the rest so the user can
-  // pin a specific one via flag/env if the first is wrong.
-  match which::which_all("llama-server") {
+  // pin a specific one via flag/env if the first is wrong. The binary name
+  // is the default backend's process marker, so this resolver names no
+  // backend (the default backend's marker is `llama-server`).
+  let marker = crate::backend::default_backend()
+    .process_marker()
+    .unwrap_or("llama-server");
+  match which::which_all(marker) {
     Ok(iter) => {
       let candidates: Vec<PathBuf> = iter.collect();
       match candidates.first() {

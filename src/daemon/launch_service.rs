@@ -222,39 +222,30 @@ pub(crate) async fn compose_and_spawn(
     )
   })?;
 
-  // Resolve identity + (for GGUF) the architecture. A Lemonade synthetic path
-  // (`lemonade://<name>`) has no local file, so derive a backend identity from
-  // the registry name instead of reading a header — that is what makes the
-  // managed-multiplexer dispatch below select Lemonade rather than crashing on
-  // the missing GGUF. Every other path is a local GGUF: one header read yields
-  // both the canonical id and the arch.
+  // Resolve identity + (for GGUF) the architecture. A file-less backend-registry
+  // path (e.g. a managed-multiplexer's synthetic `<scheme>://<name>`) has no local
+  // file, so a backend mints the identity from the path instead of reading a
+  // header — that is what makes the backend dispatch below select the registry
+  // backend rather than crashing on the missing GGUF. Every other path is a local
+  // GGUF: one header read yields both the canonical id and the arch. Names no
+  // backend — the synthetic-path recognition is registry-driven.
   let (id, arch, native_ctx, routed_backend, identity): (
     ModelId,
     Option<String>,
     Option<u32>,
     Option<String>,
     ModelIdentity,
-  ) = match crate::backend::lemonade::registry_name_from_path(&parsed.model_path) {
-    Some(name) => {
-      let backend_id = crate::backend::identity::BackendModelId {
-        backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
-        name: name.to_string(),
-      };
+  ) = match crate::backend::synthetic_identity_for_path(&parsed.model_path) {
+    Some((identity, _backend_id)) => {
       // A synthetic ModelId keeps the file-keyed plumbing (log path, running
       // snapshot retention) working; the sentinel header hash marks it as
-      // not-a-GGUF. Arch + native_ctx are `None` — lemond owns the recipe,
-      // not us, so the strict-fit ctx gate never applies to a Lemonade row.
+      // not-a-GGUF. Arch + native_ctx are `None` — the backend owns the recipe,
+      // not us, so the strict-fit ctx gate never applies to such a row.
       let synthetic = ModelId {
         path: parsed.model_path.clone(),
         header_blake3: [0u8; 32],
       };
-      (
-        synthetic,
-        None,
-        None,
-        None,
-        ModelIdentity::Backend(backend_id),
-      )
+      (synthetic, None, None, None, identity)
     }
     None => {
       let (id, arch, native_ctx, routed_backend) = resolve_model_id_and_arch(&parsed.model_path)?;
@@ -580,9 +571,10 @@ pub(crate) async fn compose_and_spawn(
     }
   }
   // Leave `device` exactly as the resolver chain set it. When no layer
-  // selected one it stays `None`, so `compose()` emits no `--device`
-  // and `llama-server` keeps its default (auto-select / split across
-  // every visible GPU) — the documented backwards-compatible behavior.
+  // selected one it stays `None`, so the backend's argv emitter
+  // (`src/backend/llama_cpp/compose.rs`) emits no `--device` and
+  // `llama-server` keeps its default (auto-select / split across every
+  // visible GPU) — the documented backwards-compatible behavior.
 
   // Reject loopback-breaking / auth-bypass extras flags before
   // spawn. `compose` strips defensively too, but failing fast here
@@ -637,7 +629,8 @@ pub(crate) async fn compose_and_spawn(
       };
       owning_binary.unwrap_or_else(|| {
         // Stale persisted selector or the catalog probe failed. Drop
-        // the selector so `compose()` doesn't emit an invalid
+        // the selector so the backend's argv emitter
+        // (`src/backend/llama_cpp/compose.rs`) doesn't emit an invalid
         // `--device` the default binary would reject, and spawn the
         // default binary with auto-select.
         log::warn!(
@@ -857,6 +850,7 @@ pub(crate) async fn spawn_supervised(
     plan: launch_spec,
     origin,
     fit_gate,
+    resolved_backend: resolved_backend_id.clone(),
   })
   .await;
   let model = match spawn_result {
@@ -1126,20 +1120,25 @@ fn spawn_last_params_recorder(
           state
             .mutate(|s| s.upsert_last_params(id.clone(), params.clone(), resolved_backend.clone()))
             .await;
-          // Post-launch actuals: stamp what `--fit` actually chose
+          // Post-launch actuals: stamp what the backend actually chose
           // on the running snapshot so `status` / the TUI Running view /
           // `show` can render the resolved context. The supervisor's
-          // readiness gate already fetched `/props` for fit-governed
+          // readiness gate already fetched actuals for fit-governed
           // launches (to run the strict-fit ctx-clamp check) and stashed
           // the result on the model, so reuse it instead of fetching
           // twice; only fall back to a fetch when the gate didn't run
-          // (pinned ctx / no trained-window metadata). Best-effort — an
-          // empty result (no `/props`, transport error) leaves the row
-          // "unavailable".
+          // (pinned ctx / no trained-window metadata). The fetch is the
+          // resolved backend's — a backend with no actuals endpoint (ds4)
+          // returns empty, so the row stays "unavailable" without a wasted
+          // probe. Best-effort — an empty result leaves the row unavailable.
           if let Some(port) = params.port {
             let mut actuals = model.actuals().await;
             if actuals.is_empty() {
-              actuals = crate::daemon::actuals::fetch(port, Duration::from_secs(5)).await;
+              let backend = crate::backend::Backends::all()
+                .into_iter()
+                .find(|b| b.id() == resolved_backend)
+                .unwrap_or_else(crate::backend::default_backend);
+              actuals = backend.fetch_actuals(port, Duration::from_secs(5)).await;
             }
             if !actuals.is_empty() {
               let id = id.clone();

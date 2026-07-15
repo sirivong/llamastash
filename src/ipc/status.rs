@@ -497,23 +497,18 @@ mod tests {
     port: u16,
     launch_id: &str,
   ) -> crate::daemon::state_store::RunningSnapshot {
+    let path = PathBuf::from(format!("lemonade://{name}"));
+    let (id, resolved_backend) = crate::backend::synthetic_identity_for_path(&path)
+      .expect("a lemonade:// path mints a synthetic backend identity");
     crate::daemon::state_store::RunningSnapshot {
-      id: crate::backend::identity::ModelIdentity::Backend(
-        crate::backend::identity::BackendModelId {
-          backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
-          name: name.to_string(),
-        },
-      ),
+      id,
       pid: 0,
       port,
       started_at: 0,
       launch_id: Some(crate::daemon::registry::LaunchId(launch_id.to_string())),
-      params: LaunchParams::new(
-        PathBuf::from(format!("lemonade://{name}")),
-        LaunchMode::Chat,
-      ),
+      params: LaunchParams::new(path, LaunchMode::Chat),
       actuals: Default::default(),
-      resolved_backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
+      resolved_backend,
     }
   }
 

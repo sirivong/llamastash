@@ -41,7 +41,7 @@ const LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 /// Keep this many rotated segments (`<base>.1` … `<base>.N`).
 const LOG_KEEP_SEGMENTS: usize = 5;
 
-use crate::backend::{ProcessLaunchSpec, Readiness};
+use crate::backend::{Backend, Backends, ProcessLaunchSpec, Readiness};
 use crate::daemon::probe::{self, ProbeOutcome};
 use crate::gguf::identity::ModelId;
 use crate::launch::mode::LaunchMode;
@@ -158,6 +158,11 @@ pub struct ManagedSpawn {
   /// untouched (pinned ctx, missing trained-window metadata, Lemonade
   /// rows). See [`FitGate`].
   pub fit_gate: Option<FitGate>,
+  /// The id of the backend this launch resolved to. The probe task uses it to
+  /// call the right backend's `fetch_actuals` on Loading → Ready — so the
+  /// supervisor reads post-launch actuals without naming an endpoint. An
+  /// unknown / unmatched id falls back to the default backend.
+  pub resolved_backend: String,
 }
 
 /// Resolved inputs for the strict-fit ctx-clamp readiness gate.
@@ -215,9 +220,9 @@ struct ManagedInner {
   latest_resource: RwLock<Option<super::resources::ResourceReading>>,
   /// What `--fit` actually resolved, captured once by the readiness gate
   /// on the Loading → Ready transition (for fit-governed launches). The
-  /// `last_params` recorder reads this to stamp the running snapshot so
-  /// `/props` is fetched at most once per launch. Empty until the gate
-  /// runs (or for launches the gate skips).
+  /// `last_params` recorder reads this to stamp the running snapshot so the
+  /// backend's actuals are fetched at most once per launch. Empty until the
+  /// gate runs (or for launches the gate skips).
   actuals: RwLock<super::actuals::Actuals>,
   /// Where the launch came from. Read by the idle-TTL sweeper so it
   /// only ever evicts `AutoStart` supervisors.
@@ -330,7 +335,7 @@ impl ManagedModel {
   /// What `--fit` resolved, as captured by the readiness gate. Empty
   /// (`is_empty()`) for launches the gate skipped (pinned ctx / no
   /// trained-window metadata); the `last_params` recorder then fetches
-  /// `/props` itself.
+  /// the actuals itself.
   pub async fn actuals(&self) -> super::actuals::Actuals {
     *self.inner.actuals.read().await
   }
@@ -573,6 +578,12 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
   // Strict-fit ctx-clamp gate: the caller populates this only for
   // fit-governed launches; `None` leaves the readiness path unchanged.
   let fit_gate = input.fit_gate;
+  // Resolve the launch's backend so the probe reads actuals from the right
+  // engine (only when a fit gate is present) — no endpoint hard-coded here.
+  let probe_backend = Backends::all()
+    .into_iter()
+    .find(|b| b.id() == input.resolved_backend)
+    .unwrap_or_else(crate::backend::default_backend);
   spawn_supervised("probe", async move {
     let outcome = match &expect_model_ids {
       // ds4: 200 on `/v1/models` plus a body advertising a ds4 alias.
@@ -601,10 +612,12 @@ pub async fn spawn(input: ManagedSpawn) -> Result<ManagedModel, SpawnError> {
         // For fit-governed launches, read what `--fit` resolved before
         // declaring Ready: the gate needs it, and stashing it on the
         // model lets the `last_params` recorder reuse it instead of
-        // hitting `/props` a second time. Best-effort — a failed fetch
+        // fetching the actuals a second time. Best-effort — a failed fetch
         // yields empty actuals and the gate simply can't fire.
         let mut actuals = if fit_gate.is_some() {
-          super::actuals::fetch(probe_model.inner.port, Duration::from_secs(5)).await
+          probe_backend
+            .fetch_actuals(probe_model.inner.port, Duration::from_secs(5))
+            .await
         } else {
           super::actuals::Actuals::default()
         };

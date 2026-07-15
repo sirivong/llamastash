@@ -141,6 +141,7 @@ async fn pre_launch(
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");

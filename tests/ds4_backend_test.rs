@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use llamastash::backend::BackendConfig;
 use llamastash::config::{Ds4Config, PortRange};
 use llamastash::daemon::{run_foreground, DaemonOptions};
 use llamastash::gguf::test_fixtures::FixtureBuilder;
@@ -121,14 +122,18 @@ async fn ds4_compatible_model_auto_routes_to_ds4_reaches_ready_and_stops() {
   let model_path = model_dir.join("deepseek-v4-flash.gguf");
   std::fs::write(&model_path, ds4_gguf_bytes()).unwrap();
 
+  let base = DaemonOptions::rooted_at(state.clone());
   let opts = DaemonOptions {
     binary: Some(fake_llama_binary()),
     port_range: allocate_port_range(),
-    ds4: Ds4Config {
-      enabled: Some(true),
-      binary: Some(fake_ds4_binary()),
+    backend: BackendConfig {
+      ds4: Ds4Config {
+        enabled: Some(true),
+        binary: Some(fake_ds4_binary()),
+      },
+      ..base.backend.clone()
     },
-    ..DaemonOptions::rooted_at(state.clone())
+    ..base
   };
   let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
@@ -193,14 +198,18 @@ async fn ds4_compatible_model_falls_back_to_llamacpp_when_ds4_unavailable() {
 
   // ds4 disabled → the same compatible model must run on llama.cpp (the fake
   // llama server), never refuse.
+  let base = DaemonOptions::rooted_at(state.clone());
   let opts = DaemonOptions {
     binary: Some(fake_llama_binary()),
     port_range: allocate_port_range(),
-    ds4: Ds4Config {
-      enabled: Some(false),
-      binary: Some(fake_ds4_binary()),
+    backend: BackendConfig {
+      ds4: Ds4Config {
+        enabled: Some(false),
+        binary: Some(fake_ds4_binary()),
+      },
+      ..base.backend.clone()
     },
-    ..DaemonOptions::rooted_at(state.clone())
+    ..base
   };
   let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });
@@ -250,14 +259,18 @@ async fn split_pro_half_file_is_refused_pre_spawn() {
   let model_path = model_dir.join("DeepSeek-V4-Pro-Q4K-Layers00-30.gguf");
   std::fs::write(&model_path, ds4_gguf_bytes()).unwrap();
 
+  let base = DaemonOptions::rooted_at(state.clone());
   let opts = DaemonOptions {
     binary: Some(fake_llama_binary()),
     port_range: allocate_port_range(),
-    ds4: Ds4Config {
-      enabled: Some(true),
-      binary: Some(fake_ds4_binary()),
+    backend: BackendConfig {
+      ds4: Ds4Config {
+        enabled: Some(true),
+        binary: Some(fake_ds4_binary()),
+      },
+      ..base.backend.clone()
     },
-    ..DaemonOptions::rooted_at(state.clone())
+    ..base
   };
   let socket = opts.state_dir.clone();
   let daemon = tokio::spawn(async move { run_foreground(opts).await });

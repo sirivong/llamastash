@@ -12,6 +12,7 @@
 //! The golden parity tests below pin `prepare_launch`'s argv to
 //! `compose`'s output so a future reimplementation can't silently drift.
 
+mod actuals;
 mod compose;
 pub mod list_devices;
 
@@ -302,6 +303,15 @@ impl Backend for LlamaCppBackend {
       native,
       strict,
     })
+  }
+
+  async fn fetch_actuals(
+    &self,
+    port: u16,
+    timeout: std::time::Duration,
+  ) -> crate::daemon::actuals::Actuals {
+    // The llama-server-specific `/props` fetch + `n_ctx` parse.
+    actuals::fetch_props_actuals(port, timeout).await
   }
 }
 

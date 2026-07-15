@@ -406,6 +406,20 @@ pub trait Backend {
     None
   }
 
+  /// Fetch this backend's post-launch actuals (what placement it resolved) from
+  /// the running child, called once on the Loading → Ready transition. Default:
+  /// empty — a backend that exposes no such endpoint reports nothing, and the
+  /// running surfaces render "unavailable". llama.cpp overrides to read its
+  /// `/props` `n_ctx`; keeping the endpoint in the backend leaves the generic
+  /// supervisor / last-params paths backend-agnostic.
+  async fn fetch_actuals(
+    &self,
+    _port: u16,
+    _timeout: std::time::Duration,
+  ) -> crate::daemon::actuals::Actuals {
+    crate::daemon::actuals::Actuals::default()
+  }
+
   /// The model ids a backend's `/v1/models` may advertise for one of its
   /// launches — the adoption/readiness id contract (D-adopt / D-ready).
   /// Empty (the default) means "match by the recorded file path/basename"
@@ -413,6 +427,26 @@ pub trait Backend {
   /// alias set, since it never echoes the path.
   fn adoption_model_ids(&self) -> &'static [&'static str] {
     &[]
+  }
+
+  /// Whether the live process at `port` (with command line `argv`) is a
+  /// re-adoptable instance of the launch recorded for `recorded_path` — the
+  /// identity factor of the orphan sweep's three-factor confirmation (D-adopt).
+  ///
+  /// Default (llama.cpp): the `/v1/models` id matches the recorded path or its
+  /// basename ([`crate::daemon::orphans::models_endpoint_matches`]); `argv` is
+  /// unused. ds4 overrides — it echoes a fixed alias, never the path, so it
+  /// cross-checks `argv`'s `-m` against `recorded_path` **and** confirms the
+  /// endpoint advertises a ds4 alias. Names no backend at the call site; the
+  /// sweep resolves the recorded backend tag and calls this.
+  async fn adoption_matches(
+    &self,
+    recorded_path: &Path,
+    _argv: &[String],
+    port: u16,
+    probe_timeout: std::time::Duration,
+  ) -> bool {
+    crate::daemon::orphans::models_endpoint_matches(port, recorded_path, probe_timeout).await
   }
 
   /// Whether this backend **auto-claims** `header` beyond the default identity
@@ -544,12 +578,48 @@ pub trait Backend {
     Vec::new()
   }
 
+  /// The `doctor` advisories this backend contributes, given the resolved
+  /// [`Config`](crate::config::Config). Default: none. `doctor` collects across
+  /// [`Backends::all`] so its check flow names no backend; each finding carries
+  /// a stable string id (kept additive, so `schema_version` never bumps for a
+  /// new backend). A backend with host-specific diagnostics (ds4's "compatible
+  /// model present but the engine is unavailable") overrides this and builds its
+  /// findings via [`Finding::from_parts`](crate::init::doctor::Finding::from_parts).
+  /// `config`-only (not `ctx`) because `doctor` runs CLI-side with no
+  /// [`MethodContext`]; a backend reads its own sub-config + does its own scan.
+  async fn doctor_findings(
+    &self,
+    _config: &crate::config::Config,
+  ) -> Vec<crate::init::doctor::Finding> {
+    Vec::new()
+  }
+
   /// The [`LaunchId`](crate::daemon::registry::LaunchId) of this backend's
   /// long-lived infrastructure process (a managed-multiplexer umbrella), or
   /// `None` for a process-per-model backend. Generic walkers that iterate
   /// running launches (proxy routing, `/ui`, eviction, `status`) skip infra
   /// launches via [`is_infra_launch`] rather than hard-coding the umbrella id.
   fn umbrella_launch_id(&self) -> Option<crate::daemon::registry::LaunchId> {
+    None
+  }
+
+  /// The OpenAI path prefix a managed-multiplexer umbrella serves its `/v1/...`
+  /// surface behind (e.g. `Some("/api")` → the umbrella answers `/api/v1/...`),
+  /// or `None` for a backend that serves `/v1/...` directly. Read by the proxy's
+  /// umbrella-routing arm so it forwards under the right prefix without naming a
+  /// backend. Default `None`.
+  fn umbrella_openai_prefix(&self) -> Option<&'static str> {
+    None
+  }
+
+  /// Mint this backend's synthetic [`ModelIdentity`] for a **file-less** catalog
+  /// `path` — a backend that names models from a remote registry rather than a
+  /// local GGUF — or `None` when `path` is not one of its synthetic paths.
+  /// Default `None`: a process-per-model / GGUF backend has no synthetic
+  /// identity. Lets the generic launch / status path mint a file-less row's
+  /// identity from just a path, without naming a backend (see
+  /// [`synthetic_identity_for_path`]).
+  fn synthetic_identity(&self, _path: &Path) -> Option<ModelIdentity> {
     None
   }
 
@@ -777,8 +847,26 @@ impl Backend for Backends {
     for_each_backend!(self, b => b.readiness_fit_gate(params, native_ctx))
   }
 
+  async fn fetch_actuals(
+    &self,
+    port: u16,
+    timeout: std::time::Duration,
+  ) -> crate::daemon::actuals::Actuals {
+    for_each_backend!(self, b => b.fetch_actuals(port, timeout).await)
+  }
+
   fn adoption_model_ids(&self) -> &'static [&'static str] {
     for_each_backend!(self, b => b.adoption_model_ids())
+  }
+
+  async fn adoption_matches(
+    &self,
+    recorded_path: &Path,
+    argv: &[String],
+    port: u16,
+    probe_timeout: std::time::Duration,
+  ) -> bool {
+    for_each_backend!(self, b => b.adoption_matches(recorded_path, argv, port, probe_timeout).await)
   }
 
   fn kv_bytes(&self, header: &GgufHeader, arch: Option<&str>, ctx_len: u64) -> Option<u64> {
@@ -843,8 +931,23 @@ impl Backend for Backends {
     for_each_backend!(self, b => b.status_extra(ctx).await)
   }
 
+  async fn doctor_findings(
+    &self,
+    config: &crate::config::Config,
+  ) -> Vec<crate::init::doctor::Finding> {
+    for_each_backend!(self, b => b.doctor_findings(config).await)
+  }
+
   fn umbrella_launch_id(&self) -> Option<crate::daemon::registry::LaunchId> {
     for_each_backend!(self, b => b.umbrella_launch_id())
+  }
+
+  fn umbrella_openai_prefix(&self) -> Option<&'static str> {
+    for_each_backend!(self, b => b.umbrella_openai_prefix())
+  }
+
+  fn synthetic_identity(&self, path: &Path) -> Option<ModelIdentity> {
+    for_each_backend!(self, b => b.synthetic_identity(path))
   }
 
   fn process_marker(&self) -> Option<&'static str> {
@@ -953,6 +1056,19 @@ pub fn umbrella_owner(id: &crate::daemon::registry::LaunchId) -> Option<Backends
   Backends::all()
     .into_iter()
     .find(|b| b.umbrella_launch_id().as_ref() == Some(id))
+}
+
+/// Mint the synthetic [`ModelIdentity`] for a **file-less** catalog `path`, plus
+/// the id of the backend that owns it. The generic replacement for hand-minting
+/// a backend-registry identity in the launch / status path: returns the first
+/// backend whose [`Backend::synthetic_identity`] claims `path` (paired with that
+/// backend's [`Backend::id`], which callers stamp as `resolved_backend`), or
+/// `None` for a local-file (GGUF) path no backend synthesizes. Names no backend.
+pub fn synthetic_identity_for_path(path: &Path) -> Option<(ModelIdentity, String)> {
+  Backends::all().into_iter().find_map(|b| {
+    b.synthetic_identity(path)
+      .map(|id| (id, b.id().to_string()))
+  })
 }
 
 /// The external-process markers every backend contributes — the orphan sweep's

@@ -94,6 +94,7 @@ async fn pre_launch(
     plan,
     origin,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");

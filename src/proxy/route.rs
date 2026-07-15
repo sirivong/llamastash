@@ -298,9 +298,8 @@ async fn decide_umbrella_route(
   use crate::backend::{Backend, Backends};
   let backend_id =
     crate::discovery::ModelSource::from_label(&resolved.source).map(|s| s.backend_id());
-  let umbrella_id = backend_id
-    .and_then(|id| Backends::all().into_iter().find(|b| b.id() == id))
-    .and_then(|b| b.umbrella_launch_id());
+  let backend = backend_id.and_then(|id| Backends::all().into_iter().find(|b| b.id() == id));
+  let umbrella_id = backend.as_ref().and_then(|b| b.umbrella_launch_id());
   let umbrella = match umbrella_id {
     Some(id) => state.ctx.supervisors.get(&id).await,
     None => None,
@@ -313,10 +312,12 @@ async fn decide_umbrella_route(
         // The umbrella's own ModelId — the forward path re-verifies and
         // takes an inflight guard against this supervisor entry.
         served_model_key: umbrella.id().clone(),
-        // The OpenAI path prefix a managed-multiplexer umbrella serves on
-        // (currently a Lemonade convention; a per-backend prefix hook is a
-        // deferred follow-up).
-        upstream_path_prefix: Some("/api".to_string()),
+        // The OpenAI path prefix the owning backend's umbrella serves under
+        // (its `umbrella_openai_prefix`), so this arm names no backend.
+        upstream_path_prefix: backend
+          .as_ref()
+          .and_then(|b| b.umbrella_openai_prefix())
+          .map(str::to_string),
         fallback: false,
         fallback_reason: None,
       }

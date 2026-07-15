@@ -80,6 +80,7 @@ async fn launching_to_loading_to_ready_within_a_second() {
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");
@@ -132,6 +133,7 @@ async fn strict_fit_withholds_ready_when_ctx_clamped_to_floor() {
       native: floor * 4,
       strict: true,
     }),
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");
@@ -178,6 +180,7 @@ async fn non_strict_flags_clamp_but_stays_ready() {
       native: floor * 4,
       strict: false,
     }),
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");
@@ -225,6 +228,7 @@ async fn ctx_at_model_max_is_not_flagged_as_clamped() {
       native: floor,
       strict: true,
     }),
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");
@@ -259,6 +263,7 @@ async fn embedding_mode_records_correctly() {
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");
@@ -289,6 +294,7 @@ async fn log_file_and_ring_buffer_capture_child_output() {
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");
@@ -353,6 +359,7 @@ async fn probe_timeout_triggers_error_state_and_releases_child() {
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");
@@ -392,6 +399,7 @@ async fn sigterm_trapping_child_gets_sigkilled_after_grace() {
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn");

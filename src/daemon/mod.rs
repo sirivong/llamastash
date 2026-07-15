@@ -46,8 +46,9 @@ use self::{
   shutdown::{install_signal_handlers, ShutdownToken},
   state_store::{load as load_state, RunningSnapshot},
 };
+use crate::backend::BackendConfig;
 use crate::config::loader::{PortRange, ProxyConfig};
-use crate::config::{Ds4Config, LemonadeConfig};
+use crate::config::LemonadeConfig;
 use crate::daemon::context::{LaunchEnv, MethodContext, PersistedState};
 use crate::daemon::probe::ProbeOptions;
 use crate::discovery::ModelCatalog;
@@ -113,26 +114,18 @@ pub struct DaemonOptions {
   /// unprivileged port and is best-effort (bind failure is
   /// non-fatal).
   pub proxy: ProxyConfig,
-  /// Lemonade backend config (`lemonade.binary` + the `enabled` tri-state +
-  /// port). Sourced from the `[lemonade]` section. **Default-on when the
-  /// `lemond` binary resolves** unless `lemonade.enabled: false`; the
-  /// `--lemonade` flag / `LLAMASTASH_LEMONADE` env force it on (captured in
-  /// [`Self::lemonade_force`]). Gate activation through [`Self::lemonade_available`].
-  pub lemonade: LemonadeConfig,
-  /// Whether `--lemonade` / `LLAMASTASH_LEMONADE` force-enabled Lemonade for
-  /// this run. Kept separate from the config so the detached re-exec can
-  /// re-append `--lemonade` to the child argv (env/flag don't survive detach;
-  /// config does). Mirrors [`Self::ds4_force`].
-  pub lemonade_force: bool,
-  /// ds4 (DwarfStar) backend config (`ds4.binary` + the `enabled` tri-state).
-  /// Sourced from the `[ds4]` section. **Default-on when the binary
-  /// resolves** unless `ds4.enabled: false`; the `--ds4` flag /
-  /// `LLAMASTASH_DS4` env force it on (captured in [`Self::ds4_force`]).
-  pub ds4: Ds4Config,
-  /// Whether `--ds4` / `LLAMASTASH_DS4` force-enabled ds4 for this run. Kept
-  /// separate from the config so the detached re-exec can re-append `--ds4`
-  /// to the child argv (env/flag don't survive detach; config does).
-  pub ds4_force: bool,
+  /// Aggregate backend config, grouped under `backend:` in `config.yaml`:
+  /// llama.cpp launch knobs (`jinja` / `strict_fit` / `fit_ctx_floor`, plus the
+  /// raw config `binary` / `additional_binaries`, distinct from the resolved
+  /// [`Self::binary`] / [`Self::extra_binaries`] above), the `[lemonade]` block,
+  /// and the `[ds4]` block. Each backend reads its own sub-config through its
+  /// hooks; gate Lemonade activation through [`Self::lemonade_available`].
+  pub backend: BackendConfig,
+  /// Per-backend force-enable flags keyed by backend id (`--lemonade` /
+  /// `LLAMASTASH_LEMONADE`, `--ds4` / `LLAMASTASH_DS4`). Kept separate from the
+  /// config so the detached re-exec can re-append the flags (env/flag don't
+  /// survive detach; config does). An absent key means "not forced".
+  pub backend_force: std::collections::BTreeMap<String, bool>,
   /// Control-plane HTTP listener port. Phase A of the Windows+HTTP-IPC
   /// plan: the bearer-token-authed JSON-RPC server binds here. `0`
   /// means "let the kernel pick" (used by tests for collision
@@ -151,16 +144,6 @@ pub struct DaemonOptions {
   /// Knob seeding mode from `Config.default_launch_mode`
   /// (+ `LLAMASTASH_DEFAULT_LAUNCH_MODE`). Threaded into `LaunchEnv`.
   pub default_launch_mode: crate::config::DefaultLaunchMode,
-  /// `--fit-ctx` floor from `Config.fit_ctx_floor`
-  /// (+ `LLAMASTASH_FIT_CTX_FLOOR`), validated `1..=MAX_CTX_TOKENS`.
-  pub fit_ctx_floor: u32,
-  /// Strict-fit mode from `Config.strict_fit`
-  /// (+ `LLAMASTASH_STRICT_FIT`).
-  pub strict_fit: bool,
-  /// Pass `--jinja` to `llama-server` by default from `Config.jinja`
-  /// (factory `true`). Threaded into `BackendConfig.llamacpp.jinja`; the
-  /// reasoning toggle still forces it on per-launch regardless.
-  pub jinja: bool,
   /// Config `presets:` blocks (from `Config.presets`). Seed the daemon's
   /// in-memory [`crate::daemon::preset_store::ConfigPresetStore`]; writes
   /// land back in `config_path`. Default: empty map.
@@ -179,8 +162,13 @@ impl DaemonOptions {
   /// auto-enables Lemonade unless `lemonade.enabled: false`; absent binary =
   /// zero footprint. Discovery / umbrella / re-exec all gate on this.
   pub fn lemonade_available(&self) -> bool {
-    self.lemonade.intends_enabled(self.lemonade_force)
-      && crate::backend::lemonade::resolve_lemond_binary(&self.lemonade).is_some()
+    let force = self
+      .backend_force
+      .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
+      .copied()
+      .unwrap_or(false);
+    self.backend.lemonade.intends_enabled(force)
+      && crate::backend::lemonade::resolve_lemond_binary(&self.backend.lemonade).is_some()
   }
 
   /// Test/utility helper: pin every path under one root directory.
@@ -199,9 +187,6 @@ impl DaemonOptions {
       probe_timeout_secs: None,
       arch_defaults: std::collections::BTreeMap::new(),
       default_launch_mode: crate::config::DefaultLaunchMode::default(),
-      fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
-      strict_fit: false,
-      jinja: true,
       propagated_cli_args: Vec::new(),
       // Tests using `rooted_at` rarely care about the proxy; bind
       // attempts are best-effort so even a port-collision is silent
@@ -211,13 +196,14 @@ impl DaemonOptions {
       // Lemonade defaults **off** for test daemons: the on-when-found gate
       // would otherwise pick up a host `lemond` and make model counts /
       // backend rows non-deterministic. Tests that want it set it explicitly.
-      lemonade: LemonadeConfig {
-        enabled: Some(false),
-        ..LemonadeConfig::default()
+      backend: BackendConfig {
+        lemonade: LemonadeConfig {
+          enabled: Some(false),
+          ..LemonadeConfig::default()
+        },
+        ..BackendConfig::default()
       },
-      lemonade_force: false,
-      ds4: Ds4Config::default(),
-      ds4_force: false,
+      backend_force: std::collections::BTreeMap::new(),
       // Port `0` makes every test pick an ephemeral free slot — no
       // cross-test contention on the
       // [`control_plane::DEFAULT_CONTROL_PORT`] the production CLI
@@ -250,15 +236,10 @@ impl DaemonOptions {
       probe_timeout_secs: None,
       arch_defaults: std::collections::BTreeMap::new(),
       default_launch_mode: crate::config::DefaultLaunchMode::default(),
-      fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
-      strict_fit: false,
-      jinja: true,
       propagated_cli_args: Vec::new(),
       proxy: ProxyConfig::default(),
-      lemonade: LemonadeConfig::default(),
-      lemonade_force: false,
-      ds4: Ds4Config::default(),
-      ds4_force: false,
+      backend: BackendConfig::default(),
+      backend_force: std::collections::BTreeMap::new(),
       control_plane_port: control_plane::DEFAULT_CONTROL_PORT,
       force: false,
       presets: std::collections::BTreeMap::new(),
@@ -317,7 +298,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // never contacts `lemond`. Only an enabled backend threads its port in.
   let mut discovery_opts = opts.discovery.clone();
   if opts.lemonade_available() {
-    discovery_opts.lemonade_port = Some(opts.lemonade.port);
+    discovery_opts.lemonade_port = Some(opts.backend.lemonade.port);
   }
   let _discovery = discovery_task::spawn(catalog.clone(), discovery_opts);
 
@@ -433,33 +414,10 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // the `Disabled` variant so a daemon with
   // `proxy.enabled: false` reads as disabled even before §8b runs.
   let proxy_status_cell = proxy::server::new_status_cell();
-  // Aggregate backend config + per-backend force-enable map. Each backend reads
-  // its own sub-config through its hooks; the daemon names no backend beyond the
-  // two canonical id consts. Values are post-env-override (`build_options`
-  // already applied `LLAMASTASH_FIT_CTX_FLOOR` / `STRICT_FIT`).
-  let backend_cfg = crate::backend::BackendConfig {
-    llamacpp: crate::backend::llama_cpp::LlamaCppConfig {
-      binary: opts.binary.clone(),
-      additional_binaries: opts.extra_binaries.clone(),
-      jinja: opts.jinja,
-      strict_fit: opts.strict_fit,
-      fit_ctx_floor: opts.fit_ctx_floor,
-    },
-    lemonade: opts.lemonade.clone(),
-    ds4: opts.ds4.clone(),
-  };
-  let backend_force: std::collections::BTreeMap<String, bool> = [
-    (
-      crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
-      opts.lemonade_force,
-    ),
-    (
-      crate::backend::ds4::DS4_BACKEND_ID.to_string(),
-      opts.ds4_force,
-    ),
-  ]
-  .into_iter()
-  .collect();
+  // Aggregate backend config + per-backend force-enable map, both already
+  // post-env-override (`build_options` applied `LLAMASTASH_FIT_CTX_FLOOR` /
+  // `STRICT_FIT` and folded the `--lemonade` / `--ds4` forces). Each backend
+  // reads its own sub-config through its hooks; the daemon names no backend.
   let mut ctx = MethodContext::with_catalog(token.clone(), catalog)
     .with_supervisors(supervisors)
     .with_gpu(initial_gpu)
@@ -468,7 +426,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     .with_presets(preset_store)
     .with_external(external_combined)
     .with_proxy_status(std::sync::Arc::clone(&proxy_status_cell))
-    .with_backend(backend_cfg, backend_force);
+    .with_backend(opts.backend.clone(), opts.backend_force.clone());
   if let Some(binary) = opts.binary.clone() {
     if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
       log::warn!(
@@ -540,9 +498,9 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // llamastash never installs it. The `start_model` path's `ensure_umbrella`
   // is idempotent, so it reuses this umbrella rather than spawning a second.
   if opts.lemonade_available() {
-    match crate::backend::lemonade::resolve_lemond_binary(&opts.lemonade) {
+    match crate::backend::lemonade::resolve_lemond_binary(&opts.backend.lemonade) {
       Some(binary) => {
-        let port = opts.lemonade.port;
+        let port = opts.backend.lemonade.port;
         if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
           log::warn!(
             "could not create log dir {}: {e}; lemonade umbrella logs may fail to open",
@@ -962,13 +920,23 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   // Carry the opt-in Lemonade enable through the re-exec so a
   // `daemon start --lemonade` (detached) keeps the backend on in the child.
   // The env var alone isn't reliable across a detached re-exec.
-  if opts.lemonade_force {
+  if opts
+    .backend_force
+    .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
+    .copied()
+    .unwrap_or(false)
+  {
     cmd.arg("--lemonade");
   }
   // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config
   // `enabled: false` and the env/flag don't survive detach. The default-on
   // path needs nothing (the child re-reads `[ds4]` from config).
-  if opts.ds4_force {
+  if opts
+    .backend_force
+    .get(crate::backend::ds4::DS4_BACKEND_ID)
+    .copied()
+    .unwrap_or(false)
+  {
     cmd.arg("--ds4");
   }
   // Carry `--force` through so the foreground child skips the same backend
@@ -1093,13 +1061,23 @@ pub fn start_detached_with_exe(opts: DaemonOptions, exe: PathBuf) -> Result<Star
   // Carry the opt-in Lemonade enable through the re-exec so a
   // `daemon start --lemonade` (detached) keeps the backend on in the child.
   // The env var alone isn't reliable across a detached re-exec.
-  if opts.lemonade_force {
+  if opts
+    .backend_force
+    .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
+    .copied()
+    .unwrap_or(false)
+  {
     cmd.arg("--lemonade");
   }
   // Carry the ds4 force-enable through the re-exec: `--ds4` overrides a config
   // `enabled: false` and the env/flag don't survive detach. The default-on
   // path needs nothing (the child re-reads `[ds4]` from config).
-  if opts.ds4_force {
+  if opts
+    .backend_force
+    .get(crate::backend::ds4::DS4_BACKEND_ID)
+    .copied()
+    .unwrap_or(false)
+  {
     cmd.arg("--ds4");
   }
   // Carry `--force` through so the foreground child skips the same backend

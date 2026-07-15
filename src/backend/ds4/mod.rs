@@ -33,9 +33,11 @@ use super::{
   Accelerator, AcceleratorSupport, Backend, KnobCapability, LaunchPlan, Lifecycle,
   NativeKnobResolution, ProcessLaunchSpec, Readiness, CREDENTIAL_ENV_STRIP,
 };
+use crate::config::Config;
 use crate::daemon::context::MethodContext;
 use crate::daemon::probe::ProbeOptions;
 use crate::gguf::header::{GgufHeader, GgufValue};
+use crate::init::doctor::{Finding, Severity};
 use crate::launch::flag_aliases::KnobField;
 use crate::launch::mode::LaunchMode;
 use crate::launch::native_knobs::{translate, NativeKnobDescriptor, NativeKnobKind};
@@ -93,6 +95,26 @@ pub const DS4_ALIAS_PREFIX: &str = "deepseek-v4-";
 /// current ds4-server build has no `--dist-*` flags, but the ds4 CLI does).
 /// `--host`/`--listen` are already covered by the base set.
 pub const DS4_FORBIDDEN_EXTRA_HEADS: &[&str] = &["--cors", "--dist-"];
+
+/// `doctor` finding id: a ds4-compatible DeepSeek-V4 GGUF is present but
+/// `ds4-server` is unavailable. Info-tier — the model still *runs* (llama.cpp
+/// fallback), so the advice is "install the purpose-built engine", not an error.
+const DS4_DOCTOR_UNAVAILABLE_ID: &str = "ds4_unavailable";
+
+/// `doctor` finding id: `ds4-server` is installed but disabled via
+/// `backend.ds4.enabled: false` (no force). Distinct from `ds4_unavailable` so
+/// the fix hint is "re-enable it", not "build it".
+const DS4_DOCTOR_DISABLED_ID: &str = "ds4_disabled";
+
+/// `doctor` fix-hint for [`DS4_DOCTOR_UNAVAILABLE_ID`].
+const DS4_DOCTOR_UNAVAILABLE_FIX: &str =
+  "build ds4-server (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and set \
+   `backend.ds4.binary` to the built path (or put `ds4-server` on PATH); see docs/usage.md#ds4-backend";
+
+/// `doctor` fix-hint for [`DS4_DOCTOR_DISABLED_ID`].
+const DS4_DOCTOR_DISABLED_FIX: &str =
+  "remove `backend.ds4.enabled: false` from config.yaml (or set `LLAMASTASH_DS4=1`) to route \
+   DeepSeek-V4 models to ds4-server; see docs/usage.md#ds4-backend";
 
 // GGML tensor type ids (subset ds4's contract references). These are the
 // on-disk `ggml_type` values in the GGUF tensor-info block.
@@ -432,6 +454,36 @@ pub fn ds4_argv(params: &LaunchParams, port: u16) -> Vec<std::ffi::OsString> {
   argv
 }
 
+/// ds4 adoption id contract (D-adopt): `/v1/models` → 200 with a `data[].id`
+/// in ds4's fixed alias set (`deepseek-v4-*`). ds4 never echoes the path, so
+/// [`Ds4Backend::adoption_matches`] pairs this with an argv `-m` cross-check for
+/// per-file discrimination. The `/v1/models` fetch is the generic OpenAI-compat
+/// probe both backends serve ([`crate::daemon::orphans::fetch_models_body`]).
+async fn models_endpoint_reports_ds4_alias(port: u16, timeout: std::time::Duration) -> bool {
+  let Ok((200, body)) = crate::daemon::orphans::fetch_models_body(port, timeout).await else {
+    return false;
+  };
+  let Ok(text) = std::str::from_utf8(&body) else {
+    return false;
+  };
+  let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) else {
+    return false;
+  };
+  parsed
+    .get("data")
+    .and_then(|v| v.as_array())
+    .map(|arr| {
+      arr.iter().any(|row| {
+        row
+          .get("id")
+          .and_then(|v| v.as_str())
+          .map(is_ds4_alias)
+          .unwrap_or(false)
+      })
+    })
+    .unwrap_or(false)
+}
+
 impl Backend for Ds4Backend {
   fn id(&self) -> &'static str {
     DS4_BACKEND_ID
@@ -481,6 +533,25 @@ impl Backend for Ds4Backend {
 
   fn adoption_model_ids(&self) -> &'static [&'static str] {
     DS4_ALIAS_IDS
+  }
+
+  async fn adoption_matches(
+    &self,
+    recorded_path: &Path,
+    argv: &[String],
+    port: u16,
+    probe_timeout: std::time::Duration,
+  ) -> bool {
+    // ds4-server reports a fixed alias, never the path, so the alias alone can't
+    // discriminate two ds4 instances: argv `-m` must equal the recorded
+    // canonical path (restores per-file discrimination) AND the endpoint must
+    // advertise a ds4 alias. Either failing rejects the adoption (the PID-reuse
+    // guard on the ds4 path).
+    let argv_ok = crate::daemon::orphans::extract_model_path(argv)
+      .as_deref()
+      .map(|mp| crate::daemon::orphans::paths_equal(mp, recorded_path))
+      .unwrap_or(false);
+    argv_ok && models_endpoint_reports_ds4_alias(port, probe_timeout).await
   }
 
   fn kv_bytes(&self, header: &GgufHeader, arch: Option<&str>, ctx_len: u64) -> Option<u64> {
@@ -619,6 +690,81 @@ impl Backend for Ds4Backend {
       Some(crate::config::KnobValue::Set(v)) if v == "true"
     )
   }
+
+  /// ds4's `doctor` advisories (D-doctor). Three cases, keyed on the same
+  /// availability logic a launch uses (`intends_enabled` + binary resolve,
+  /// honoring the `LLAMASTASH_DS4` force):
+  /// - **available** (intended + installed): nothing to advise, no scan.
+  /// - **installed but disabled** (`backend.ds4.enabled: false`, no force): a
+  ///   config choice, not a missing engine — advise how to re-enable, no scan
+  ///   and no wrong "build it" hint.
+  /// - **binary absent**: scan for a ds4-compatible model and, if one is
+  ///   present, advise installing ds4. Only this case pays the scan (bounded by
+  ///   the arch pre-check), and it's the only one where the install advice fits.
+  async fn doctor_findings(&self, config: &Config) -> Vec<Finding> {
+    use crate::discovery::known_caches::{default_set, RootResolution};
+    use crate::discovery::scanner::{scan, ScanOptions};
+    use crate::gguf::header::{read_path, HeaderReadOptions};
+
+    let force = ds4_env_forced();
+    let intends = config.backend.ds4.intends_enabled(force);
+    let binary = resolve_ds4_binary(config.backend.ds4.binary.as_deref());
+    // Available: intended and installed. Nothing to advise, no scan.
+    if intends && binary.is_some() {
+      return Vec::new();
+    }
+    // Installed but explicitly disabled: a deliberate config choice, not a
+    // missing engine. Advise how to re-enable (no scan, no "build it" hint).
+    if binary.is_some() && !intends {
+      return vec![Finding::from_parts(
+        DS4_DOCTOR_DISABLED_ID,
+        Severity::Info,
+        "ds4-server is installed but disabled (`backend.ds4.enabled: false`); remove that key (or set \
+         `LLAMASTASH_DS4=1`) to route DeepSeek-V4 models to the purpose-built engine",
+        DS4_DOCTOR_DISABLED_FIX,
+      )];
+    }
+    // Discovery resolves model paths from CLI + env + config; doctor is
+    // config-only, so fold in `LLAMASTASH_MODEL_PATHS` / `LLAMASTASH_NO_SCAN`
+    // here too — otherwise a user who supplies model paths *only* via the env
+    // override gets no `ds4_unavailable` advisory even with a compatible model
+    // present.
+    let mut user_paths = config.model_paths.clone();
+    user_paths.extend(crate::cli::daemon::env_model_paths());
+    let roots = default_set(RootResolution {
+      user_paths: &user_paths,
+      disable: &config.disable_default_cache_paths,
+      no_scan: config.disable_scan || crate::cli::daemon::env_no_scan(),
+      home: crate::util::paths::home_dir().as_deref(),
+    });
+    let mut rx = scan(roots, ScanOptions::default());
+    while let Some(m) = rx.recv().await {
+      // Arch pre-check spares a header read for every non-deepseek4 model.
+      if m.metadata.as_ref().and_then(|md| md.arch.as_deref()) != Some("deepseek4") {
+        continue;
+      }
+      let is_ds4 = read_path(&m.path, HeaderReadOptions::default())
+        .map(|r| ds4_compatible(&r.header))
+        .unwrap_or(false);
+      if is_ds4 {
+        let name = m
+          .path
+          .file_name()
+          .and_then(|n| n.to_str())
+          .unwrap_or("a DeepSeek-V4 GGUF");
+        return vec![Finding::from_parts(
+          DS4_DOCTOR_UNAVAILABLE_ID,
+          Severity::Info,
+          format!(
+            "ds4-compatible model present ({name}) but `ds4-server` is unavailable — it runs on \
+             llama.cpp; install ds4 for the purpose-built engine (disk KV cache, SSD streaming)"
+          ),
+          DS4_DOCTOR_UNAVAILABLE_FIX,
+        )];
+      }
+    }
+    Vec::new()
+  }
 }
 
 /// ds4's resident working set estimate: ~1.25× raw weights (the cached-expert
@@ -635,6 +781,23 @@ fn ds4_resident_estimate(weights_total: u64) -> u64 {
 /// sampler.
 fn ds4_should_auto_stream(weights_total: u64, free: u64) -> bool {
   ds4_resident_estimate(weights_total) > free
+}
+
+/// Whether `LLAMASTASH_DS4` is set to a truthy value — the env force that
+/// enables ds4 over `backend.ds4.enabled: false`. Read directly (not from
+/// `MethodContext::backend_force`) because `doctor` runs CLI-side with no
+/// context; mirrors the daemon's `env_flag_truthy` so the diagnostic agrees
+/// with what a launch would actually do.
+fn ds4_env_forced() -> bool {
+  std::env::var("LLAMASTASH_DS4")
+    .ok()
+    .map(|v| {
+      matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+      )
+    })
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -965,5 +1128,162 @@ mod tests {
     assert!(!ds4_should_auto_stream(gib(80), gib(100)));
     // A pathological weight total saturates instead of overflowing.
     assert!(ds4_should_auto_stream(u64::MAX, gib(100)));
+  }
+
+  /// Spin up a tiny single-shot HTTP responder on an OS-assigned loopback port,
+  /// returning `(task, port)` — so the alias endpoint check runs against a real
+  /// socket without the full `fake_ds4_server` binary.
+  async fn spawn_one_shot(status: u16, body: String) -> (tokio::task::JoinHandle<()>, u16) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+      .await
+      .expect("bind probe responder");
+    let port = listener
+      .local_addr()
+      .expect("probe responder local_addr")
+      .port();
+    let task = tokio::spawn(async move {
+      if let Ok((mut sock, _)) = listener.accept().await {
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf).await;
+        let header = format!(
+          "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+          body.len()
+        );
+        let _ = sock.write_all(header.as_bytes()).await;
+        let _ = sock.write_all(body.as_bytes()).await;
+        let _ = sock.shutdown().await;
+      }
+    });
+    (task, port)
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn ds4_alias_endpoint_check_is_prefix_tolerant_and_rejects_foreign() {
+    use std::time::Duration;
+    // ds4 adoption (D-adopt) matches the `/v1/models` id by the `deepseek-v4-`
+    // prefix, so a future `-turbo` build adopts; a foreign id on the reused
+    // port does not (the PID-reuse guard on the ds4 path).
+    let ds4_body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "deepseek-v4-turbo", "object": "model"}],
+    })
+    .to_string();
+    let (_resp, port) = spawn_one_shot(200, ds4_body).await;
+    assert!(
+      models_endpoint_reports_ds4_alias(port, Duration::from_secs(1)).await,
+      "a deepseek-v4-* alias must be accepted"
+    );
+
+    let foreign_body = serde_json::json!({
+      "object": "list",
+      "data": [{"id": "llama-3-8b", "object": "model"}],
+    })
+    .to_string();
+    let (_resp2, port2) = spawn_one_shot(200, foreign_body).await;
+    assert!(
+      !models_endpoint_reports_ds4_alias(port2, Duration::from_secs(1)).await,
+      "a foreign id must not be read as a ds4 alias"
+    );
+  }
+
+  // ---- doctor advisory (D-doctor) ----
+
+  /// Build a config that scans only `dir` (default caches suppressed) with ds4
+  /// unavailable — the isolated setup the doctor-advisory tests need.
+  fn ds4_scan_config(dir: &std::path::Path) -> Config {
+    Config {
+      model_paths: vec![dir.to_path_buf()],
+      disable_scan: true, // `default_set` then returns only `user_paths`
+      ..Config::default()
+    }
+  }
+
+  #[tokio::test]
+  async fn doctor_advisory_fires_for_compatible_model_when_ds4_unavailable() {
+    use crate::gguf::test_fixtures::FixtureBuilder;
+    let dir = crate::test_support::unique_temp_dir("doctor-ds4", "compat");
+    let bytes = FixtureBuilder::new()
+      .with_arch("deepseek4")
+      .with_tensor("blk.0.ffn_gate_exps.weight", &[512, 512], 16) // IQ2_XXS
+      .with_tensor("token_embd.weight", &[512, 512], 1) // F16
+      .build();
+    std::fs::write(dir.join("deepseek-v4-flash.gguf"), bytes).unwrap();
+
+    let config = ds4_scan_config(&dir);
+    let findings = Ds4Backend::new().doctor_findings(&config).await;
+    let finding = findings.first().expect("advisory fires");
+    assert_eq!(finding.id, "ds4_unavailable");
+    assert_eq!(finding.severity, Severity::Info);
+    assert!(finding.safe_to_log);
+    assert_eq!(finding.fix_hint, DS4_DOCTOR_UNAVAILABLE_FIX);
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[tokio::test]
+  async fn doctor_advisory_absent_for_non_ds4_models() {
+    use crate::gguf::test_fixtures::build_minimal_gguf;
+    let dir = crate::test_support::unique_temp_dir("doctor-ds4", "plain");
+    std::fs::write(dir.join("qwen.gguf"), build_minimal_gguf("qwen2")).unwrap();
+    let config = ds4_scan_config(&dir);
+    assert!(
+      Ds4Backend::new().doctor_findings(&config).await.is_empty(),
+      "no advisory when no ds4-compatible model is present"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  /// Doctor is config-only, but discovery also honors `LLAMASTASH_MODEL_PATHS`
+  /// / `LLAMASTASH_NO_SCAN`. A user who supplies model paths *only* via the env
+  /// override must still get the `ds4_unavailable` advisory — regression for
+  /// the advisory silently under-scanning when `config.model_paths` is empty.
+  // Sync (not `#[tokio::test]`) so the env-lock guard is held across a plain
+  // `block_on` rather than an `.await` — else clippy's `await_holding_lock`
+  // fires. The env vars must stay set for the whole scan.
+  #[test]
+  fn doctor_advisory_scans_env_model_paths_when_config_has_none() {
+    use crate::gguf::test_fixtures::FixtureBuilder;
+    // Serialize against other `LLAMASTASH_MODEL_PATHS` / `LLAMASTASH_NO_SCAN`
+    // tests — process-global env vars race across parallel test threads.
+    let _env = crate::cli::test_lock::serialize();
+    let dir = crate::test_support::unique_temp_dir("doctor-ds4", "envpath");
+    let bytes = FixtureBuilder::new()
+      .with_arch("deepseek4")
+      .with_tensor("blk.0.ffn_gate_exps.weight", &[512, 512], 16) // IQ2_XXS
+      .with_tensor("token_embd.weight", &[512, 512], 1) // F16
+      .build();
+    std::fs::write(dir.join("deepseek-v4-flash.gguf"), bytes).unwrap();
+
+    // Paths come ONLY from the env override; the config carries none. NO_SCAN
+    // keeps `default_set` to the env path so the test never touches real caches.
+    let prev_paths = std::env::var_os("LLAMASTASH_MODEL_PATHS");
+    let prev_noscan = std::env::var_os("LLAMASTASH_NO_SCAN");
+    std::env::set_var("LLAMASTASH_MODEL_PATHS", &dir);
+    std::env::set_var("LLAMASTASH_NO_SCAN", "1");
+
+    let findings = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap()
+      .block_on(Ds4Backend::new().doctor_findings(&Config::default()));
+
+    match prev_paths {
+      Some(v) => std::env::set_var("LLAMASTASH_MODEL_PATHS", v),
+      None => std::env::remove_var("LLAMASTASH_MODEL_PATHS"),
+    }
+    match prev_noscan {
+      Some(v) => std::env::set_var("LLAMASTASH_NO_SCAN", v),
+      None => std::env::remove_var("LLAMASTASH_NO_SCAN"),
+    }
+
+    assert_eq!(
+      findings
+        .first()
+        .expect("advisory fires from env-supplied model path")
+        .id,
+      "ds4_unavailable"
+    );
+    std::fs::remove_dir_all(&dir).ok();
   }
 }

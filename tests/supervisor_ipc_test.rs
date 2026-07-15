@@ -80,6 +80,7 @@ async fn status_lists_active_supervised_model() {
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn supervisor");

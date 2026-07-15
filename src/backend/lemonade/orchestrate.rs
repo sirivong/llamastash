@@ -95,8 +95,9 @@ pub async fn ensure_umbrella(
     plan: umbrella,
     origin: LaunchOrigin::Manual,
     // The Lemonade umbrella has no `--fit` ctx semantics; the strict-fit
-    // gate never applies to it.
+    // gate never applies to it (so `fetch_actuals` is never called for it).
     fit_gate: None,
+    resolved_backend: super::LEMONADE_BACKEND_ID.to_string(),
   })
   .await?;
   registry.insert(id, model.clone()).await;

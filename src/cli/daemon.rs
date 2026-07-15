@@ -193,9 +193,14 @@ pub(crate) fn precheck_indicated_backends(opts: &DaemonOptions) -> std::result::
   // Lemonade is flagged only when *explicitly* requested (`--lemonade` / env,
   // or `lemonade.enabled: true`); the default-on-when-found path stays silent
   // when `lemond` is simply absent (zero footprint, like ds4).
-  let lemonade_explicit = opts.lemonade_force || opts.lemonade.enabled == Some(true);
-  if opts.lemonade.intends_enabled(opts.lemonade_force) {
-    if crate::backend::lemonade::resolve_lemond_binary(&opts.lemonade).is_none() {
+  let lemonade_force = opts
+    .backend_force
+    .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
+    .copied()
+    .unwrap_or(false);
+  let lemonade_explicit = lemonade_force || opts.backend.lemonade.enabled == Some(true);
+  if opts.backend.lemonade.intends_enabled(lemonade_force) {
+    if crate::backend::lemonade::resolve_lemond_binary(&opts.backend.lemonade).is_none() {
       if lemonade_explicit {
         failures.push(
           "lemonade is enabled but no `lemond` binary was found — set `lemonade.binary` or put \
@@ -204,7 +209,7 @@ pub(crate) fn precheck_indicated_backends(opts: &DaemonOptions) -> std::result::
             .to_string(),
         );
       }
-    } else if crate::backend::lemonade::umbrella_port_state(opts.lemonade.port)
+    } else if crate::backend::lemonade::umbrella_port_state(opts.backend.lemonade.port)
       == crate::backend::lemonade::UmbrellaPortState::Listening
     {
       // Only probed when a `lemond` binary resolved: without one the port
@@ -218,7 +223,7 @@ pub(crate) fn precheck_indicated_backends(opts: &DaemonOptions) -> std::result::
         "lemonade umbrella port 127.0.0.1:{} is already in use — stop whatever holds it \
          (e.g. a manually started `lemond`) or set `lemonade.port`, or `llamastash daemon start \
          --force` to start without the managed umbrella.",
-        opts.lemonade.port
+        opts.backend.lemonade.port
       ));
     }
   }
@@ -226,9 +231,16 @@ pub(crate) fn precheck_indicated_backends(opts: &DaemonOptions) -> std::result::
   // `ds4.enabled: true`) — the default-on-when-found path stays silent when
   // the binary is simply absent (zero footprint, D4). An explicit request
   // with no resolvable binary fails fast, naming the configured path.
-  let ds4_explicit = opts.ds4_force || opts.ds4.enabled == Some(true);
-  if ds4_explicit && crate::backend::ds4::resolve_ds4_binary(opts.ds4.binary.as_deref()).is_none() {
-    let where_ = match &opts.ds4.binary {
+  let ds4_force = opts
+    .backend_force
+    .get(crate::backend::ds4::DS4_BACKEND_ID)
+    .copied()
+    .unwrap_or(false);
+  let ds4_explicit = ds4_force || opts.backend.ds4.enabled == Some(true);
+  if ds4_explicit
+    && crate::backend::ds4::resolve_ds4_binary(opts.backend.ds4.binary.as_deref()).is_none()
+  {
+    let where_ = match &opts.backend.ds4.binary {
       Some(p) => format!("`ds4.binary` ({})", p.display()),
       None => "`ds4-server` on PATH".to_string(),
     };
@@ -597,28 +609,32 @@ pub(crate) fn build_options(
       ),
     }
   }
-  opts.fit_ctx_floor = config.backend.llamacpp.fit_ctx_floor;
+  // Backend config: clone the whole `backend:` block (llama.cpp knobs +
+  // lemonade + ds4), then apply the `LLAMASTASH_*` env overrides + range clamp
+  // onto the llama.cpp fit knobs. `jinja` stays config-only (factory `true`) —
+  // unlike the opt-in booleans below it defaults *on* and the `"1"`-truthy env
+  // contract can't express "force off" — so it rides through from the clone.
+  opts.backend = config.backend.clone();
   if let Some(raw) = std::env::var_os("LLAMASTASH_FIT_CTX_FLOOR") {
     let s = raw.to_string_lossy();
     match s.trim().parse::<u32>() {
-      Ok(v) => opts.fit_ctx_floor = v,
+      Ok(v) => opts.backend.llamacpp.fit_ctx_floor = v,
       Err(_) => log::warn!("ignoring LLAMASTASH_FIT_CTX_FLOOR={s:?}: not a positive integer"),
     }
   }
-  if opts.fit_ctx_floor == 0 || opts.fit_ctx_floor > MAX_CTX_TOKENS {
+  if opts.backend.llamacpp.fit_ctx_floor == 0
+    || opts.backend.llamacpp.fit_ctx_floor > MAX_CTX_TOKENS
+  {
     log::warn!(
       "fit_ctx_floor {} out of range (1..={MAX_CTX_TOKENS}); using factory {DEFAULT_FIT_CTX_FLOOR}",
-      opts.fit_ctx_floor
+      opts.backend.llamacpp.fit_ctx_floor
     );
-    opts.fit_ctx_floor = DEFAULT_FIT_CTX_FLOOR;
+    opts.backend.llamacpp.fit_ctx_floor = DEFAULT_FIT_CTX_FLOOR;
   }
   // Strict-fit is an opt-in: config OR `LLAMASTASH_STRICT_FIT=1` (the
   // strict-`"1"` env contract shared with the other boolean envs).
-  opts.strict_fit = config.backend.llamacpp.strict_fit || env_flag_truthy("LLAMASTASH_STRICT_FIT");
-  // `--jinja` default: config-only (factory `true`). No env override —
-  // unlike the opt-in booleans above this defaults *on*, and the
-  // `"1"`-truthy env contract can't express "force off".
-  opts.jinja = config.backend.llamacpp.jinja;
+  opts.backend.llamacpp.strict_fit =
+    config.backend.llamacpp.strict_fit || env_flag_truthy("LLAMASTASH_STRICT_FIT");
   // Proxy: config layer first, then CLI / env overrides. Without this
   // thread-through the daemon silently ignored `proxy:` from the config
   // file and ran with `ProxyConfig::default()` regardless.
@@ -673,18 +689,25 @@ pub(crate) fn build_options(
   if no_proxy_fallback_cli || env_no_fallback {
     opts.proxy.fallback_enabled = false;
   }
-  // Lemonade: default-on when the `lemond` binary resolves (like ds4). The
-  // `[lemonade]` block rides through; `--lemonade` / `LLAMASTASH_LEMONADE`
-  // force it on over `enabled: false` (captured separately so the detached
-  // re-exec can re-append `--lemonade`). The user's `binary` path + `port`
-  // ride along from config (llamastash never installs `lemond`).
-  opts.lemonade = config.backend.lemonade.clone();
-  opts.lemonade_force = lemonade_cli || env_flag_truthy("LLAMASTASH_LEMONADE");
-  // ds4: default-on when the binary resolves. The config `[ds4]` block rides
-  // through; `--ds4` / `LLAMASTASH_DS4` force it on over `enabled: false`
-  // (captured separately so the detached re-exec can re-append `--ds4`).
-  opts.ds4 = config.backend.ds4.clone();
-  opts.ds4_force = ds4_cli || env_flag_truthy("LLAMASTASH_DS4");
+  // Per-backend force-enable map, keyed by backend id. Lemonade + ds4 both
+  // default-on when their binary resolves (config `[lemonade]` / `[ds4]` blocks
+  // already rode through in `opts.backend` above); `--lemonade` /
+  // `LLAMASTASH_LEMONADE` and `--ds4` / `LLAMASTASH_DS4` force each on over a
+  // config `enabled: false`. Kept separate from `opts.backend` so the detached
+  // re-exec can re-append the flags (env/flag don't survive detach). The two id
+  // consts are the kept CLI-flag boundary.
+  opts.backend_force = [
+    (
+      crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
+      lemonade_cli || env_flag_truthy("LLAMASTASH_LEMONADE"),
+    ),
+    (
+      crate::backend::ds4::DS4_BACKEND_ID.to_string(),
+      ds4_cli || env_flag_truthy("LLAMASTASH_DS4"),
+    ),
+  ]
+  .into_iter()
+  .collect();
   opts.propagated_cli_args = propagated_cli_args(cli);
   Ok(opts)
 }
@@ -1170,10 +1193,10 @@ mod tests {
     )
     .expect("build_options");
     assert_eq!(opts.default_launch_mode, DefaultLaunchMode::Inherited);
-    assert_eq!(opts.fit_ctx_floor, 8192);
-    assert!(opts.strict_fit);
+    assert_eq!(opts.backend.llamacpp.fit_ctx_floor, 8192);
+    assert!(opts.backend.llamacpp.strict_fit);
     // `jinja: false` from config threads through (factory default is true).
-    assert!(!opts.jinja);
+    assert!(!opts.backend.llamacpp.jinja);
   }
 
   #[test]
@@ -1204,7 +1227,10 @@ mod tests {
       DefaultLaunchMode::Inherited,
       "env overrides config for launch mode"
     );
-    assert!(opts.strict_fit, "LLAMASTASH_STRICT_FIT=1 enables strict");
+    assert!(
+      opts.backend.llamacpp.strict_fit,
+      "LLAMASTASH_STRICT_FIT=1 enables strict"
+    );
   }
 
   #[test]
@@ -1228,7 +1254,7 @@ mod tests {
       )
       .expect("build_options");
       assert_eq!(
-        opts.fit_ctx_floor, DEFAULT_FIT_CTX_FLOOR,
+        opts.backend.llamacpp.fit_ctx_floor, DEFAULT_FIT_CTX_FLOOR,
         "out-of-range floor {bad} must fall back to the factory value"
       );
     }
@@ -1754,23 +1780,30 @@ mod tests {
   fn build_options_lemonade_defaults_on_and_force_flag_captured() {
     let cli = parse_cli(&["daemon", "start"]);
     let config = Config::default();
+    // Read the Lemonade force flag out of the per-backend force map.
+    let force = |o: &DaemonOptions| {
+      o.backend_force
+        .get(crate::backend::lemonade::LEMONADE_BACKEND_ID)
+        .copied()
+        .unwrap_or(false)
+    };
     // Default: enablement intent is on (default-on-when-found, like ds4), the
     // config `enabled` stays unset, and no force flag is captured.
     let baseline = build_options(
       None, None, false, false, None, false, false, false, &cli, &config,
     )
     .expect("build_options baseline");
-    assert_eq!(baseline.lemonade.enabled, None);
-    assert!(!baseline.lemonade_force);
-    assert!(baseline.lemonade.intends_enabled(baseline.lemonade_force));
+    assert_eq!(baseline.backend.lemonade.enabled, None);
+    assert!(!force(&baseline));
+    assert!(baseline.backend.lemonade.intends_enabled(force(&baseline)));
 
     // CLI flag captured as force (overrides a config `enabled: false`).
     let opts_cli = build_options(
       None, None, false, false, None, false, true, false, &cli, &config,
     )
     .expect("build_options lemonade");
-    assert!(opts_cli.lemonade_force);
-    assert!(opts_cli.lemonade.intends_enabled(opts_cli.lemonade_force));
+    assert!(force(&opts_cli));
+    assert!(opts_cli.backend.lemonade.intends_enabled(force(&opts_cli)));
 
     // Config `enabled: false` disables the intent (no force present).
     let config_off = Config {
@@ -1796,7 +1829,7 @@ mod tests {
       &config_off,
     )
     .expect("build_options config-off");
-    assert!(!opts_off.lemonade.intends_enabled(opts_off.lemonade_force));
+    assert!(!opts_off.backend.lemonade.intends_enabled(force(&opts_off)));
   }
 
   #[test]

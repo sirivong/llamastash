@@ -139,6 +139,7 @@ async fn spawn_fake_supervisor(
     plan,
     origin: llamastash::daemon::supervisor::LaunchOrigin::Manual,
     fit_gate: None,
+    resolved_backend: "llamacpp".to_string(),
   })
   .await
   .expect("spawn fake_llama_server");

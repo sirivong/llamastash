@@ -492,14 +492,20 @@ fn build_payload(
 }
 
 fn map_start_error(e: crate::ipc::ClientError, row: &CatalogRow) -> CliExit {
+  use crate::backend::Backend;
   use crate::ipc::ClientError;
   match e {
     ClientError::Remote(err) => {
       // Daemon distinguishes "binary missing" via the launch
       // environment guard; surface that as BINARY_NOT_FOUND so
-      // scripts can react.
+      // scripts can react. The binary name comes from the default backend's
+      // process marker (`llama-server`) so this site names no backend; guard
+      // the empty-marker case so `contains("")` never matches everything.
       let lower = err.message.to_lowercase();
-      if lower.contains("launch environment") || lower.contains("llama-server") {
+      let marker = crate::backend::default_backend()
+        .process_marker()
+        .unwrap_or("");
+      if lower.contains("launch environment") || (!marker.is_empty() && lower.contains(marker)) {
         CliExit::new(
           BINARY_NOT_FOUND,
           format!(

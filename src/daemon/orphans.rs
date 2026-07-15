@@ -20,6 +20,7 @@ use std::time::Duration;
 use serde::Serialize;
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
+use crate::backend::Backend;
 use crate::daemon::state_store::RunningSnapshot;
 
 /// What `sweep` found on this daemon restart.
@@ -156,35 +157,26 @@ pub async fn sweep(inputs: SweepInputs<'_>) -> SweepReport {
       }
     };
     // Three-factor confirmation: PID alive (above), port listening, and the
-    // `/v1/models` id matches — but the id contract is backend-specific
-    // (D-adopt). Dispatch on the *recorded* backend tag, not the live
-    // process's basename: a renamed / wrapped `ds4-server` binary still
-    // stamped `resolved_backend: "ds4"` at launch, so keying on the tag
-    // adopts it where a basename match would drop the live child as stale
-    // (invisible to `status`, un-stoppable). A `ds4-server` child reports a
-    // fixed alias (never the path), so its branch matches the alias set AND
-    // cross-checks its argv `-m` against the recorded path (the alias alone
-    // can't discriminate two ds4 instances); every other child follows
-    // llama.cpp's path/basename rule. PID reuse is still caught: a mismatched
-    // live process fails the alias-body / path check below regardless of tag.
-    let proc = sys.process(sysinfo::Pid::from_u32(snap.pid as u32));
-    let is_ds4 = snap.resolved_backend == crate::backend::ds4::DS4_BACKEND_ID;
-    let matched = if is_ds4 {
-      let argv: Vec<String> = proc
-        .map(|p| p.cmd().iter().map(|s| s.to_string_lossy().into()).collect())
-        .unwrap_or_default();
-      let argv_path = extract_model_path(&argv);
-      // argv `-m` must equal the recorded canonical path (restores the
-      // per-file discrimination the alias loses), and the endpoint must
-      // report a ds4 alias.
-      let argv_ok = argv_path
-        .as_deref()
-        .map(|mp| paths_equal(mp, &path))
-        .unwrap_or(false);
-      argv_ok && models_endpoint_reports_ds4_alias(snap.port, inputs.probe_timeout).await
-    } else {
-      models_endpoint_matches(snap.port, &path, inputs.probe_timeout).await
-    };
+    // identity match — but the id contract is backend-specific (D-adopt), so
+    // dispatch on the *recorded* backend tag, not the live process's basename.
+    // A renamed / wrapped backend server still stamped its tag at launch, so
+    // keying on the tag adopts it where a basename match would drop the live
+    // child as stale (invisible to `status`, un-stoppable). The tag resolves to
+    // a backend whose `adoption_matches` owns the id rule: the default
+    // path/basename `/v1/models` match, or a backend's own (e.g. an alias body
+    // plus an argv `-m` cross-check). PID reuse is still caught: a mismatched
+    // live process fails that check regardless of tag.
+    let argv: Vec<String> = sys
+      .process(sysinfo::Pid::from_u32(snap.pid as u32))
+      .map(|p| p.cmd().iter().map(|s| s.to_string_lossy().into()).collect())
+      .unwrap_or_default();
+    let backend = crate::backend::Backends::all()
+      .into_iter()
+      .find(|b| b.id() == snap.resolved_backend)
+      .unwrap_or_else(crate::backend::default_backend);
+    let matched = backend
+      .adoption_matches(&path, &argv, snap.port, inputs.probe_timeout)
+      .await;
     if !matched {
       stale.push(snap);
       continue;
@@ -268,47 +260,21 @@ fn pid_alive(pid: i32) -> bool {
 /// Probe `/v1/models` on the recorded port and check that the
 /// reported model id matches the supervisor's recorded path. Any
 /// network error, non-200 response, malformed body, or mismatched
-/// id evaluates to `false` — the sweep treats those as stale.
-async fn models_endpoint_matches(port: u16, expected: &Path, timeout: Duration) -> bool {
+/// id evaluates to `false` — the sweep treats those as stale. This is the
+/// default (llama.cpp) adoption id rule; the `Backend::adoption_matches`
+/// default delegates here.
+pub(crate) async fn models_endpoint_matches(port: u16, expected: &Path, timeout: Duration) -> bool {
   match fetch_models_body(port, timeout).await {
     Ok((200, body)) => body_mentions_path(&body, expected),
     _ => false,
   }
 }
 
-/// ds4 adoption id contract (D-adopt): `/v1/models` → 200 with a `data[].id`
-/// in ds4's fixed alias set (`deepseek-v4-*`). ds4 never echoes the path, so
-/// the caller pairs this with an argv `-m` cross-check for per-file
-/// discrimination.
-async fn models_endpoint_reports_ds4_alias(port: u16, timeout: Duration) -> bool {
-  let Ok((200, body)) = fetch_models_body(port, timeout).await else {
-    return false;
-  };
-  let Ok(text) = std::str::from_utf8(&body) else {
-    return false;
-  };
-  let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) else {
-    return false;
-  };
-  parsed
-    .get("data")
-    .and_then(|v| v.as_array())
-    .map(|arr| {
-      arr.iter().any(|row| {
-        row
-          .get("id")
-          .and_then(|v| v.as_str())
-          .map(crate::backend::ds4::is_ds4_alias)
-          .unwrap_or(false)
-      })
-    })
-    .unwrap_or(false)
-}
-
 /// Compare two model paths for adoption, tolerant of canonicalisation: try a
 /// canonical compare first (resolves symlinks / `..`), fall back to a direct
-/// path compare when either can't be canonicalised (file already gone).
-fn paths_equal(a: &Path, b: &Path) -> bool {
+/// path compare when either can't be canonicalised (file already gone). Shared
+/// by a backend's `adoption_matches` argv `-m` cross-check.
+pub(crate) fn paths_equal(a: &Path, b: &Path) -> bool {
   match (a.canonicalize(), b.canonicalize()) {
     (Ok(ca), Ok(cb)) => ca == cb,
     _ => a == b,
@@ -318,8 +284,12 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 /// GET `/v1/models` via `reqwest` — the same client the right-pane
 /// chat tab uses, so the orphan probe doesn't carry its own HTTP/1.1
 /// framing. Capped at 32 KiB so a misbehaving peer can't balloon our
-/// memory. Returns `(status, body)` or an io error.
-async fn fetch_models_body(port: u16, timeout: Duration) -> std::io::Result<(u16, Vec<u8>)> {
+/// memory. Returns `(status, body)` or an io error. Shared by a backend's
+/// `adoption_matches` (the `/v1/models` endpoint both backends serve).
+pub(crate) async fn fetch_models_body(
+  port: u16,
+  timeout: Duration,
+) -> std::io::Result<(u16, Vec<u8>)> {
   let client = reqwest::Client::builder()
     .timeout(timeout)
     .build()
@@ -541,34 +511,6 @@ mod tests {
     // A non-existent path falls back to a direct compare (unequal).
     assert!(!paths_equal(&dir.join("gone.gguf"), &a));
     std::fs::remove_dir_all(&dir).ok();
-  }
-
-  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-  async fn ds4_alias_endpoint_check_is_prefix_tolerant_and_rejects_foreign() {
-    // ds4 adoption (D-adopt) matches the `/v1/models` id by the `deepseek-v4-`
-    // prefix, so a future `-turbo` build adopts; a foreign id on the reused
-    // port does not (the PID-reuse guard on the ds4 path).
-    let ds4_body = serde_json::json!({
-      "object": "list",
-      "data": [{"id": "deepseek-v4-turbo", "object": "model"}],
-    })
-    .to_string();
-    let (_resp, port) = spawn_one_shot(200, ds4_body).await;
-    assert!(
-      models_endpoint_reports_ds4_alias(port, Duration::from_secs(1)).await,
-      "a deepseek-v4-* alias must be accepted"
-    );
-
-    let foreign_body = serde_json::json!({
-      "object": "list",
-      "data": [{"id": "llama-3-8b", "object": "model"}],
-    })
-    .to_string();
-    let (_resp2, port2) = spawn_one_shot(200, foreign_body).await;
-    assert!(
-      !models_endpoint_reports_ds4_alias(port2, Duration::from_secs(1)).await,
-      "a foreign id must not be read as a ds4 alias"
-    );
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
