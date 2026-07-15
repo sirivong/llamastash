@@ -904,9 +904,6 @@ pub fn external_process_markers() -> Vec<&'static str> {
     .collect()
 }
 
-/// The process name for an adopted child recorded under `backend_id`, or the
-/// default backend's marker when the id is unknown. Used by the orphan sweep to
-/// label a re-adopted process. Names no backend.
 /// The default backend instance — what a plain GGUF binds to and every
 /// unknown-id / no-selection fallback resolves to. A client that must produce a
 /// concrete backend without an identity in hand uses this instead of naming a
@@ -936,13 +933,18 @@ pub fn native_knobs_for(id: &str) -> &'static [NativeKnobDescriptor] {
     .unwrap_or(&[])
 }
 
+/// The process name for an adopted child recorded under `backend_id`, or the
+/// default backend's own marker when the id is unknown / marker-less. Used by
+/// the orphan sweep to label a re-adopted process. Names no backend — the marker
+/// comes from the backend's own `process_marker`.
 pub fn adopted_process_name(backend_id: &str) -> &'static str {
   Backends::all()
     .iter()
     .find(|b| b.id() == backend_id)
     .and_then(|b| b.process_marker())
-    // Unknown / marker-less id falls back to the default direct backend's server.
-    .unwrap_or("llama-server")
+    // Unknown / marker-less id falls back to the default backend's own marker.
+    .or_else(|| default_backend().process_marker())
+    .unwrap_or_default()
 }
 
 /// Resolve the backend for a launch, honoring the per-model override **and**
