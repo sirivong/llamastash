@@ -61,8 +61,8 @@ pub(crate) enum RouteDecision {
     /// where a different model could be answering on the same port
     /// by the time we connect.
     served_model_key: ModelId,
-    /// Upstream OpenAI path prefix (`None` → llama.cpp `/v1/...`,
-    /// `Some("/api")` → the Lemonade umbrella's `/api/v1/...`).
+    /// Upstream OpenAI path prefix (`None` → the direct backend's `/v1/...`,
+    /// `Some("/api")` → a managed-multiplexer umbrella's `/api/v1/...`).
     upstream_path_prefix: Option<String>,
     fallback: bool,
     fallback_reason: Option<String>,
@@ -100,9 +100,9 @@ pub(crate) enum RouteDecision {
   /// `invalid_request` with `code: "model_required"`.
   ModelRequired,
   /// The resolved model is served by a managed-multiplexer backend whose
-  /// umbrella isn't running. Emitted for a Lemonade-tagged row when no
-  /// `lemond` umbrella is registered/Ready — a clean 503 instead of routing
-  /// a GGUF-shaped auto-start that would fail on the missing local file.
+  /// umbrella isn't running. Emitted for such a row when no umbrella is
+  /// registered/Ready — a clean 503 instead of routing a GGUF-shaped
+  /// auto-start that would fail on the missing local file.
   BackendUnavailable {
     backend: String,
     requested_model: String,
@@ -242,13 +242,14 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
     }
   };
 
-  // Lemonade-backed models are served by the shared `lemond` umbrella, not
-  // a per-model supervisor: route them to the umbrella's port with the
-  // `/api` prefix Lemonade serves OpenAI on. Handled before the
-  // GGUF supervisor walk because a Lemonade row has no local file for the
+  // Managed-multiplexer models are served by a shared umbrella process, not a
+  // per-model supervisor: route them to the umbrella's port. Handled before
+  // the GGUF supervisor walk because such a row has no local file for the
   // path-match (or the GGUF auto-start) to key on.
-  if resolved.source == crate::discovery::ModelSource::Lemonade.label() {
-    return decide_lemonade(state, requested, &resolved).await;
+  if crate::discovery::ModelSource::from_label(&resolved.source)
+    .is_some_and(|s| crate::backend::is_managed_multiplexer(s.backend_id()))
+  {
+    return decide_umbrella_route(state, requested, &resolved).await;
   }
 
   // Walk the supervisor snapshot for a Ready entry serving the
@@ -282,22 +283,29 @@ pub(crate) async fn decide(state: &Arc<ProxyState>, body_model: Option<String>) 
   }
 }
 
-/// Routing decision for a Lemonade-backed model. The shared `lemond`
-/// umbrella serves every Lemonade model, so this forwards to the umbrella's
-/// port (with the `/api` OpenAI prefix) when it is registered + Ready, and
-/// returns [`RouteDecision::BackendUnavailable`] otherwise. Lemonade's chat
-/// endpoint autoloads, so no per-model launch is needed on the hot path.
-async fn decide_lemonade(
+/// Routing decision for a managed-multiplexer-backed model. A managed
+/// multiplexer serves every one of its models from one shared umbrella
+/// process, so this forwards to the umbrella's port when it is registered +
+/// Ready, and returns [`RouteDecision::BackendUnavailable`] otherwise. The
+/// umbrella's chat endpoint autoloads, so no per-model launch is needed on the
+/// hot path. Resolves the owning backend from the source and reads its
+/// [`Backend::umbrella_launch_id`] — names no backend.
+async fn decide_umbrella_route(
   state: &Arc<ProxyState>,
   requested: String,
   resolved: &CatalogRow,
 ) -> RouteDecision {
-  match state
-    .ctx
-    .supervisors
-    .get(&crate::backend::lemonade::umbrella_launch_id())
-    .await
-  {
+  use crate::backend::{Backend, Backends};
+  let backend_id =
+    crate::discovery::ModelSource::from_label(&resolved.source).map(|s| s.backend_id());
+  let umbrella_id = backend_id
+    .and_then(|id| Backends::all().into_iter().find(|b| b.id() == id))
+    .and_then(|b| b.umbrella_launch_id());
+  let umbrella = match umbrella_id {
+    Some(id) => state.ctx.supervisors.get(&id).await,
+    None => None,
+  };
+  match umbrella {
     Some(umbrella) if matches!(umbrella.state().await, ManagedState::Ready) => {
       RouteDecision::ReadyAt {
         port: umbrella.port(),
@@ -305,13 +313,18 @@ async fn decide_lemonade(
         // The umbrella's own ModelId — the forward path re-verifies and
         // takes an inflight guard against this supervisor entry.
         served_model_key: umbrella.id().clone(),
+        // The OpenAI path prefix a managed-multiplexer umbrella serves on
+        // (currently a Lemonade convention; a per-backend prefix hook is a
+        // deferred follow-up).
         upstream_path_prefix: Some("/api".to_string()),
         fallback: false,
         fallback_reason: None,
       }
     }
     _ => RouteDecision::BackendUnavailable {
-      backend: crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string(),
+      backend: backend_id
+        .unwrap_or(crate::backend::DEFAULT_BACKEND_ID)
+        .to_string(),
       requested_model: requested,
     },
   }

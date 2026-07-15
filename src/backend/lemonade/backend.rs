@@ -29,13 +29,13 @@ pub const LEMONADE_BACKEND_ID: &str = "lemonade";
 /// (`lemonade://<registry name>`). A Lemonade model has no local GGUF, so
 /// discovery mints this file-less path as the catalog key and the launch path
 /// reads the registry name back off it. Single source of truth for both the
-/// minting side ([`crate::discovery::lemonade`]) and the parsing side
+/// minting side ([`crate::backend::lemonade::discovery`]) and the parsing side
 /// ([`registry_name_from_path`]).
 pub const LEMONADE_PATH_SCHEME: &str = "lemonade://";
 
 /// Parse a Lemonade synthetic path back to the registry model name the umbrella
 /// API knows, or `None` for any non-Lemonade path. The inverse of
-/// `discovery::lemonade::synthetic_path`: `lemonade://Whisper-Tiny` →
+/// `discovery::synthetic_path`: `lemonade://Whisper-Tiny` →
 /// `Some("Whisper-Tiny")`, `/models/x.gguf` → `None`. The launch path uses this
 /// to recognise a managed-multiplexer model and skip the GGUF header read.
 pub fn registry_name_from_path(path: &Path) -> Option<&str> {

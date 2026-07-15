@@ -2100,14 +2100,8 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
 
   let path = PathBuf::from(row.get("path")?.as_str()?);
   let parent = PathBuf::from(row.get("parent")?.as_str()?);
-  let source = match row.get("source").and_then(Value::as_str)? {
-    "user" => ModelSource::UserPath,
-    "huggingface" => ModelSource::HuggingFace,
-    "ollama" => ModelSource::Ollama,
-    "lm-studio" => ModelSource::LmStudio,
-    "lemonade" => ModelSource::Lemonade,
-    _ => ModelSource::UserPath,
-  };
+  let source = ModelSource::from_label(row.get("source").and_then(Value::as_str)?)
+    .unwrap_or(ModelSource::UserPath);
   let metadata = row.get("metadata").and_then(|md| {
     if md.is_null() {
       None

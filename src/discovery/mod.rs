@@ -13,7 +13,6 @@
 
 pub mod catalog;
 pub mod known_caches;
-pub mod lemonade;
 pub mod lm_studio;
 pub mod metadata_cache;
 pub mod ollama;
@@ -129,8 +128,12 @@ pub enum ModelSource {
   /// An LM Studio models directory.
   LmStudio,
   /// A model the Lemonade umbrella serves from its own registry — no
-  /// local GGUF file. Populated by the opt-in Lemonade discovery source
-  /// ([`lemonade`]).
+  /// local GGUF file. Populated by the opt-in Lemonade discovery source.
+  ///
+  /// This is the single file-less-source special case, and the only place a
+  /// backend is named for a discovery source. A generic
+  /// `ModelSource::Backend(id)` refactor (pluggable, name-free) is the
+  /// deferred option.
   Lemonade,
 }
 
@@ -142,6 +145,21 @@ impl ModelSource {
       ModelSource::Ollama => "ollama",
       ModelSource::LmStudio => "lm-studio",
       ModelSource::Lemonade => "lemonade",
+    }
+  }
+
+  /// Inverse of [`label`](Self::label): parse a source-label string back into
+  /// its `ModelSource`, or `None` for an unrecognized label. The single place
+  /// a discovery source label is read, so consumers map a label to a backend
+  /// via [`backend_id`](Self::backend_id) without naming one.
+  pub fn from_label(s: &str) -> Option<ModelSource> {
+    match s {
+      "user" => Some(ModelSource::UserPath),
+      "huggingface" => Some(ModelSource::HuggingFace),
+      "ollama" => Some(ModelSource::Ollama),
+      "lm-studio" => Some(ModelSource::LmStudio),
+      "lemonade" => Some(ModelSource::Lemonade),
+      _ => None,
     }
   }
 

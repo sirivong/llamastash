@@ -8,6 +8,7 @@
 
 pub mod backend;
 pub mod client;
+pub mod discovery;
 pub mod orchestrate;
 
 use std::path::PathBuf;

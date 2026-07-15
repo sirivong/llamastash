@@ -140,15 +140,13 @@ pub(crate) fn display_size(row: &CatalogRow) -> String {
     .unwrap_or_else(|| "?".to_string())
 }
 
-/// Backend id that serves a catalog row, from its source label:
-/// the Lemonade discovery source maps to `lemonade`; every local-file
-/// source (user / huggingface / ollama / lm-studio) to `llamacpp`.
+/// Backend id that serves a catalog row from its `source` label, via
+/// [`ModelSource::backend_id`](crate::discovery::ModelSource::backend_id).
+/// An unrecognized label falls back to the default backend. Names no backend.
 pub(crate) fn backend_for_source(source: &str) -> &'static str {
-  if source == crate::discovery::ModelSource::Lemonade.label() {
-    crate::backend::lemonade::LEMONADE_BACKEND_ID
-  } else {
-    crate::backend::DEFAULT_BACKEND_ID
-  }
+  crate::discovery::ModelSource::from_label(source)
+    .map(|s| s.backend_id())
+    .unwrap_or(crate::backend::DEFAULT_BACKEND_ID)
 }
 
 /// JSON projection of `list_models` rows. Stable shape — agents pin

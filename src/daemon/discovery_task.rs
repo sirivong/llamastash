@@ -156,7 +156,7 @@ async fn full_rescan(catalog: &ModelCatalog, opts: &DiscoveryOptions) {
   // Lemonade models (R11, opt-in, list-only). Best-effort: an unreachable
   // umbrella yields no rows and never aborts the disk scan above.
   if let Some(port) = opts.lemonade_port {
-    new_models.extend(crate::discovery::lemonade::enumerate(port).await);
+    new_models.extend(crate::backend::lemonade::discovery::enumerate(port).await);
   }
 
   catalog.replace_all(new_models).await;
