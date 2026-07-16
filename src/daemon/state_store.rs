@@ -4,7 +4,6 @@
 //! restart. It captures:
 //! - `favorites` — the user's pinned models (R24 storage half).
 //! - `last_params` — last successful launch params per model.
-//! - `presets` — named presets per model.
 //! - `running` — snapshot of every active supervised process so
 //!   orphan re-adoption on next daemon start has something to anchor
 //!   on.
@@ -25,24 +24,19 @@ use crate::backend::identity::ModelIdentity;
 use crate::daemon::registry::LaunchId;
 use crate::launch::favorites::Favorites;
 use crate::launch::params::LaunchParams;
-use crate::launch::presets::PresetStore;
 
 /// Top-level structure of `state.json`.
 ///
-/// `last_params` and `presets` use `Vec<(id, value)>` rather than a
-/// `BTreeMap` because `serde_json` can't serialise a map keyed by a
-/// struct: JSON object keys must be strings. In-memory consumers
-/// hold this as a `BTreeMap` via [`DaemonState::last_params_map`] /
-/// [`DaemonState::presets_map`] for ergonomic look-ups; the on-disk
-/// shape stays an explicit array of pairs for compatibility.
+/// `last_params` uses `Vec<(id, value)>` rather than a `BTreeMap` because
+/// `serde_json` can't serialise a map keyed by a struct: JSON object keys must
+/// be strings. In-memory consumers use [`DaemonState::last_params_map`] for
+/// ergonomic look-ups; the on-disk shape stays an explicit array of pairs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonState {
   #[serde(default)]
   pub favorites: Favorites,
   #[serde(default)]
   pub last_params: Vec<LastParamsEntry>,
-  #[serde(default)]
-  pub presets: Vec<PresetsEntry>,
   #[serde(default)]
   pub running: Vec<RunningSnapshot>,
   /// Schema version. A coarse marker for future use; we do not carry
@@ -84,19 +78,11 @@ fn is_default_backend(s: &str) -> bool {
   s == crate::backend::DEFAULT_BACKEND_ID
 }
 
-/// One entry in `presets` — a model's named-preset list.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PresetsEntry {
-  pub id: ModelIdentity,
-  pub presets: crate::launch::presets::Presets,
-}
-
 impl Default for DaemonState {
   fn default() -> Self {
     Self {
       favorites: Favorites::default(),
       last_params: Vec::new(),
-      presets: Vec::new(),
       running: Vec::new(),
       schema_version: current_schema_version(),
     }
@@ -111,15 +97,6 @@ impl DaemonState {
       .last_params
       .iter()
       .map(|e| (&e.id, &e.params))
-      .collect()
-  }
-
-  /// In-memory map view of `presets` for `O(log n)` lookup.
-  pub fn presets_map(&self) -> PresetStore {
-    self
-      .presets
-      .iter()
-      .map(|e| (e.id.clone(), e.presets.clone()))
       .collect()
   }
 
@@ -143,15 +120,6 @@ impl DaemonState {
         resolved_backend,
       },
     );
-  }
-
-  /// Insert or replace the preset list for `id`.
-  pub fn upsert_presets(&mut self, id: ModelIdentity, presets: crate::launch::presets::Presets) {
-    if let Some(entry) = self.presets.iter_mut().find(|e| e.id == id) {
-      entry.presets = presets;
-    } else {
-      self.presets.push(PresetsEntry { id, presets });
-    }
   }
 }
 
@@ -291,7 +259,6 @@ mod tests {
 
   use crate::gguf::identity::ModelId;
   use crate::launch::mode::LaunchMode;
-  use crate::launch::presets::{NamedPreset, Presets};
 
   fn temp_state_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -323,7 +290,6 @@ mod tests {
     let s = load(&dir).expect("absent file = defaults");
     assert!(s.favorites.is_empty());
     assert!(s.last_params.is_empty());
-    assert!(s.presets.is_empty());
     assert!(s.running.is_empty());
     assert_eq!(s.schema_version, 1);
     fs::remove_dir_all(&dir).ok();
@@ -340,12 +306,6 @@ mod tests {
       fake_params("/m/a.gguf"),
       "llamacpp".into(),
     );
-    let mut presets_for_a = Presets::new();
-    presets_for_a.upsert(NamedPreset {
-      name: "coding".into(),
-      params: fake_params("/m/a.gguf"),
-    });
-    s.upsert_presets(id("/m/a.gguf", 1), presets_for_a);
     s.running.push(RunningSnapshot {
       id: id("/m/a.gguf", 1),
       pid: 1234,
@@ -564,7 +524,6 @@ mod tests {
         { "id": { "path": "/models/qwen.gguf", "header_blake3": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }
       ],
       "last_params": [],
-      "presets": [],
       "running": [],
       "schema_version": 1
     }"#;
@@ -580,10 +539,32 @@ mod tests {
   }
 
   #[test]
-  fn backend_identity_persists_and_reloads_across_every_map() {
+  fn legacy_presets_are_ignored_and_not_resaved() {
+    let dir = temp_state_dir("legacy-presets");
+    let legacy_presets = serde_json::json!([
+      {
+        "id": id("/m/legacy.gguf", 7),
+        "presets": [{"name": "legacy", "params": fake_params("/m/legacy.gguf")}]
+      }
+    ]);
+    fs::write(
+      path(&dir),
+      serde_json::json!({"presets": legacy_presets, "schema_version": 1}).to_string(),
+    )
+    .unwrap();
+
+    let state = load(&dir).expect("legacy preset field is ignored");
+    save(&dir, &state).expect("save current state");
+    let saved: serde_json::Value =
+      serde_json::from_str(&fs::read_to_string(path(&dir)).unwrap()).expect("saved state is JSON");
+    assert!(saved.get("presets").is_none(), "legacy field stays removed");
+    fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn backend_identity_persists_and_reloads_across_state() {
     // A backend-registry identity (no local file) must persist + reload
-    // through favorites / last_params / presets / running alongside GGUF
-    // rows — the persisted-key generalization.
+    // through favorites / last_params / running alongside GGUF rows.
     use crate::backend::identity::BackendModelId;
     let dir = temp_state_dir("backend-id");
     let bid: ModelIdentity = BackendModelId {
@@ -594,12 +575,6 @@ mod tests {
     let mut s = DaemonState::default();
     s.favorites.add(bid.clone());
     s.upsert_last_params(bid.clone(), fake_params("/unused"), "llamacpp".into());
-    let mut presets = Presets::new();
-    presets.upsert(NamedPreset {
-      name: "fast".into(),
-      params: fake_params("/unused"),
-    });
-    s.upsert_presets(bid.clone(), presets);
     s.running.push(RunningSnapshot {
       id: bid.clone(),
       pid: 4321,

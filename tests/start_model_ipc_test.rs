@@ -292,17 +292,9 @@ async fn start_model_drives_supervisor_status_logs_stop_and_last_params() {
     .expect("favorite_remove");
   assert_eq!(remove_fav["removed"], json!(true));
 
-  // Persistence check — favorites + presets edits all flushed.
+  // Persistence check — favorites edits are flushed.
   let final_state = state_store::load(&state_dir).expect("load state");
   assert!(final_state.favorites.is_empty(), "favorites cleared");
-  assert!(
-    final_state
-      .presets_map()
-      .get(&final_state.last_params[0].id)
-      .map(|p| p.is_empty())
-      .unwrap_or(true),
-    "presets cleared"
-  );
 
   // Shutdown.
   let _ = client.call("shutdown", None).await;

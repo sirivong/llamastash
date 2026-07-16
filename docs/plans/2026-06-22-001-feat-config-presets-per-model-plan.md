@@ -11,11 +11,11 @@ origin: "PR #18 — docs/brainstorms/2026-06-06-config-presets-per-model.md (ext
 
 ## Overview
 
-Named launch presets already exist — created via `llamastash presets <model> save <name> …`, stored in `state.json`, applied as the `User` layer at launch. What is missing is everything around that primitive: a config-file home, a TUI surface, a per-model **default**, and agent-glance discoverability.
+At planning time, named launch presets were created via `llamastash presets <model> save <name> …`, stored in `state.json`, and applied as the `User` layer at launch. What was missing was everything around that primitive: a config-file home, a TUI surface, a per-model **default**, and agent-glance discoverability.
 
 This plan adds those, reinterpreted to fit the current architecture. The shape (after the 2026-06-23 deepening):
 
-- **`config.yaml` is the single source of truth for presets, and is writable.** Presets live in a normal `presets:` key, edited surgically (one node at a time) so the rest of the file is untouched. The CLI `presets save/delete` and the TUI `Ctrl+P` both write there. `state.json` presets are **migrated once** on boot, then cleared.
+- **`config.yaml` is the single source of truth for presets, and is writable.** Presets live in a normal `presets:` key, edited surgically (one node at a time) so the rest of the file is untouched. The CLI `presets save/delete` and the TUI `Ctrl+P` both write there. The temporary `state.json` migration was removed after one release cycle (2026-07-16).
 - **Comment-safe writes via surgical patching.** Preset edits use `yamlpath` + `yamlpatch` (zizmor) to patch only the node being changed; every comment and bit of formatting in `config.yaml` — including inside a hand-authored presets section — is preserved (no whole-file `serde_yaml` re-serialize). Decision grounded in research (see Context).
 - **In-memory store + write-through.** The daemon loads presets from `config.yaml` at start and holds them in memory; a save/delete mutates memory **and** atomically patches the one node in `config.yaml` (via `yamlpatch`), so app-driven changes are live without a restart. Hand-edits to `config.yaml` need a daemon restart.
 - **One `presets:` block, key classified at resolution:** matches a discovered model (name, path fallback) → **per-model**; otherwise read as an **arch id** → every model of that arch. Model wins. CLI/TUI only ever write **per-model** keys; arch-level presets are hand-authored.
@@ -39,7 +39,7 @@ Carried from the PR #18 brainstorm's goals, re-scoped by the 2026-06-23 deepenin
 - R4. **Config-file authoring** — presets live in `config.yaml`, the single writable source, comment-safe. (goal 4, hardened)
 - R5. **Default per model/arch** — one preset is the default (config `default:`), driving the TUI cycle's opening selection. (goal 5, re-scoped: TUI-only, not CLI auto-apply)
 - R6. **Agent-facing** — agents discover presets and select one by name. (goal 6)
-- R7. **One-time migration** — existing `state.json` presets are imported into `config.yaml` once, then `state.json` presets are cleared. (re-scoped from goal 7)
+- R7. **One-time migration** — existing `state.json` presets are imported into `config.yaml` once, then `state.json` presets are cleared. (re-scoped from goal 7; removed 2026-07-16 after one release cycle)
 - R8. **CLI CRUD** — `presets save` (create-or-update) / `list` / `show` / `delete`, now reading/writing `config.yaml`. (user-confirmed)
 
 ## Scope Boundaries
@@ -69,8 +69,8 @@ Two research passes (best-practices-researcher web-verified, then a targeted loo
 
 ### Relevant Code and Patterns
 
-- **Preset primitive** — `src/launch/presets.rs`: `NamedPreset { name, params: LaunchParams }`, `Presets` (`#[serde(transparent)]` `Vec<NamedPreset>`, `upsert`/`remove`/`get`), `PresetStore = BTreeMap<ModelIdentity, Presets>`.
-- **State store** — `src/daemon/state_store.rs`: `DaemonState.presets: Vec<PresetsEntry>`, `PresetsEntry { id: ModelIdentity, presets: Presets }`, `presets_map()`, `upsert_presets()`. `schema_version: u32` (pre-1.0, no migration code; crate `0.0.4`). **This `presets` field becomes migration-only and is slated for removal** (Unit 3, Unit 8 TODO).
+- **Preset primitive** — `src/launch/presets.rs`: `NamedPreset { name, params: LaunchParams }`, `Presets` (`#[serde(transparent)]` `Vec<NamedPreset>`, `upsert`/`remove`/`get`).
+- **State store** — `src/daemon/state_store.rs`: `DaemonState` persists favorites, last parameters, and running snapshots. Presets live only in `config.yaml`.
 - **Identity** — `src/gguf/identity.rs` `ModelId { path, header_blake3 }`; `src/backend/identity.rs` `ModelIdentity`. `src/cli/resolve.rs` `fetch_catalog` + `resolve_model` (name/path/id) is the resolver to reuse for config-key classification.
 - **Config** — `src/config/loader.rs`: `Config` (`#[serde(default, rename_all="snake_case")]`), `arch_defaults: BTreeMap<String, TypedKnobs>`, `load_config_from_path` (`serde_yaml`, unknown keys ignored). `TypedKnobs` (19 `Option<KnobValue<T>>`; `Set(v)` ⇆ bare scalar, `Auto` ⇆ `{auto:true}`). **`ctx`/`reasoning` are siblings of `knobs` in `LaunchParams`, not inside `TypedKnobs`.** Route per-knob read/write through the `KnobField` accessor guarded by `apply_knob_handles_every_spec_in_the_alias_table` — the documented silent-edit-loss bug class.
 - **Config writer** — `src/config/writer.rs`: `merge_and_write(path, Value)` (recursive `merge`, **whole-file `serde_yaml` re-serialize**, atomic `write_secure`, 0600, symlink/parent-mode guards). Used by the init wizard. **Comment-blind** — the new `yamlpatch`-based presets writer is a separate path that does NOT re-serialize the whole file.
@@ -100,7 +100,7 @@ Two research passes (best-practices-researcher web-verified, then a targeted loo
 
 ## Key Technical Decisions
 
-- **`config.yaml` is the single writable source of truth for presets** (user, 2026-06-23). Reverses the earlier hybrid; `state.json` presets migrate once then clear.
+- **`config.yaml` is the single writable source of truth for presets** (user, 2026-06-23). It replaced the earlier hybrid; the temporary `state.json` migration was removed after one release cycle.
 - **Comment-safe via `yamlpath` + `yamlpatch`** (research-backed; user-selected) — surgical node patching preserves all comments/formatting including inside the presets section, no whole-file re-serialize. Adds two MIT zizmor crates. Preset entries are keyed by name as a map to avoid `yamlpatch`'s Replace-on-sequence caveat. (resolves origin's comment-loss problem)
 - **In-memory store + write-through** (user) — daemon holds presets in memory, mutations update memory and atomically rewrite the block; app changes live without restart.
 - **One `presets:` block; key = model name (path fallback) else arch id; model wins** (user). CLI/TUI write per-model only; arch presets hand-authored. (corrects origin's ModelId/arch conflation)
@@ -109,7 +109,7 @@ Two research passes (best-practices-researcher web-verified, then a targeted loo
 - **TUI:** inline `default → auto → named presets` cycle row + a `Ctrl+P` save dialog reusing an extended `ConfirmAction` (text-input + overwrite-confirm). No list/delete. (corrects origin's modal/dropdown mockups)
 - **`Ctrl+P` capture preserves auto/default markers** from the settings form (e.g. `ctx: auto`), and captures a running model's actual launch params. (user)
 - **CLI verbs unchanged in shape** — `save` is create-or-update; `list`/`show`/`delete` stay; they now target `config.yaml`. (user)
-- **One-time migration is marked removable** (`// ONE-TIME MIGRATION (remove after …)`) with a TODO.md entry to delete it and the now-dead `state.json` `presets` field in a later version. (user)
+- **The one-time migration was removed on 2026-07-16** after its release cycle, together with the `state.json` `presets` field. (user)
 - **Agent surface stays lean** — existing `presets_list`/`presets_show` + `preset_count`/`default` hint in `status`. (corrects origin's full-`status`-block proposal)
 
 ## Open Questions

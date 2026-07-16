@@ -17,7 +17,6 @@ pub mod launch_service;
 pub mod lockfile;
 pub mod orphans;
 pub mod ports;
-pub mod preset_migration;
 pub mod preset_store;
 pub mod probe;
 pub mod registry;
@@ -149,9 +148,8 @@ pub struct DaemonOptions {
   /// land back in `config_path`. Default: empty map.
   pub presets: std::collections::BTreeMap<String, crate::config::ConfigPresetBlock>,
   /// Resolved `config.yaml` path. The preset store writes through here
-  /// (comment-safe) and the one-time `state.json` preset migration writes
-  /// the migrated entries here. `None` disables write-through (tests /
-  /// no config file) — mutations stay in-memory.
+  /// comment-safely. `None` disables write-through (tests / no config file)
+  /// — mutations stay in-memory.
   pub config_path: Option<PathBuf>,
 }
 
@@ -302,7 +300,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   }
   let _discovery = discovery_task::spawn(catalog.clone(), discovery_opts);
 
-  // 5. Persisted state — favorites, presets, last_params, running.
+  // 5. Persisted state — favorites, last_params, running.
   // A parse failure does NOT block daemon start: the file is moved
   // to `state.json.broken-<ts>` and the daemon comes up with
   // defaults. Same posture as the plan's
@@ -332,17 +330,6 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // Clear `running` — only the IPC `start_model` path repopulates
   // this slot via live supervisors going forward.
   state_after_sweep.running.clear();
-  // One-time migration: import any legacy `state.json` presets into
-  // `config.yaml` (config wins on collision), then clear them from state.
-  // `config_presets` is seeded from `Config.presets` and becomes the
-  // in-memory preset store below, so migrated entries are live without a
-  // restart. (ONE-TIME MIGRATION — remove with `preset_migration`; see TODO.md.)
-  let mut config_presets = opts.presets.clone();
-  preset_migration::migrate_state_presets_to_config(
-    &mut state_after_sweep,
-    &mut config_presets,
-    opts.config_path.as_deref(),
-  );
   if let Err(e) = state_store::save(&opts.state_dir, &state_after_sweep) {
     log::warn!("state-store: failed to persist after orphan sweep: {e}");
   }
@@ -407,7 +394,8 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   // 8. Wire the dispatcher context.
   let supervisors = SupervisorRegistry::new();
   let persisted = PersistedState::new(state_after_sweep, Some(opts.state_dir.clone()));
-  let preset_store = preset_store::ConfigPresetStore::new(config_presets, opts.config_path.clone());
+  let preset_store =
+    preset_store::ConfigPresetStore::new(opts.presets.clone(), opts.config_path.clone());
   // Construct the proxy status cell *before* the context so the IPC
   // `status` handler and the proxy listener task share the same
   // handle. The cell surfaces via `status.proxy`; it is seeded with

@@ -378,7 +378,7 @@ llamastash presets <ref> show <NAME>
 
 Named launch presets for a model. `save` is create-or-update (the response reports `replaced: <old-params>` so callers can audit). `list` shows the model's **effective** set; each row carries `source: "config"` and `is_default`. Apply one at launch with `llamastash start <ref> --preset <NAME>`.
 
-Presets live in `config.yaml` under a `presets:` key, the single writable source. `save` / `delete` write there comment-safely. On first run after upgrading, any presets in `state.json` are migrated into `config.yaml` once, then cleared.
+Presets live in `config.yaml` under a `presets:` key, the single writable source. `save` / `delete` write there comment-safely. `state.json` does not carry or import presets.
 
 A `presets:` key is classified per-resolution against your discovered models: a key that names a model (by file basename, or full path) is **per-model**; otherwise it is read as a GGUF `general.architecture` id and applies to **every model of that arch**. A model's effective set is its per-model entries ∪ its arch entries; the per-model entry wins on a name collision. The CLI writes per-model keys only — arch presets are hand-authored.
 

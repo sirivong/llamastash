@@ -1,9 +1,8 @@
 //! Named launch presets per model (`R21`).
 //!
-//! Stored under `state_dir/state.json` as
-//! `presets: HashMap<ModelIdentity, Vec<NamedPreset>>`. A preset's `params`
-//! is a full [`LaunchParams`] snapshot so applying a preset is just
-//! "clone these params, then layer per-invocation overrides on top".
+//! The `config.yaml` `presets:` blocks materialize into [`NamedPreset`] values.
+//! A preset's `params` is a full [`LaunchParams`] snapshot so applying one is
+//! just "clone these params, then layer per-invocation overrides on top".
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -11,7 +10,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::backend::identity::ModelIdentity;
 use crate::config::{ConfigPresetBlock, KnobValue, PresetBody};
 use crate::launch::mode::LaunchMode;
 use crate::launch::params::LaunchParams;
@@ -72,15 +70,6 @@ impl Presets {
     self.entries.iter().find(|p| p.name == name)
   }
 }
-
-/// Top-level map from model identity → that model's preset list.
-/// Serialised in `state.json` under `presets`.
-///
-/// Migration-only: the `config.yaml` `presets:` block is the live source
-/// (see [`crate::config::ConfigPresetBlock`]); this type only survives to
-/// read the legacy `state.json` rows during the one-time migration and is
-/// slated for removal with it (see `TODO.md`).
-pub type PresetStore = BTreeMap<ModelIdentity, Presets>;
 
 /// Fold a launch's settings into the config-layer [`PresetBody`]. `ctx`
 /// and `reasoning` live inside [`crate::config::TypedKnobs`] at the config

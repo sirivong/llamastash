@@ -221,7 +221,6 @@ JSON-RPC error codes follow the spec (`-32601 Method not found`, `-32602 Invalid
 - `favorites: ModelId[]`
 - `last_params: { <ModelId>: LaunchParams }`
 - `running: RunningSnapshot[]` (PID + port + started_at + params)
-- `presets` — migration-only. Named presets now live in `config.yaml`; this field is read once at first boot after the upgrade, migrated into `config.yaml`, then cleared. It is slated for removal (see `TODO.md`).
 
 Corruption → quarantine. A `state.json` that fails to parse is renamed to `state.json.broken-<unix-secs>` and the daemon starts with defaults rather than refusing to boot.
 
