@@ -347,6 +347,26 @@ impl Backend for LemonadeBackend {
     Some(umbrella_launch_id())
   }
 
+  fn supervise_at_boot(
+    &self,
+    ctx: &MethodContext,
+    log_dir: &Path,
+    probe_timeout: Option<std::time::Duration>,
+  ) {
+    // Opt-in: only when the backend is enabled and the `lemond` binary
+    // resolves. Bring the one shared umbrella up in a detached task so
+    // discovery + proxy routing work before any explicit `start`.
+    if !self.available(ctx) {
+      return;
+    }
+    super::orchestrate::supervise_umbrella_at_boot(
+      ctx.supervisors.clone(),
+      &ctx.backend.lemonade,
+      log_dir,
+      probe_timeout,
+    );
+  }
+
   async fn stop(
     &self,
     ctx: &MethodContext,

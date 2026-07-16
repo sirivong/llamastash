@@ -488,105 +488,16 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     );
   }
 
-  // 8a. Lemonade umbrella supervision (opt-in). When the backend is enabled,
-  // bring up the one shared `lemond` umbrella on its configured loopback port
-  // so discovery (which probes that port) and proxy routing (which forwards to
-  // the registered umbrella) both work without the user first issuing an
-  // explicit `start`. Done in a background task: the supervisor blocks until
-  // `/live` is ready, which must not delay the daemon's listeners. A missing
-  // `lemond` binary is a clean warning, never a daemon-start failure —
-  // llamastash never installs it. The `start_model` path's `ensure_umbrella`
-  // is idempotent, so it reuses this umbrella rather than spawning a second.
-  if opts.lemonade_available() {
-    match crate::backend::lemonade::resolve_lemond_binary(&opts.backend.lemonade) {
-      Some(binary) => {
-        let port = opts.backend.lemonade.port;
-        if let Err(e) = std::fs::create_dir_all(&opts.log_dir) {
-          log::warn!(
-            "could not create log dir {}: {e}; lemonade umbrella logs may fail to open",
-            opts.log_dir.display()
-          );
-        }
-        let probe = match opts.probe_timeout_secs {
-          Some(secs) => ProbeOptions {
-            timeout: std::time::Duration::from_secs(secs),
-            ..ProbeOptions::default()
-          },
-          None => ProbeOptions::default(),
-        };
-        let umbrella = crate::backend::lemonade::umbrella_process_spec(port, binary, probe);
-        let registry = ctx.supervisors.clone();
-        let log_path = opts.log_dir.join("lemonade-umbrella.log");
-        // `ensure_umbrella` refuses to adopt a foreign process already holding
-        // the port (returns `PortInUse`) rather than logging a false "supervised"
-        // and 503-ing opaquely at routing time. Surface that case plainly. Not
-        // fatal: the daemon (and llama.cpp routing) stay up; only Lemonade
-        // routing is unavailable until the conflict is resolved.
-        //
-        // A port held only by teardown remnants (FIN-WAIT-2 / TIME-WAIT
-        // leftovers of a just-stopped daemon's `lemond`) is waited out
-        // first: the kernel clears them within its fin-timeout (~60 s),
-        // so a quick `daemon stop && daemon start --lemonade` brings the
-        // umbrella up as soon as the port frees instead of failing.
-        tokio::spawn(async move {
-          use crate::backend::lemonade::{umbrella_port_state, UmbrellaPortState};
-          let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-          let mut waiting_logged = false;
-          loop {
-            if umbrella_port_state(port) == UmbrellaPortState::Free {
-              match crate::backend::lemonade::ensure_umbrella(
-                &registry,
-                port,
-                umbrella.clone(),
-                log_path.clone(),
-              )
-              .await
-              {
-                Ok(_) => {
-                  log::info!("lemonade umbrella supervised on 127.0.0.1:{port}");
-                  return;
-                }
-                // Lost a probe-to-spawn race (e.g. the previous daemon's
-                // dying `lemond` flickering through teardown) — retry
-                // within the window like any other transient holder.
-                Err(crate::daemon::supervisor::SpawnError::PortInUse(_)) => {}
-                Err(e) => {
-                  log::warn!("lemonade umbrella failed to start at boot: {e}");
-                  return;
-                }
-              }
-            }
-            // Held — by a still-exiting previous umbrella (Listening, drops
-            // within its SIGTERM→SIGKILL grace) or by kernel teardown
-            // remnants (FIN-WAIT-2 / TIME-WAIT, clear within the
-            // fin-timeout). Both resolve on their own; a genuinely foreign
-            // holder is normally caught by `daemon start`'s precheck before
-            // this task ever runs, so only after the window do we call it
-            // foreign and give up.
-            if std::time::Instant::now() >= deadline {
-              log::error!(
-                "lemonade: 127.0.0.1:{port} is already in use — llamastash could not start its \
-                 own managed `lemond`. Stop whatever holds that port (e.g. a manually started \
-                 `lemond`) or set `lemonade.port`; Lemonade model routing will return 503 until \
-                 this is resolved."
-              );
-              return;
-            }
-            if !waiting_logged {
-              log::info!(
-                "lemonade: 127.0.0.1:{port} is still held (previous umbrella exiting, or its \
-                 sockets draining); retrying for up to 90 s…"
-              );
-              waiting_logged = true;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-          }
-        });
-      }
-      None => log::warn!(
-        "lemonade enabled but no `lemond` binary found (set `lemonade.binary` or put `lemond` on PATH); skipping umbrella supervision"
-      ),
-    }
+  // 8a. Per-backend boot infrastructure supervision (opt-in). A managed
+  // multiplexer brings up its one shared umbrella here so discovery (which
+  // probes its port) and proxy routing (which forwards to the registered
+  // umbrella) both work before the user issues an explicit `start`. Each
+  // backend self-gates on its own availability and runs the bring-up in its own
+  // detached task, so boot never blocks on a readiness probe; a
+  // process-per-model backend does nothing. Names no backend.
+  let boot_probe_timeout = opts.probe_timeout_secs.map(std::time::Duration::from_secs);
+  for backend in crate::backend::Backends::all() {
+    crate::backend::Backend::supervise_at_boot(&backend, &ctx, &opts.log_dir, boot_probe_timeout);
   }
 
   // 8b. OpenAI-compat proxy listener. Spawned between the

@@ -612,6 +612,27 @@ pub trait Backend {
     None
   }
 
+  /// Bring up any always-on infrastructure this backend supervises at daemon
+  /// **boot** — a managed multiplexer's shared umbrella process, so discovery
+  /// and proxy routing work before the user issues an explicit `start`. Called
+  /// once per registered backend after the dispatch context is wired, before
+  /// the proxy listener binds. Default: nothing (a process-per-model backend
+  /// supervises only per `start_model`).
+  ///
+  /// The backend **self-gates** on its own [`available`](Self::available)
+  /// predicate and must return promptly: bring the process up in a detached
+  /// background task rather than blocking boot on a readiness probe (the
+  /// detached-start parent only waits a few seconds for `runtime.json`).
+  /// `log_dir` is the daemon's per-launch log directory; `probe_timeout` is the
+  /// configured readiness deadline (`None` = the backend's default).
+  fn supervise_at_boot(
+    &self,
+    _ctx: &MethodContext,
+    _log_dir: &Path,
+    _probe_timeout: Option<std::time::Duration>,
+  ) {
+  }
+
   /// Mint this backend's synthetic [`ModelIdentity`] for a **file-less** catalog
   /// `path` — a backend that names models from a remote registry rather than a
   /// local GGUF — or `None` when `path` is not one of its synthetic paths.
@@ -944,6 +965,15 @@ impl Backend for Backends {
 
   fn umbrella_openai_prefix(&self) -> Option<&'static str> {
     for_each_backend!(self, b => b.umbrella_openai_prefix())
+  }
+
+  fn supervise_at_boot(
+    &self,
+    ctx: &MethodContext,
+    log_dir: &Path,
+    probe_timeout: Option<std::time::Duration>,
+  ) {
+    for_each_backend!(self, b => b.supervise_at_boot(ctx, log_dir, probe_timeout))
   }
 
   fn synthetic_identity(&self, path: &Path) -> Option<ModelIdentity> {
