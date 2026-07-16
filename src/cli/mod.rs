@@ -56,10 +56,11 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
     // rejected loudly, never silently papered over with defaults. `config`
     // (opens the file), `init` (rewrites it), and `doctor` (diagnoses setup)
     // are exempt so the user can always repair a broken config.
-    let repair = matches!(
-      command,
-      Some(Command::Config) | Some(Command::Init(_)) | Some(Command::Doctor(_))
-    );
+    let repair = match &command {
+      Some(Command::Config(args)) => args.action.is_none(),
+      Some(Command::Init(_)) | Some(Command::Doctor(_)) => true,
+      _ => false,
+    };
     if repair {
       log::warn!("{warning}");
     } else {
@@ -76,7 +77,7 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
   let resolved_config = &config.config;
   let outcome: CliResult = match command {
     None => handle_tui(&cli, resolved_config).await,
-    Some(Command::Config) => config::handle(&cli),
+    Some(Command::Config(args)) => config::handle(args.action, &cli, resolved_config),
     Some(Command::Daemon(action)) => {
       map_anyhow(daemon::handle(action, &cli, resolved_config).await)
     }

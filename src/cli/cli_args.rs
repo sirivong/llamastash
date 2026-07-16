@@ -176,8 +176,8 @@ pub fn parse_cli() -> Result<Cli, clap::Error> {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-  /// Open the active config file in `$EDITOR`.
-  Config,
+  /// Open the active config file or inspect its bindings.
+  Config(ConfigArgs),
   /// Manage the background daemon (auto-spawned on attach).
   #[command(subcommand)]
   Daemon(DaemonAction),
@@ -233,6 +233,18 @@ pub enum Command {
   #[cfg(feature = "uat")]
   #[command(hide = true)]
   Uat(UatArgs),
+}
+
+#[derive(Args, Debug, Default)]
+pub struct ConfigArgs {
+  #[command(subcommand)]
+  pub action: Option<ConfigAction>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+  /// Print the active keybinding overrides as YAML.
+  Bindings,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1252,6 +1264,18 @@ mod tests {
     assert!(after.no_scan);
     assert!(matches!(before.command, Some(Command::List(_))));
     assert!(matches!(after.command, Some(Command::List(_))));
+  }
+
+  #[test]
+  fn config_bindings_parses_as_a_config_subcommand() {
+    let cli = parse(&["config", "bindings"]);
+
+    assert!(matches!(
+      cli.command,
+      Some(Command::Config(ConfigArgs {
+        action: Some(ConfigAction::Bindings)
+      }))
+    ));
   }
 
   #[test]

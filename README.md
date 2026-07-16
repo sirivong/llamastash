@@ -282,7 +282,7 @@ Same backend (Vulkan b9440 / `vulkan-avx2@2.18.0`), same GGUF bytes. raw `llama-
 
 ## Configuration
 
-LlamaStash reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~/.config/llamastash/config.yaml`), `~/Library/Application Support/llamastash/config.yaml` on macOS, and `%APPDATA%\llamastash\config\config.yaml` on Windows. A fully-annotated sample lives at [`config.example.yaml`](config.example.yaml) — copy it to the path above and edit. Run `llamastash config` to open the active file in `$EDITOR`. The full schema reference is in [`docs/usage.md`](docs/usage.md#configuration).
+LlamaStash reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~/.config/llamastash/config.yaml`), `~/Library/Application Support/llamastash/config.yaml` on macOS, and `%APPDATA%\llamastash\config\config.yaml` on Windows. A fully-annotated sample lives at [`config.example.yaml`](config.example.yaml) — copy it to the path above and edit. Run `llamastash config` to open the active file in `$EDITOR`, or `llamastash config bindings` to print every effective keybinding as YAML. The full schema reference is in [`docs/usage.md`](docs/usage.md#configuration).
 
 Quick tour of the top-level keys:
 

@@ -5,6 +5,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 ## [Unreleased]
 
 - `llamastash config` opens the active config file in `$EDITOR`.
+- `llamastash config bindings` prints every effective keybinding as YAML for copying between configs.
 
 ### Changed
 

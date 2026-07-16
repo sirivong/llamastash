@@ -24,7 +24,7 @@ LlamaStash runs on Linux (x86_64, aarch64), macOS (Apple Silicon, Intel), and Wi
 
 ## Configuration
 
-LlamaStash reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~/.config/llamastash/config.yaml`), `~/Library/Application Support/llamastash/config.yaml` on macOS, and `%APPDATA%\llamastash\config\config.yaml` on Windows. A fully-annotated sample lives at [`config.example.yaml`](../config.example.yaml) — copy it to the path above and edit. Run `llamastash config` to open the active path in `$EDITOR`.
+LlamaStash reads `$XDG_CONFIG_HOME/llamastash/config.yaml` on Linux (fallback `~/.config/llamastash/config.yaml`), `~/Library/Application Support/llamastash/config.yaml` on macOS, and `%APPDATA%\llamastash\config\config.yaml` on Windows. A fully-annotated sample lives at [`config.example.yaml`](../config.example.yaml) — copy it to the path above and edit. Run `llamastash config` to open the active path in `$EDITOR`, or `llamastash config bindings` to print every effective keybinding as YAML.
 
 Resolution order (highest wins): `--config <PATH>` → `LLAMASTASH_CONFIG` env var → the platform path above.
 
@@ -277,6 +277,8 @@ Report-style commands (`list`, `status`, `presets list`, `favorites list`, `last
 ### `llamastash config`
 
 Opens the active config-file path in the executable named by `$EDITOR` and waits for it to exit. The same `--config <PATH>` and `LLAMASTASH_CONFIG` resolution order applies. It can open a malformed or missing config file so you can repair or create it.
+
+`llamastash config bindings` prints every effective binding as a `keybindings:` YAML block in stable key order. Configured bindings replace their default values; every unset action prints its default primary key. Redirect it to copy the bindings to another config: `llamastash config bindings > bindings.yaml`. The config format accepts one key spec per action, so actions with multiple default aliases export their primary key.
 
 ### `llamastash list`
 

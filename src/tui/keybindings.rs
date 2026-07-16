@@ -398,6 +398,61 @@ impl Binding {
   pub fn description(&self) -> &'static str {
     self.description.unwrap_or(self.hint)
   }
+
+  /// Pasteable config spec for this chord — the inverse of
+  /// [`parse_key_spec`], using the same token vocabulary. This is what
+  /// `llamastash config bindings` emits and what overrides parse back
+  /// into, so the two must stay in lock-step.
+  pub fn config_spec(&self) -> String {
+    let mut parts = Vec::new();
+    if self.mods.contains(KeyModifiers::CONTROL) {
+      parts.push("ctrl".to_string());
+    }
+    if self.mods.contains(KeyModifiers::ALT) {
+      parts.push("alt".to_string());
+    }
+    if self.mods.contains(KeyModifiers::SUPER) {
+      parts.push("super".to_string());
+    }
+    let key_name = match self.key {
+      KeyCode::Char(' ') => "space".to_string(),
+      KeyCode::Char(c) => {
+        if self.mods.contains(KeyModifiers::SHIFT) && c.is_ascii_lowercase() {
+          parts.push("shift".to_string());
+        }
+        c.to_string()
+      }
+      KeyCode::Enter => {
+        if self.mods.contains(KeyModifiers::SHIFT) {
+          parts.push("shift".to_string());
+        }
+        "enter".to_string()
+      }
+      KeyCode::Esc => "esc".to_string(),
+      KeyCode::Tab => {
+        if self.mods.contains(KeyModifiers::SHIFT) {
+          parts.push("shift".to_string());
+        }
+        "tab".to_string()
+      }
+      KeyCode::BackTab => return "shift+tab".to_string(),
+      KeyCode::Backspace => "backspace".to_string(),
+      KeyCode::Up => "up".to_string(),
+      KeyCode::Down => "down".to_string(),
+      KeyCode::Left => "left".to_string(),
+      KeyCode::Right => "right".to_string(),
+      KeyCode::Home => "home".to_string(),
+      KeyCode::End => "end".to_string(),
+      KeyCode::PageUp => "pgup".to_string(),
+      KeyCode::PageDown => "pgdn".to_string(),
+      KeyCode::Delete => "del".to_string(),
+      KeyCode::Insert => "ins".to_string(),
+      KeyCode::F(n) => format!("f{n}"),
+      other => return format_key_label(&other, self.mods),
+    };
+    parts.push(key_name);
+    parts.join("+")
+  }
 }
 
 // Shared category slices — keeps the binding table dense without
@@ -1054,6 +1109,26 @@ impl KeyMap {
     }
     self.per_focus = build_per_focus(&self.flat);
     warnings
+  }
+
+  /// Resolve one pasteable key spec for every config-facing action. Overrides
+  /// replace the default primary chord; actions with multiple stock aliases
+  /// export their first binding because config accepts one spec per action.
+  pub fn effective_config_bindings(
+    overrides: &BTreeMap<String, String>,
+  ) -> BTreeMap<&'static str, String> {
+    let mut keymap = Self::default();
+    keymap.apply_overrides(overrides);
+    Action::CONFIG_NAMES
+      .iter()
+      .filter_map(|(name, action)| {
+        keymap
+          .flat
+          .iter()
+          .find(|binding| binding.action == *action)
+          .map(|binding| (*name, binding.config_spec()))
+      })
+      .collect()
   }
 }
 
