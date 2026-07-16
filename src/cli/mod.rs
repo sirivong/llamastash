@@ -9,6 +9,7 @@
 pub mod cli_args;
 pub mod client;
 pub(crate) mod colors;
+pub mod config;
 pub mod daemon;
 pub mod doctor;
 pub mod exit_codes;
@@ -55,7 +56,10 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
     // rejected loudly, never silently papered over with defaults. `init`
     // (rewrites the file) and `doctor` (diagnoses setup) are exempt so the
     // user can always repair a broken config.
-    let repair = matches!(command, Some(Command::Init(_)) | Some(Command::Doctor(_)));
+    let repair = matches!(
+      command,
+      Some(Command::Config) | Some(Command::Init(_)) | Some(Command::Doctor(_))
+    );
     if repair {
       log::warn!("{warning}");
     } else {
@@ -72,6 +76,7 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
   let resolved_config = &config.config;
   let outcome: CliResult = match command {
     None => handle_tui(&cli, resolved_config).await,
+    Some(Command::Config) => config::handle(&cli),
     Some(Command::Daemon(action)) => {
       map_anyhow(daemon::handle(action, &cli, resolved_config).await)
     }

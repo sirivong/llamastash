@@ -249,7 +249,7 @@ places.
 - [ ] Benchmark ds4 vs llama.cpp for Deepseek v4 Flash.
 - [ ] backedn selection knob
 - [ ] look into if llamacpp additional_binaries are actually used in a meaningful way. Are these binaries used for launch if not whats the point of this now that backend trait has been heavily refactored. might be related to open todos from backend refactor.
-- [ ] a config CLI command that opens the loaded config file using $EDITOR
+- [x] ~~A config CLI command that opens the loaded config file using `$EDITOR`.~~ — `llamastash config` opens the active config path and waits for the editor to exit.
 - [ ] config -> bindings command that prints all current binidngs in yaml format. This can be used to copy bindings from one config to another.
 - [ ] put all code that needs touching to add new backend to top of backend/mod.rs or in a logical place together
 - [x] check to see leaked backend stuff for example src/cli/mod.rs L:121 few commits ago (maybe fixed already) and LemonadeConfig, Ds4Config etc seems to be leaking as well — **done (2026-07-15 config-grouping refactor):** `LemonadeConfig`/`Ds4Config` moved into their backend modules, `cli/mod.rs` binary-override write retargeted to `backend.llamacpp.binary`. Remaining generic-code leaks tracked under the R7 config-grouping bullet (`/props`+gate, device-catalog, DaemonOptions, orphans).

@@ -176,6 +176,8 @@ pub fn parse_cli() -> Result<Cli, clap::Error> {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+  /// Open the active config file in `$EDITOR`.
+  Config,
   /// Manage the background daemon (auto-spawned on attach).
   #[command(subcommand)]
   Daemon(DaemonAction),
