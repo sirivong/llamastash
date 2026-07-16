@@ -92,6 +92,12 @@ pub(crate) struct StartParams {
   /// forces a backend. Set by `start --backend` and the TUI Launch picker.
   #[serde(default)]
   pub(crate) backend: Option<crate::launch::params::BackendChoice>,
+  /// Chosen **server** id (a build/binary of a backend, e.g. `llamacpp·vulkan`).
+  /// Set by `start --server` / the TUI server knob. Determines which binary the
+  /// launch spawns and, when `backend` is `Auto`, which backend it runs on
+  /// (the server's owning backend). `None` = no server pick (default binary).
+  #[serde(default)]
+  pub(crate) server: Option<String>,
   /// How the caller selected launch params — drives whether the daemon
   /// applies the model's configured `default:` preset and `last_params`
   /// inheritance. Absent on the wire ⇒ `Default` (no selection), which is
@@ -229,11 +235,11 @@ pub(crate) async fn compose_and_spawn(
   // backend rather than crashing on the missing GGUF. Every other path is a local
   // GGUF: one header read yields both the canonical id and the arch. Names no
   // backend — the synthetic-path recognition is registry-driven.
-  let (id, arch, native_ctx, routed_backend, identity): (
+  let (id, arch, native_ctx, supported_backends, identity): (
     ModelId,
     Option<String>,
     Option<u32>,
-    Option<String>,
+    Vec<String>,
     ModelIdentity,
   ) = match crate::backend::synthetic_identity_for_path(&parsed.model_path) {
     Some((identity, _backend_id)) => {
@@ -245,12 +251,13 @@ pub(crate) async fn compose_and_spawn(
         path: parsed.model_path.clone(),
         header_blake3: [0u8; 32],
       };
-      (synthetic, None, None, None, identity)
+      (synthetic, None, None, Vec::new(), identity)
     }
     None => {
-      let (id, arch, native_ctx, routed_backend) = resolve_model_id_and_arch(&parsed.model_path)?;
+      let (id, arch, native_ctx, supported_backends) =
+        resolve_model_id_and_arch(&parsed.model_path)?;
       let identity: ModelIdentity = id.clone().into();
-      (id, arch, native_ctx, routed_backend, identity)
+      (id, arch, native_ctx, supported_backends, identity)
     }
   };
 
@@ -350,6 +357,29 @@ pub(crate) async fn compose_and_spawn(
   // picker overrides it.
   launch_params.backend = parsed.backend.unwrap_or_default();
 
+  // Chosen server (a build/binary of a backend). Resolve it from the catalog
+  // once — it drives the launch binary below and, when the backend is still
+  // `Auto`, the backend itself (the server's owning backend), so a `--server`
+  // pick subsumes backend selection. A stale/unknown id resolves to `None` and
+  // is ignored (falls back to the default binary).
+  launch_params.server = parsed.server.clone();
+  let picked_server: Option<crate::backend::Server> = match &launch_params.server {
+    Some(server_id) => {
+      let servers = env.servers.read().await;
+      let found = servers.iter().find(|s| &s.id == server_id).cloned();
+      if found.is_none() {
+        log::warn!("server {server_id:?} not in catalog; ignoring and using default binary");
+      }
+      found
+    }
+    None => None,
+  };
+  if let Some(server) = &picked_server {
+    if launch_params.backend == crate::launch::params::BackendChoice::Auto {
+      launch_params.backend = crate::launch::params::BackendChoice::from_id(&server.backend_id);
+    }
+  }
+
   // Resolve the backend up front (D-route) so both the launch plan *and* the
   // cross-backend contamination gate below see the same decision. Selection
   // honors the per-model override, then the header-level routing signal (the
@@ -359,7 +389,7 @@ pub(crate) async fn compose_and_spawn(
   let inference_backend = crate::backend::resolve_backend_for_launch(
     &identity,
     launch_params.backend.clone(),
-    routed_backend.as_deref(),
+    &supported_backends,
     mode,
     ctx,
   );
@@ -606,11 +636,10 @@ pub(crate) async fn compose_and_spawn(
   let total_weight_bytes = launch_total_bytes(ctx, &launch_params.model_path).await;
   let scaled_probe = env.probe.scale_for_model(total_weight_bytes);
 
-  // Pick the binary that owns the chosen `--device` selector. The
-  // selector (`Vulkan0`, `CUDA0`, …) came from a specific binary's
-  // `--list-devices`, so we must spawn *that* binary or the selector
-  // is invalid. Unset / empty device falls back to the default binary
-  // with no `--device`.
+  // Pick the launch binary. Precedence: an explicit **server** pick (a chosen
+  // build/binary) wins outright; else the binary that owns the chosen `--device`
+  // selector (the selector came from a specific binary's `--list-devices`, so we
+  // must spawn *that* binary or it is invalid); else the default binary.
   let selector = launch_params
     .knobs
     .device
@@ -618,30 +647,34 @@ pub(crate) async fn compose_and_spawn(
     .map(String::as_str)
     .filter(|s| !s.is_empty())
     .map(str::to_string);
-  let launch_binary = match selector {
-    Some(sel) => {
-      let owning_binary = {
-        let catalog = env.device_catalog.read().await;
-        catalog
-          .iter()
-          .find(|d| d.selector == sel)
-          .map(|d| d.binary.clone())
-      };
-      owning_binary.unwrap_or_else(|| {
+  let launch_binary = if let Some(server) = &picked_server {
+    server.binary.clone()
+  } else {
+    match selector {
+      Some(sel) => {
+        let owning_binary = {
+          let servers = env.servers.read().await;
+          servers
+            .iter()
+            .find(|s| s.devices.iter().any(|d| d.selector == sel))
+            .map(|s| s.binary.clone())
+        };
+        owning_binary.unwrap_or_else(|| {
         // Stale persisted selector or the catalog probe failed. Drop
         // the selector so the backend's argv emitter
         // (`src/backend/llama_cpp/compose.rs`) doesn't emit an invalid
         // `--device` the default binary would reject, and spawn the
         // default binary with auto-select.
         log::warn!(
-          "device selector {sel:?} not in launch catalog; dropping it and spawning default binary {}",
+          "device selector {sel:?} not in server catalog; dropping it and spawning default binary {}",
           env.binary.display()
         );
         launch_params.knobs.device = None;
         env.binary.clone()
       })
+      }
+      None => env.binary.clone(),
     }
-    None => env.binary.clone(),
   };
 
   // `inference_backend` was resolved up front (before the last_params gate).
@@ -1418,7 +1451,7 @@ mod tests {
       log_dir: dir.path().to_path_buf(),
       probe: ProbeOptions::default(),
       arch_defaults: Default::default(),
-      device_catalog: Arc::new(RwLock::new(Vec::new())),
+      servers: Arc::new(RwLock::new(Vec::new())),
       default_launch_mode: Default::default(),
     };
 
@@ -1433,7 +1466,10 @@ mod tests {
         crate::backend::BackendConfig {
           lemonade: LemonadeConfig {
             enabled: Some(true),
-            binary: Some(PathBuf::from("/nonexistent/lemond-xyz")),
+            servers: vec![crate::backend::ServerConfig {
+              binary: PathBuf::from("/nonexistent/lemond-xyz"),
+              name: None,
+            }],
             port: 13305,
           },
           ..Default::default()
@@ -1501,7 +1537,7 @@ mod tests {
       log_dir: dir.path().to_path_buf(),
       probe: ProbeOptions::default(),
       arch_defaults: Default::default(),
-      device_catalog: Arc::new(RwLock::new(Vec::new())),
+      servers: Arc::new(RwLock::new(Vec::new())),
       default_launch_mode: Default::default(),
     };
     let ctx = MethodContext::new(ShutdownToken::new())

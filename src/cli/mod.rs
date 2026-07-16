@@ -53,9 +53,9 @@ pub async fn dispatch(mut cli: Cli, config: LoadedConfig) -> Result<i32> {
   if let Some(warning) = &config.warning {
     // A present-but-unparseable config (bad YAML, an unknown `[proxy]` key,
     // a bad value) is a usage error — per the config contract a typo is
-    // rejected loudly, never silently papered over with defaults. `init`
-    // (rewrites the file) and `doctor` (diagnoses setup) are exempt so the
-    // user can always repair a broken config.
+    // rejected loudly, never silently papered over with defaults. `config`
+    // (opens the file), `init` (rewrites it), and `doctor` (diagnoses setup)
+    // are exempt so the user can always repair a broken config.
     let repair = matches!(
       command,
       Some(Command::Config) | Some(Command::Init(_)) | Some(Command::Doctor(_))
@@ -122,27 +122,46 @@ fn persist_llama_server_override(cli: &Cli, config: &crate::config::Config) {
   // file still gets persisted — the daemon's own locator will surface
   // the path error later.
   let resolved = crate::util::paths::canonicalize(raw).unwrap_or_else(|_| raw.clone());
-  if config
-    .backend
-    .llamacpp
-    .binary
-    .as_ref()
-    .map(|p| p == &resolved)
-    .unwrap_or(false)
-  {
+  if config.backend.llamacpp.primary_binary().as_deref() == Some(resolved.as_path()) {
     return;
   }
   let Some(path) = crate::config::config_path(cli.config.clone()) else {
     log::warn!("--llama-server: no writable config path; skipping persist");
     return;
   };
-  // Nested `backend: { llamacpp: { binary: <path> } }` so the recursive
-  // merge sets only that key and preserves the user's other config.
+  // Rebuild `backend.llamacpp.servers` with the primary (first) binary set to
+  // the override, preserving any additional servers + their names. Nested so
+  // the recursive merge touches only that key.
+  let server_entry = |binary: String, name: Option<String>| {
+    let mut entry = yaml_serde::Mapping::new();
+    entry.insert(
+      yaml_serde::Value::String("binary".into()),
+      yaml_serde::Value::String(binary),
+    );
+    if let Some(name) = name {
+      entry.insert(
+        yaml_serde::Value::String("name".into()),
+        yaml_serde::Value::String(name),
+      );
+    }
+    yaml_serde::Value::Mapping(entry)
+  };
+  let existing = &config.backend.llamacpp.servers;
+  let mut servers = vec![server_entry(
+    resolved.display().to_string(),
+    existing.first().and_then(|s| s.name.clone()),
+  )];
+  for extra in existing.iter().skip(1) {
+    servers.push(server_entry(
+      extra.binary.display().to_string(),
+      extra.name.clone(),
+    ));
+  }
   let additions = yaml_serde::Value::Mapping({
     let mut llamacpp = yaml_serde::Mapping::new();
     llamacpp.insert(
-      yaml_serde::Value::String("binary".into()),
-      yaml_serde::Value::String(resolved.display().to_string()),
+      yaml_serde::Value::String("servers".into()),
+      yaml_serde::Value::Sequence(servers),
     );
     let mut backend = yaml_serde::Mapping::new();
     backend.insert(

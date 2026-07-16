@@ -79,7 +79,7 @@ fn lemonade_model(name: &str) -> DiscoveredModel {
     split_siblings: Vec::new(),
     display_label: Some(name.to_string()),
     multimodal: None,
-    routed_backend: None,
+    supported_backends: Vec::new(),
   }
 }
 

@@ -156,7 +156,7 @@ fn make_model(path: &str, display_label: Option<&str>) -> DiscoveredModel {
     split_siblings: Vec::new(),
     display_label: display_label.map(str::to_string),
     multimodal: None,
-    routed_backend: None,
+    supported_backends: Vec::new(),
   }
 }
 
@@ -243,7 +243,7 @@ async fn parse_error_row_still_appears_with_file_stem_id() {
     split_siblings: Vec::new(),
     display_label: None,
     multimodal: None,
-    routed_backend: None,
+    supported_backends: Vec::new(),
   };
   let state = proxy_state_with_models(vec![bad]).await;
   let (addr, shutdown, listener_handle) = spawn_listener_with_state(state).await;

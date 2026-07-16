@@ -500,7 +500,7 @@ async fn parse_into_model(
         split_siblings: siblings,
         display_label: None,
         multimodal: hit.multimodal,
-        routed_backend: hit.routed_backend,
+        supported_backends: hit.supported_backends.clone(),
       };
     }
   }
@@ -533,13 +533,13 @@ async fn parse_into_model(
       metadata: Some(summarise_metadata(&read.header)),
       parse_error: None,
       multimodal,
-      routed_backend: crate::backend::routed_backend_for(&read.header),
+      supported_backends: crate::backend::supported_backends_for(&read.header),
     },
     Err(e) => CachedParse {
       metadata: None,
       parse_error: Some(e.to_string()),
       multimodal,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     },
   };
   if let Some(c) = cache {
@@ -557,7 +557,7 @@ async fn parse_into_model(
     split_siblings: siblings,
     display_label: None,
     multimodal: cached.multimodal,
-    routed_backend: cached.routed_backend,
+    supported_backends: cached.supported_backends.clone(),
   }
 }
 

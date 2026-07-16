@@ -11,8 +11,6 @@ pub mod client;
 pub mod discovery;
 pub mod orchestrate;
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 pub use backend::{
@@ -39,8 +37,10 @@ pub struct LemonadeConfig {
   /// unset = auto/on-when-`lemond`-found, `false` = force off, `true` = force on.
   #[serde(default)]
   pub enabled: Option<bool>,
+  /// The `lemond` umbrella binary (single-entry — Lemonade runs one umbrella).
+  /// Unset falls back to a `lemond` (or `lemonade`) on `$PATH`.
   #[serde(default)]
-  pub binary: Option<PathBuf>,
+  pub servers: Vec<crate::backend::ServerConfig>,
   /// Loopback port the `lemond` umbrella binds and that discovery probes
   /// for the model list. Defaults to Lemonade's own default (`13305`).
   #[serde(default = "LemonadeConfig::default_port")]
@@ -67,8 +67,15 @@ impl Default for LemonadeConfig {
   fn default() -> Self {
     Self {
       enabled: None,
-      binary: None,
+      servers: Vec::new(),
       port: Self::default_port(),
     }
+  }
+}
+
+impl LemonadeConfig {
+  /// The configured `lemond` path (first server), if any.
+  pub fn primary_binary(&self) -> Option<&std::path::Path> {
+    self.servers.first().map(|s| s.binary.as_path())
   }
 }

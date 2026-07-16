@@ -352,27 +352,26 @@ proxy:
 backend:
   # ── llama.cpp — the always-on default engine ──
   llamacpp:
-    # Path to the `llama-server` binary. Leave commented out to fall
-    # back to `$PATH`.
+    # `llama-server` build/binary variants ("servers"). The first entry is
+    # the default binary for auto / no-device launches (and the target of
+    # the `--llama-server` flag / `LLAMASTASH_LLAMA_SERVER` env). Each is
+    # probed with `--list-devices` at daemon start to build the launch
+    # server/device catalog, so one install can offer CUDA / ROCm / Vulkan
+    # launches by listing the matching single-backend builds — every entry
+    # is its own selectable server (no dedup across builds). Devices are not
+    # labelled by backend here; the compute backend is inferred from each
+    # binary's own device names (`CUDA0`, `ROCm0`, `Vulkan0`). An optional
+    # per-server `name:` overrides the auto-derived label. Leave the list
+    # empty to fall back to a `llama-server` on `$PATH`.
     #
-    # Sources — CLI: --llama-server PATH (global) ·
+    # Sources — CLI: --llama-server PATH (sets the first entry) ·
     #           Env: LLAMASTASH_LLAMA_SERVER=PATH.
-    binary: /usr/local/bin/llama-server
-
-    # Additional `llama-server` binaries to probe for launch devices.
-    # Each is queried with `--list-devices` at daemon start; the union
-    # of their devices (deduped by selector, first-listed wins) becomes
-    # the launch device catalog — so one install can offer CUDA / ROCm /
-    # Vulkan launches by pointing at the matching single-backend builds.
-    # When `binary` is also set it's the default binary (auto / no-device
-    # launches) and is prepended to this probe set. Binaries are not
-    # labelled by backend here; the backend is inferred from each binary's
-    # own device names (`CUDA0`, `ROCm0`, `Vulkan0`).
-    #
-    # Sources — CLI: (none) · Env: (none). Config-only.
-    additional_binaries:
-      - /opt/builds/cuda/llama-server
-      - /opt/builds/rocm/llama-server
+    servers:
+      - binary: /usr/local/bin/llama-server
+      - binary: /opt/builds/cuda/llama-server
+        name: cuda
+      - binary: /opt/builds/rocm/llama-server
+        name: rocm
 
     # Minimum context window passed to fit-capable llama-server as
     # `--fit-ctx`, so `--fit` never collapses the window below a usable
@@ -423,11 +422,13 @@ backend:
     # explicit off.)
     enabled: true
 
-    # Explicit path to the user's `lemond` binary. Comment out to fall
-    # back to a `lemond` (or `lemonade`) found on `$PATH`.
+    # The user's `lemond` umbrella binary (single-entry `servers` list —
+    # Lemonade runs one umbrella). Leave empty to fall back to a `lemond`
+    # (or `lemonade`) found on `$PATH`.
     #
     # Sources — CLI: (none) · Env: (none). Config-only.
-    binary: /opt/lemonade/lemond
+    servers:
+      - binary: /opt/lemonade/lemond
 
     # Loopback port the `lemond` umbrella binds and that discovery probes
     # for the model list. Defaults to Lemonade's own default (13305).
@@ -460,11 +461,12 @@ backend:
     # explicit off.)
     enabled: true
 
-    # Explicit path to the `ds4-server` binary. Comment out to fall back
-    # to a `ds4-server` found on `$PATH`.
+    # The `ds4-server` binary (single-entry `servers` list). Leave empty
+    # to fall back to a `ds4-server` found on `$PATH`.
     #
     # Sources — CLI: (none) · Env: (none). Config-only.
-    binary: /opt/ds4/ds4-server
+    servers:
+      - binary: /opt/ds4/ds4-server
 
 # ─── Keybindings ──────────────────────────────────────────────────
 #

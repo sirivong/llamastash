@@ -263,6 +263,12 @@ pub struct LaunchParams {
   /// pre-Phase-2b `state.json` rows loading as `Auto`.
   #[serde(default)]
   pub backend: BackendChoice,
+  /// Chosen **server** id — a build/binary of a backend (`llamacpp·vulkan`,
+  /// `ds4·ds4`). Determines which binary the launch spawns; persisted in
+  /// last-params so a relaunch reuses the build. `None` = no pick (default
+  /// binary). `#[serde(default)]` keeps pre-server-abstraction rows loading.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub server: Option<String>,
   /// Per-backend native-knob values, keyed by descriptor id (see
   /// [`crate::launch::native_knobs`]). Parallel to `knobs` (the llama.cpp
   /// IR): a backend whose tunables live outside the IR stores them here and
@@ -286,6 +292,7 @@ impl LaunchParams {
       extras: Vec::new(),
       mmproj_path: None,
       backend: BackendChoice::default(),
+      server: None,
       backend_knobs: BTreeMap::new(),
     }
   }

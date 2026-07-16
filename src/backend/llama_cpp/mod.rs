@@ -17,7 +17,7 @@ mod compose;
 pub mod list_devices;
 
 use compose::compose;
-pub use list_devices::{build_catalog, parse_list_devices, BinaryDevice, LaunchDevice};
+pub use list_devices::{parse_list_devices, probe_devices, BinaryDevice, LaunchDevice};
 
 use std::path::{Path, PathBuf};
 
@@ -80,25 +80,22 @@ pub const LLAMA_ENV_STRIP: &[&str] = &[
 ];
 
 /// llama.cpp backend configuration — the always-on default backend, so it has
-/// no `enabled` field. `binary` / `additional_binaries` are the `llama-server`
-/// executable(s) to launch and probe (back-compat with the `--llama-server`
-/// flag / `LLAMASTASH_LLAMA_SERVER` env for the primary); `jinja` /
-/// `strict_fit` / `fit_ctx_floor` are launch-behaviour knobs surfaced under
-/// `backend.llamacpp` in `config.yaml`.
+/// no `enabled` field. `servers` are the `llama-server` build/binary variants
+/// (the first is the *default* binary for auto / no-device launches, and the
+/// back-compat target of the `--llama-server` flag / `LLAMASTASH_LLAMA_SERVER`
+/// env); `jinja` / `strict_fit` / `fit_ctx_floor` are launch-behaviour knobs
+/// surfaced under `backend.llamacpp` in `config.yaml`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct LlamaCppConfig {
-  /// Single `llama-server` binary. When `additional_binaries` is also set this
-  /// one is the *default* binary (auto / no-device launches) and is prepended
-  /// to the probe set.
+  /// The `llama-server` build/binary variants. The first entry is the default
+  /// binary (auto / no-device launches); each is probed with `--list-devices`
+  /// at daemon start to build the launch server/device catalog. One install can
+  /// offer CUDA / ROCm / Vulkan launches by listing the matching single-backend
+  /// builds — every entry is its own selectable server (no dedup across
+  /// builds). Empty falls back to a `llama-server` on `$PATH`.
   #[serde(default)]
-  pub binary: Option<PathBuf>,
-  /// Additional `llama-server` binaries probed for launch devices at daemon
-  /// start (`--list-devices`); the deduped union becomes the launch device
-  /// catalog. Not labelled by backend — inferred from each binary's own device
-  /// names.
-  #[serde(default)]
-  pub additional_binaries: Vec<PathBuf>,
+  pub servers: Vec<crate::backend::ServerConfig>,
   /// Pass `--jinja` on every launch (factory `true`) — what enables tool
   /// calling on both the OpenAI `/v1/chat/completions` and Anthropic
   /// `/v1/messages` surfaces. The reasoning toggle still forces `--jinja` on
@@ -126,12 +123,30 @@ fn default_fit_ctx_floor() -> u32 {
 impl Default for LlamaCppConfig {
   fn default() -> Self {
     Self {
-      binary: None,
-      additional_binaries: Vec::new(),
+      servers: Vec::new(),
       jinja: true,
       strict_fit: false,
       fit_ctx_floor: crate::config::DEFAULT_FIT_CTX_FLOOR,
     }
+  }
+}
+
+impl LlamaCppConfig {
+  /// The configured default (first) server binary, if any — the `config_path`
+  /// input to the daemon's `llama-server` locator.
+  pub fn primary_binary(&self) -> Option<PathBuf> {
+    self.servers.first().map(|s| s.binary.clone())
+  }
+
+  /// The additional server binaries (everything past the first) — probed for
+  /// launch devices alongside the primary.
+  pub fn extra_binaries(&self) -> Vec<PathBuf> {
+    self
+      .servers
+      .iter()
+      .skip(1)
+      .map(|s| s.binary.clone())
+      .collect()
   }
 }
 
@@ -235,6 +250,46 @@ impl Backend for LlamaCppBackend {
     // The daemon-resolved server path, surfaced verbatim (present even when the
     // file is missing, so `status` can show *what* it looked for vs `installed`).
     ctx.launch.as_ref().map(|e| e.binary.display().to_string())
+  }
+
+  fn configured_servers(&self, ctx: &MethodContext) -> Vec<super::ServerSpec> {
+    let cfg = &ctx.backend.llamacpp;
+    let mut out = Vec::new();
+    // Primary server = the daemon-resolved binary (CLI flag > env > config >
+    // PATH); its name hint comes from the first configured `servers` entry.
+    if let Some(env) = ctx.launch.as_ref() {
+      out.push(super::ServerSpec {
+        binary: env.binary.clone(),
+        name: cfg.servers.first().and_then(|s| s.name.clone()),
+      });
+    }
+    // Additional builds: `servers[1..]`, each canonicalized + existence-checked
+    // (a missing entry contributes nothing rather than failing the probe).
+    for extra in cfg.servers.iter().skip(1) {
+      let resolved =
+        crate::util::paths::canonicalize(&extra.binary).unwrap_or_else(|_| extra.binary.clone());
+      if resolved.is_file() {
+        out.push(super::ServerSpec {
+          binary: resolved,
+          name: extra.name.clone(),
+        });
+      } else {
+        log::warn!(
+          "extra llama-server {} not found; skipping",
+          extra.binary.display()
+        );
+      }
+    }
+    out
+  }
+
+  fn probe_devices(&self, binary: &Path) -> Vec<super::Device> {
+    list_devices::probe_devices(binary)
+  }
+
+  fn launch_priority(&self) -> i32 {
+    // The stable default engine; ds4 outranks it for a compatible DeepSeek-V4.
+    10
   }
 
   fn process_marker(&self) -> Option<&'static str> {

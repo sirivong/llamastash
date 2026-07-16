@@ -443,6 +443,7 @@ mod tests {
       tokenizer_kind: Some("qwen2".into()),
       total_parameters: Some(80_000_000_000),
       backend: None,
+      supported_backends: Vec::new(),
     }
   }
 

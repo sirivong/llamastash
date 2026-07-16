@@ -94,14 +94,18 @@ fn model_row(m: &DiscoveredModel, available_routed: &BTreeSet<String>) -> Value 
     "path": m.path,
     "parent": m.parent,
     "source": m.source.label(),
-    // Backend that serves this row (R14 badge / R13 routing): the model's
-    // routed backend when it is in the available set, else the source's default
-    // backend. Reads the precomputed routing verdict, so this names no backend.
+    // Primary backend badge (R14 / R13 routing): the highest-priority supported
+    // backend that is available, else the source's default. Reads the
+    // precomputed supported list, so this names no backend.
     "backend": m
-      .routed_backend
-      .as_deref()
-      .filter(|rb| available_routed.contains(*rb))
+      .supported_backends
+      .iter()
+      .find(|rb| available_routed.contains(*rb))
+      .map(String::as_str)
       .unwrap_or_else(|| m.source.backend_id()),
+    // Every backend that can serve this model, priority-ordered (first =
+    // default). The `list` "backend" column + right-pane badges render all.
+    "supported_backends": m.supported_backends,
     "split_siblings": m.split_siblings,
     "metadata": m.metadata.as_ref().map(|md| {
       json!({
@@ -169,7 +173,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }
   }
 
@@ -182,15 +186,21 @@ mod tests {
     let gguf = model_row(&fake_model("/m/a.gguf", ModelSource::UserPath), &none);
     assert_eq!(gguf["backend"], "llamacpp");
     assert_eq!(gguf["path"], "/m/a.gguf");
-    // A model that auto-routes to some backend reports *that* backend when it is
-    // in the available set — the badge just echoes `routed_backend`, so it is
-    // backend-agnostic (a synthetic id proves the mechanism, not a specific
-    // engine).
+    // A model that supports some backend reports *that* backend when it is in
+    // the available set — the badge echoes the highest-priority available entry
+    // of `supported_backends`, so it is backend-agnostic (a synthetic id proves
+    // the mechanism, not a specific engine).
     let mut routed = fake_model("/m/a.gguf", ModelSource::UserPath);
-    routed.routed_backend = Some("some-engine".to_string());
+    routed.supported_backends = vec!["some-engine".to_string(), "llamacpp".to_string()];
     let available = BTreeSet::from(["some-engine".to_string()]);
     assert_eq!(model_row(&routed, &available)["backend"], "some-engine");
-    // ...but not when that backend is unavailable — falls back to the source.
+    // The full supported list is emitted for the column / badges.
+    assert_eq!(
+      model_row(&routed, &available)["supported_backends"],
+      json!(["some-engine", "llamacpp"])
+    );
+    // ...but the badge is not "some-engine" when it's unavailable — falls back
+    // to the source default.
     assert_eq!(model_row(&routed, &none)["backend"], "llamacpp");
   }
 
@@ -292,7 +302,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     };
     cat.upsert(m).await;
     let v = cat.to_list_response(&BTreeSet::new()).await;

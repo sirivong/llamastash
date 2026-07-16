@@ -652,7 +652,10 @@ impl LaunchPickerState {
       KnobField::BatchSize => self.cycle_u32(field, &[256, 512, 1024, 2048, 4096], forward),
       KnobField::UbatchSize => self.cycle_u32(field, &[128, 256, 512, 1024], forward),
       KnobField::Keep => self.cycle_u32(field, &[0, 64, 128, 256, 512, 1024], forward),
-      KnobField::MainGpu => self.cycle_u32(field, &[0, 1, 2, 3], forward),
+      KnobField::MainGpu => {
+        let presets = self.main_gpu_presets();
+        self.cycle_u32(field, &presets, forward);
+      }
       KnobField::RopeFreqScale => self.cycle_f32(field, &[0.5, 1.0, 2.0, 4.0], forward),
       KnobField::CacheTypeK | KnobField::CacheTypeV => {
         self.cycle_str_set(field, KV_CACHE_TYPES, forward)
@@ -813,6 +816,25 @@ impl LaunchPickerState {
       0 => self.set_user_str(field, None),
       i => self.set_user_str(field, Some(selectors[i - 1].to_string())),
     }
+  }
+
+  /// `main_gpu` cycle range: `0..N`, where N is the number of devices actually
+  /// in play — the count of explicitly-pinned `--device` selectors, or (when
+  /// none are pinned, so llama-server uses them all) the full catalog. Replaces
+  /// the old hardcoded `[0, 1, 2, 3]` ring, which showed phantom GPU indices on
+  /// a host with fewer than four devices.
+  fn main_gpu_presets(&self) -> Vec<u32> {
+    let selected = self
+      .user_value_str(KnobField::Device)
+      .filter(|s| !s.is_empty())
+      .map(|s| s.split(',').filter(|t| !t.trim().is_empty()).count())
+      .unwrap_or(0);
+    let n = if selected > 0 {
+      selected
+    } else {
+      self.device_catalog.len()
+    };
+    (0..n.max(1) as u32).collect()
   }
 
   /// Backspace on a focused row: clear the user override and re-

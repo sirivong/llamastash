@@ -140,12 +140,23 @@ fn parse_catalog_row(row: Value) -> CatalogRow {
     .get("backend")
     .and_then(Value::as_str)
     .map(str::to_string);
+  let supported_backends = row
+    .get("supported_backends")
+    .and_then(Value::as_array)
+    .map(|a| {
+      a.iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+    })
+    .unwrap_or_default();
   CatalogRow {
     path,
     model_id,
     parent,
     source,
     backend,
+    supported_backends,
     arch: metadata
       .and_then(|m| m.get("arch"))
       .and_then(Value::as_str)
@@ -278,6 +289,9 @@ pub async fn fetch_status(client: &mut Client) -> Result<StatusSnapshot, CliExit
   // array. `Value::Null` when talking to a daemon that predates
   // the field; the formatter then skips the section.
   let backends = body.get("backends").cloned().unwrap_or(Value::Null);
+  // Server catalog — verbatim copy of `status.servers`. `Value::Null` on a
+  // daemon that predates the field; `status_json` drops the key then.
+  let servers = body.get("servers").cloned().unwrap_or(Value::Null);
   Ok(StatusSnapshot {
     models,
     external,
@@ -286,6 +300,7 @@ pub async fn fetch_status(client: &mut Client) -> Result<StatusSnapshot, CliExit
     daemon,
     proxy,
     backends,
+    servers,
   })
 }
 
@@ -315,6 +330,10 @@ pub struct StatusSnapshot {
   /// Verbatim copy of the daemon's wire shape; `Value::Null`
   /// against a daemon that predates the field.
   pub backends: Value,
+  /// Server catalog — array of `{id, backend_id, binary, name, devices}` (a
+  /// build/binary of a backend with its probed `--device` targets). Verbatim
+  /// copy of the daemon's wire shape; `Value::Null` on an older daemon.
+  pub servers: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -628,6 +647,7 @@ mod tests {
       tokenizer_kind: None,
       total_parameters: None,
       backend: None,
+      supported_backends: Vec::new(),
     }
   }
 

@@ -352,6 +352,7 @@ mod tests {
       tokenizer_kind: None,
       total_parameters: None,
       backend: None,
+      supported_backends: Vec::new(),
     }
   }
 

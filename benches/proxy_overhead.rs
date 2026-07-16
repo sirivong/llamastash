@@ -291,7 +291,7 @@ fn discovered(path: &str, display_label: &str, arch: &str) -> DiscoveredModel {
     split_siblings: Vec::new(),
     display_label: Some(display_label.to_string()),
     multimodal: None,
-    routed_backend: None,
+    supported_backends: Vec::new(),
   }
 }
 

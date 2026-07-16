@@ -129,7 +129,10 @@ async fn ds4_compatible_model_auto_routes_to_ds4_reaches_ready_and_stops() {
     backend: BackendConfig {
       ds4: Ds4Config {
         enabled: Some(true),
-        binary: Some(fake_ds4_binary()),
+        servers: vec![llamastash::backend::ServerConfig {
+          binary: fake_ds4_binary(),
+          name: None,
+        }],
       },
       ..base.backend.clone()
     },
@@ -205,7 +208,10 @@ async fn ds4_compatible_model_falls_back_to_llamacpp_when_ds4_unavailable() {
     backend: BackendConfig {
       ds4: Ds4Config {
         enabled: Some(false),
-        binary: Some(fake_ds4_binary()),
+        servers: vec![llamastash::backend::ServerConfig {
+          binary: fake_ds4_binary(),
+          name: None,
+        }],
       },
       ..base.backend.clone()
     },
@@ -266,7 +272,10 @@ async fn split_pro_half_file_is_refused_pre_spawn() {
     backend: BackendConfig {
       ds4: Ds4Config {
         enabled: Some(true),
-        binary: Some(fake_ds4_binary()),
+        servers: vec![llamastash::backend::ServerConfig {
+          binary: fake_ds4_binary(),
+          name: None,
+        }],
       },
       ..base.backend.clone()
     },

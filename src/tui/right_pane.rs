@@ -1115,7 +1115,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }
   }
 
@@ -1500,7 +1500,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     // Row 0 is the table header, row 1 is the directory group
@@ -1526,7 +1526,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }];
     // Row 0 is the table header, row 1 is the directory group
     // header, row 2 is the model.
@@ -1551,7 +1551,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }];
     app.list_cursor = 2;
     let palette = app.palette();
@@ -1589,7 +1589,7 @@ mod tests {
         vision: true,
         audio: false,
       }),
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }];
     app.list_cursor = 2;
     let palette = app.palette();
@@ -1667,7 +1667,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }];
     app.managed = vec![ready_managed("qwen", Some(4_500_000_000), Some(312.0))];
     app.list_cursor = 2;
@@ -1742,7 +1742,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }];
     app.managed = vec![ready_managed("qwen", None, None)];
     app.list_cursor = 2;

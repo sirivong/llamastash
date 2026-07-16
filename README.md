@@ -204,7 +204,7 @@ Full detail per feature in [`FEATURES.md`](FEATURES.md) — including trade-offs
 
 - **⚠️ Experimental** — new and lightly road-tested; behaviour and config may change. llama.cpp stays the stable default.
 - **A pluggable backend seam.** llama.cpp is the direct, zero-overhead default; [Lemonade](https://github.com/lemonade-sdk/lemonade) (`lemond`) plugs in as a second backend for engines llama.cpp can't reach — **NPU inference** on AMD Ryzen AI / XDNA, plus ROCm / ONNX / others. Default-on when the `lemond` binary resolves (like ds4); force via `--lemonade` / `LLAMASTASH_LEMONADE=1`, or set `backend.lemonade.enabled: false` to opt out. Zero footprint when the binary is absent.
-- **You install Lemonade; LlamaStash drives it.** No auto-install — LlamaStash finds `lemond` (PATH or `backend.lemonade.binary`), supervises the shared umbrella, discovers its models, routes inference through the proxy, and evicts idle models by API unload. See **[Lemonade setup](docs/lemonade-setup.md)**.
+- **You install Lemonade; LlamaStash drives it.** No auto-install — LlamaStash finds `lemond` (PATH or `backend.lemonade.servers`), supervises the shared umbrella, discovers its models, routes inference through the proxy, and evicts idle models by API unload. See **[Lemonade setup](docs/lemonade-setup.md)**.
 
 ### [ds4 (DwarfStar) — DeepSeek V4 GGUFs](docs/usage.md#ds4-backend)
 
@@ -294,7 +294,7 @@ Quick tour of the top-level keys:
 | `disable_default_cache_paths` | Per-bucket toggles (`huggingface`, `ollama`, `lm_studio`) for the auto-walked caches.                                                                                     |
 | `disable_scan`                | Skip filesystem scanning entirely. Same as `--no-scan` / `LLAMASTASH_NO_SCAN=1`.                                                                                          |
 | `port_range`                  | Inclusive `{start, end}` TCP range the supervisor picks from. Default `41100..=41300`.                                                                                    |
-| `backend.llamacpp.binary`     | Absolute path to `llama-server`. Overridable by `--llama-server` and `LLAMASTASH_LLAMA_SERVER`.                                                                           |
+| `backend.llamacpp.servers`     | `llama-server` build/binary variants (`[{binary, name?}]`). First = default; each is a selectable "server". `--llama-server` / `LLAMASTASH_LLAMA_SERVER` set the first.   |
 | `probe_timeout_secs`          | Health-probe deadline per launch. Default `120`. Bump for 70B+ on slow disks.                                                                                             |
 | `keybindings`                 | Action-name → key-spec overrides. Kdash-style dialect (`ctrl+q`, `shift+tab`, `f1`, …).                                                                                   |
 

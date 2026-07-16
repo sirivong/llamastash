@@ -155,8 +155,10 @@ pub struct KnobSpec {
 pub use crate::gguf::memory::KV_CACHE_TYPES;
 
 /// Allowed values for `split_mode` (matches llama-server's
-/// `--split-mode` choices). `layer` is llama-server's own default.
-pub const SPLIT_MODES: &[&str] = &["none", "layer", "row"];
+/// `--split-mode` choices). `layer` is llama-server's own default;
+/// `tensor` splits individual tensors across GPUs (upstream `--split-mode
+/// tensor`).
+pub const SPLIT_MODES: &[&str] = &["none", "layer", "row", "tensor"];
 
 /// Canonical emission order. Pinned by the plan's Risks & Dependencies
 /// table to keep argv diffs readable across releases. `Ctx` and

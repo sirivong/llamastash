@@ -238,15 +238,15 @@ pub(crate) fn precheck_indicated_backends(opts: &DaemonOptions) -> std::result::
     .unwrap_or(false);
   let ds4_explicit = ds4_force || opts.backend.ds4.enabled == Some(true);
   if ds4_explicit
-    && crate::backend::ds4::resolve_ds4_binary(opts.backend.ds4.binary.as_deref()).is_none()
+    && crate::backend::ds4::resolve_ds4_binary(opts.backend.ds4.primary_binary()).is_none()
   {
-    let where_ = match &opts.backend.ds4.binary {
-      Some(p) => format!("`ds4.binary` ({})", p.display()),
+    let where_ = match opts.backend.ds4.primary_binary() {
+      Some(p) => format!("`ds4.servers` ({})", p.display()),
       None => "`ds4-server` on PATH".to_string(),
     };
     failures.push(format!(
       "ds4 was requested but no `ds4-server` binary was found at {where_} — build ds4-server and \
-       set `ds4.binary` (see docs/usage.md), or `llamastash daemon start --force` to start without it."
+       add it to `backend.ds4.servers` (see docs/usage.md), or `llamastash daemon start --force` to start without it."
     ));
   }
   if failures.is_empty() {
@@ -555,7 +555,7 @@ pub(crate) fn build_options(
   opts.binary = match locate_binary(LocateInputs {
     cli_flag: cli.llama_server.clone(),
     env_var: std::env::var_os("LLAMASTASH_LLAMA_SERVER"),
-    config_path: config.backend.llamacpp.binary.clone(),
+    config_path: config.backend.llamacpp.primary_binary(),
   }) {
     Ok(p) => Some(p),
     Err(e) => {
@@ -563,30 +563,9 @@ pub(crate) fn build_options(
       None
     }
   };
-  // Extra `llama-server` binaries (multi-backend installs). Each is
-  // canonicalised and existence/exec-checked the same way as the
-  // primary binary; a bad entry is logged and skipped rather than
-  // failing daemon startup — the device catalog just won't include its
-  // devices.
-  opts.extra_binaries = config
-    .backend
-    .llamacpp
-    .additional_binaries
-    .iter()
-    .filter_map(|p| {
-      match locate_binary(LocateInputs {
-        cli_flag: Some(p.clone()),
-        env_var: None,
-        config_path: None,
-      }) {
-        Ok(resolved) => Some(resolved),
-        Err(e) => {
-          log::warn!("extra llama-server path {} skipped: {e}", p.display());
-          None
-        }
-      }
-    })
-    .collect();
+  // Additional `llama-server` servers (multi-backend installs) are resolved by
+  // the llama.cpp backend's own `configured_servers` hook when the boot builds
+  // the server catalog — no separate resolution here.
   opts.port_range = config.port_range;
   opts.probe_timeout_secs = Some(config.probe_timeout_secs);
   opts.arch_defaults = config.arch_defaults.clone();

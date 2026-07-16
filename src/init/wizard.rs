@@ -326,7 +326,7 @@ pub async fn run(args: InitArgs, cli: &Cli, config: &Config) -> CliResult {
   let binary = detect_binary(DetectBinaryInputs {
     cli_flag: cli.llama_server.clone(),
     env_var: std::env::var_os("LLAMASTASH_LLAMA_SERVER"),
-    config_path: config.backend.llamacpp.binary.clone(),
+    config_path: config.backend.llamacpp.primary_binary(),
   });
 
   let fetch = match build_with_offline_check(args.offline, FetchClientConfig::default()) {
@@ -1083,7 +1083,9 @@ async fn run_config_step(
   if let Some(install) = install {
     bootstrap.backend = Some(InitBackendAdditions {
       llamacpp: Some(InitLlamaCppAdditions {
-        binary: Some(install.path.display().to_string()),
+        servers: vec![InitServerAdditions {
+          binary: install.path.display().to_string(),
+        }],
       }),
     });
   }
@@ -1347,7 +1349,8 @@ async fn run_integrations_step(
 /// fields keeps the on-disk diff minimal. Each
 /// `#[serde(skip_serializing_if)]` mirrors the merge semantics
 /// `merge_and_write` already honours. The nested shape emits
-/// `backend: { llamacpp: { binary: <path> } }`, matching the config schema.
+/// `backend: { llamacpp: { servers: [{ binary: <path> }] } }`, matching the
+/// config schema.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 struct InitConfigAdditions {
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -1362,8 +1365,13 @@ struct InitBackendAdditions {
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 struct InitLlamaCppAdditions {
-  #[serde(skip_serializing_if = "Option::is_none")]
-  binary: Option<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  servers: Vec<InitServerAdditions>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct InitServerAdditions {
+  binary: String,
 }
 
 /// Advisory lock around `init_snapshot.json` writes so two concurrent

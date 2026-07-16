@@ -1202,7 +1202,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }
   }
 

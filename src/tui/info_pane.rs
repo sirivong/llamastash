@@ -203,53 +203,86 @@ fn server_row<'a>(app: &'a App, budget: usize, palette: &'a Palette) -> Line<'a>
     ]);
   }
 
-  // When the daemon hasn't resolved a `llama-server` binary, point
-  // the user at the override knobs instead of a bare `—` — they
-  // can install llama.cpp or set LLAMASTASH_LLAMA_SERVER / pass
-  // --llama-server to fix it without first guessing where the
-  // binary was supposed to live.
-  let server_path = app.daemon_info.server_path.as_deref();
-  match server_path {
-    Some(p) => {
-      let flavor_chunk = match flavor_label(app) {
-        Some(f) => format!(" ({f})"),
-        None => String::new(),
-      };
-      // One `(path, tag)` entry per enabled backend binary: the default
-      // `llama-server` (tagged with its GPU flavor) plus whatever other
-      // backends `status.backends` reports — tagged by backend id, so a
-      // future backend appears with no code here. Every entry gets an
-      // equal share of the width; paths left-truncate (`…/`) so the
-      // binary name — the discriminating part — always survives.
-      let mut entries: Vec<(&str, String)> = vec![(p, flavor_chunk)];
-      for b in &app.daemon_info.backend_binaries {
-        if b.id != crate::backend::DEFAULT_BACKEND_ID {
-          entries.push((b.binary.as_str(), format!(" ({})", b.id)));
-        }
+  // Build one `(path, tag)` entry per backend. Prefer the neutral server
+  // catalog once probed — each backend's first server binary, tagged with its
+  // compute backends joined by `|` (`(rocm|vulkan)`) or the backend id when it
+  // exposes no devices (`(lemonade)`, `(ds4)`). Before the probe lands, fall
+  // back to the default `llama-server` + the per-backend binaries from
+  // `status.backends`. Every entry gets an equal share of the width; paths
+  // left-truncate (`…/`) so the binary name — the discriminating part —
+  // always survives.
+  let entries: Vec<(String, String)> = if !app.servers.is_empty() {
+    server_entries_by_backend(&app.servers)
+  } else if let Some(p) = app.daemon_info.server_path.as_deref() {
+    let flavor_chunk = match flavor_label(app) {
+      Some(f) => format!(" ({f})"),
+      None => String::new(),
+    };
+    let mut e = vec![(p.to_string(), flavor_chunk)];
+    for b in &app.daemon_info.backend_binaries {
+      if b.id != crate::backend::DEFAULT_BACKEND_ID {
+        e.push((b.binary.clone(), format!(" ({})", b.id)));
       }
-      let sep = crate::tui::glyphs::active().middot_sep();
-      let per_entry = equal_entry_budget(budget, entries.len(), sep.width());
-      let mut spans = vec![Span::styled(LABEL_SERVER, palette.label_style())];
-      for (i, (path, tag)) in entries.iter().enumerate() {
-        if i > 0 {
-          spans.push(Span::styled(sep, palette.muted_style()));
-        }
-        let path_truncated =
-          crate::tui::fmt::truncate_start(path, per_entry.saturating_sub(tag.width()));
-        spans.push(Span::styled(path_truncated, palette.text_style()));
-        spans.push(Span::styled(tag.clone(), palette.muted_style()));
-      }
-      Line::from(spans)
     }
-    None => {
-      let hint = "Not found. Set LLAMASTASH_LLAMA_SERVER or pass --llama-server";
-      let trimmed = right_ellipsise(hint, budget);
-      Line::from(vec![
-        Span::styled(LABEL_SERVER, palette.label_style()),
-        Span::styled(trimmed, palette.error_style()),
-      ])
-    }
+    e
+  } else {
+    Vec::new()
+  };
+
+  if entries.is_empty() {
+    // No binary resolved: point the user at the override knobs instead of a
+    // bare `—` — they can install llama.cpp or set the env / flag to fix it.
+    let hint = "Not found. Set LLAMASTASH_LLAMA_SERVER or pass --llama-server";
+    let trimmed = right_ellipsise(hint, budget);
+    return Line::from(vec![
+      Span::styled(LABEL_SERVER, palette.label_style()),
+      Span::styled(trimmed, palette.error_style()),
+    ]);
   }
+  let sep = crate::tui::glyphs::active().middot_sep();
+  let per_entry = equal_entry_budget(budget, entries.len(), sep.width());
+  let mut spans = vec![Span::styled(LABEL_SERVER, palette.label_style())];
+  for (i, (path, tag)) in entries.iter().enumerate() {
+    if i > 0 {
+      spans.push(Span::styled(sep, palette.muted_style()));
+    }
+    let path_truncated =
+      crate::tui::fmt::truncate_start(path, per_entry.saturating_sub(tag.width()));
+    spans.push(Span::styled(path_truncated, palette.text_style()));
+    spans.push(Span::styled(tag.clone(), palette.muted_style()));
+  }
+  Line::from(spans)
+}
+
+/// One `(binary, tag)` per backend from the server catalog, in catalog order.
+/// `tag` is the backend's compute backends joined with `|` (`" (rocm|vulkan)"`),
+/// or `" (<backend id>)"` when its servers expose no probed devices. The binary
+/// is the backend's first server (its default build).
+fn server_entries_by_backend(servers: &[crate::backend::Server]) -> Vec<(String, String)> {
+  let mut out: Vec<(String, String)> = Vec::new();
+  let mut seen: Vec<&str> = Vec::new();
+  for s in servers {
+    if seen.contains(&s.backend_id.as_str()) {
+      continue;
+    }
+    seen.push(&s.backend_id);
+    let mut labels: Vec<String> = Vec::new();
+    for g in servers.iter().filter(|x| x.backend_id == s.backend_id) {
+      for d in &g.devices {
+        let lbl = d.gpu_backend.to_lowercase();
+        if !labels.contains(&lbl) {
+          labels.push(lbl);
+        }
+      }
+    }
+    let tag = if labels.is_empty() {
+      format!(" ({})", s.backend_id)
+    } else {
+      format!(" ({})", labels.join("|"))
+    };
+    out.push((s.binary.display().to_string(), tag));
+  }
+  out
 }
 
 /// Render the daemon-start refusal in the server row. `err` carries
@@ -497,7 +530,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }
   }
 

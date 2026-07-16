@@ -1700,10 +1700,11 @@ arch_defaults:
       r"
 backend:
   llamacpp:
-    binary: /opt/builds/vulkan/llama-server
-    additional_binaries:
-      - /opt/builds/cuda/llama-server
-      - /opt/builds/rocm/llama-server
+    servers:
+      - binary: /opt/builds/vulkan/llama-server
+      - binary: /opt/builds/cuda/llama-server
+        name: cuda
+      - binary: /opt/builds/rocm/llama-server
 ",
     )
     .expect("config fixture should be written");
@@ -1711,23 +1712,29 @@ backend:
     let loaded = load_config_from_path(&path);
 
     assert!(loaded.warning.is_none(), "valid config should not warn");
+    // First entry is the primary (default) binary.
     assert_eq!(
-      loaded.config.backend.llamacpp.binary,
+      loaded.config.backend.llamacpp.primary_binary(),
       Some(PathBuf::from("/opt/builds/vulkan/llama-server"))
     );
     assert_eq!(
-      loaded.config.backend.llamacpp.additional_binaries,
+      loaded.config.backend.llamacpp.extra_binaries(),
       vec![
         PathBuf::from("/opt/builds/cuda/llama-server"),
         PathBuf::from("/opt/builds/rocm/llama-server"),
       ]
+    );
+    // The optional per-server name round-trips.
+    assert_eq!(
+      loaded.config.backend.llamacpp.servers[1].name.as_deref(),
+      Some("cuda")
     );
   }
 
   #[test]
   fn llama_server_paths_absent_defaults_to_empty_vec() {
     let cfg = Config::default();
-    assert!(cfg.backend.llamacpp.additional_binaries.is_empty());
+    assert!(cfg.backend.llamacpp.servers.is_empty());
   }
 
   #[test]
@@ -1874,7 +1881,7 @@ proxy:
       loaded.config.backend.lemonade.enabled, None,
       "lemonade `enabled` defaults to unset (on-when-found intent, like ds4)"
     );
-    assert!(loaded.config.backend.lemonade.binary.is_none());
+    assert!(loaded.config.backend.lemonade.servers.is_empty());
     assert_eq!(loaded.config.backend.lemonade.port, 13305);
     fs::remove_dir_all(dir).expect("temp test dir should be removed");
 
@@ -1883,14 +1890,14 @@ proxy:
     let on_path = on_dir.join("config.yaml");
     fs::write(
       &on_path,
-      "backend:\n  lemonade:\n    enabled: true\n    binary: /opt/lemonade/lemond\n",
+      "backend:\n  lemonade:\n    enabled: true\n    servers:\n      - binary: /opt/lemonade/lemond\n",
     )
     .expect("write failed");
     let on_loaded = load_config_from_path(&on_path);
     assert!(on_loaded.warning.is_none());
     assert_eq!(on_loaded.config.backend.lemonade.enabled, Some(true));
     assert_eq!(
-      on_loaded.config.backend.lemonade.binary.as_deref(),
+      on_loaded.config.backend.lemonade.primary_binary(),
       Some(std::path::Path::new("/opt/lemonade/lemond"))
     );
     fs::remove_dir_all(on_dir).expect("temp test dir should be removed");

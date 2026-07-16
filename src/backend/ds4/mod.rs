@@ -58,8 +58,10 @@ pub const DS4_BACKEND_ID: &str = "ds4";
 pub struct Ds4Config {
   #[serde(default)]
   pub enabled: Option<bool>,
+  /// The `ds4-server` binary/binaries. ds4 is single-binary in practice, so the
+  /// first entry is the server; unset falls back to a `ds4-server` on `$PATH`.
   #[serde(default)]
-  pub binary: Option<PathBuf>,
+  pub servers: Vec<crate::backend::ServerConfig>,
 }
 
 impl Ds4Config {
@@ -69,6 +71,12 @@ impl Ds4Config {
   /// explicitly `enabled: false`, which the force flag overrides).
   pub fn intends_enabled(&self, force: bool) -> bool {
     force || self.enabled != Some(false)
+  }
+
+  /// The configured `ds4-server` path (first server), if any — the input to
+  /// [`resolve_ds4_binary`].
+  pub fn primary_binary(&self) -> Option<&Path> {
+    self.servers.first().map(|s| s.binary.as_path())
   }
 }
 
@@ -601,12 +609,12 @@ impl Backend for Ds4Backend {
       .copied()
       .unwrap_or(false);
     ctx.backend.ds4.intends_enabled(force)
-      && resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()).is_some()
+      && resolve_ds4_binary(ctx.backend.ds4.primary_binary()).is_some()
   }
 
   fn installed(&self, ctx: &MethodContext) -> bool {
     // Presence of the binary, independent of the enablement toggle.
-    resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()).is_some()
+    resolve_ds4_binary(ctx.backend.ds4.primary_binary()).is_some()
   }
 
   fn status_enabled(&self, ctx: &MethodContext) -> Option<bool> {
@@ -614,7 +622,27 @@ impl Backend for Ds4Backend {
   }
 
   fn binary_path(&self, ctx: &MethodContext) -> Option<String> {
-    resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()).map(|b| b.display().to_string())
+    resolve_ds4_binary(ctx.backend.ds4.primary_binary()).map(|b| b.display().to_string())
+  }
+
+  fn configured_servers(&self, ctx: &MethodContext) -> Vec<super::ServerSpec> {
+    // ds4 is single-binary and device-probe-less: one server when available.
+    if !self.available(ctx) {
+      return Vec::new();
+    }
+    resolve_ds4_binary(ctx.backend.ds4.primary_binary())
+      .map(|binary| {
+        vec![super::ServerSpec {
+          binary,
+          name: ctx.backend.ds4.servers.first().and_then(|s| s.name.clone()),
+        }]
+      })
+      .unwrap_or_default()
+  }
+
+  fn launch_priority(&self) -> i32 {
+    // Purpose-built for DeepSeek-V4 — outranks llama.cpp for a compatible file.
+    20
   }
 
   fn process_marker(&self) -> Option<&'static str> {
@@ -629,7 +657,7 @@ impl Backend for Ds4Backend {
   ) -> Result<(PathBuf, u16), String> {
     // ds4 spawns `ds4-server` (not the device-owning `llama-server`) on the
     // reserved pool port.
-    match resolve_ds4_binary(ctx.backend.ds4.binary.as_deref()) {
+    match resolve_ds4_binary(ctx.backend.ds4.primary_binary()) {
       Some(bin) => Ok((bin, port)),
       None => Err(
         "ds4 backend selected but no `ds4-server` binary found; set `ds4.binary` \
@@ -708,7 +736,7 @@ impl Backend for Ds4Backend {
 
     let force = ds4_env_forced();
     let intends = config.backend.ds4.intends_enabled(force);
-    let binary = resolve_ds4_binary(config.backend.ds4.binary.as_deref());
+    let binary = resolve_ds4_binary(config.backend.ds4.primary_binary());
     // Available: intended and installed. Nothing to advise, no scan.
     if intends && binary.is_some() {
       return Vec::new();

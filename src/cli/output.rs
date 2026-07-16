@@ -47,13 +47,20 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
   if rows.is_empty() {
     return format!("{}\n", colors::dim("(no models discovered)"));
   }
-  // Show the BACKEND column only on a multi-backend host — when at least one
-  // model routes to something other than the default `llamacpp` (matches the
-  // TUI's `multi_backend` gate). Uses the daemon's per-row `backend` prediction.
+  // Show the BACKEND column when any model surfaces a backend beyond the
+  // default `llamacpp` — either a non-default primary or more than one supported
+  // backend (a ds4-compatible file lists `ds4|llamacpp`). Matches the TUI's
+  // `multi_backend` gate.
   let show_backend = rows.iter().any(|r| {
-    r.backend
-      .as_deref()
-      .is_some_and(|b| b != crate::backend::DEFAULT_BACKEND_ID)
+    r.supported_backends.len() > 1
+      || r
+        .supported_backends
+        .iter()
+        .any(|b| b != crate::backend::DEFAULT_BACKEND_ID)
+      || r
+        .backend
+        .as_deref()
+        .is_some_and(|b| b != crate::backend::DEFAULT_BACKEND_ID)
   });
   let mut header: Vec<&str> = vec!["NAME", "ARCH", "PARAMS", "QUANT", "CTX", "SIZE"];
   if show_backend {
@@ -82,7 +89,15 @@ pub fn list_human(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) ->
       let status = running_status_cell(running.get(&r.path));
       let mut cells = vec![r.name(), arch, params, quant, ctx, size];
       if show_backend {
-        cells.push(crate::tui::fmt::list_cell(r.backend.as_deref(), "?"));
+        // All supported backends, priority-ordered (`ds4|llamacpp`); the table
+        // formatter clips if it overflows. Falls back to the single primary
+        // badge, then `?`.
+        let backend_cell = if !r.supported_backends.is_empty() {
+          r.supported_backends.join("|")
+        } else {
+          crate::tui::fmt::list_cell(r.backend.as_deref(), "?")
+        };
+        cells.push(backend_cell);
       }
       cells.push(status);
       cells
@@ -174,6 +189,8 @@ pub fn list_json(rows: &[CatalogRow], running: &HashMap<String, RunningRow>) -> 
           .backend
           .clone()
           .unwrap_or_else(|| backend_for_source(&r.source).to_string()),
+        // Every backend that can serve this model, priority-ordered.
+        "supported_backends": r.supported_backends,
         "arch": r.arch,
         "quant": r.quant,
         "native_ctx": r.native_ctx,
@@ -683,6 +700,12 @@ pub fn status_json(snap: &StatusSnapshot) -> Value {
       obj.insert("backends".into(), snap.backends.clone());
     }
   }
+  // Server catalog — same verbatim mirror; omitted against older daemons.
+  if !snap.servers.is_null() {
+    if let Some(obj) = body.as_object_mut() {
+      obj.insert("servers".into(), snap.servers.clone());
+    }
+  }
   body
 }
 
@@ -742,6 +765,7 @@ mod tests {
       tokenizer_kind: None,
       total_parameters: None,
       backend: None,
+      supported_backends: Vec::new(),
     }
   }
 
@@ -885,6 +909,7 @@ mod tests {
         daemon: None,
         proxy: Value::Null,
         backends: Value::Null,
+        servers: Value::Null,
       };
       let s = status_human(&snap);
       assert!(console::strip_ansi_codes(&s).contains("no managed"));
@@ -906,6 +931,7 @@ mod tests {
         daemon: None,
         proxy: Value::Null,
         backends: Value::Null,
+        servers: Value::Null,
       };
       let s = status_human(&snap);
       let plain = console::strip_ansi_codes(&s);
@@ -961,6 +987,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: backends.clone(),
+      servers: Value::Null,
     };
     // Human render: each backend's id, install state, and accelerators.
     let human = status_human(&snap);
@@ -983,6 +1010,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let json = status_json(&snap);
     assert!(
@@ -1012,6 +1040,7 @@ mod tests {
       }),
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     assert!(s.starts_with("daemon: pid=4242"), "preamble shape: {s:?}");
@@ -1038,6 +1067,7 @@ mod tests {
       }),
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     let plain = console::strip_ansi_codes(&s);
@@ -1076,6 +1106,7 @@ mod tests {
         "ui_url": "http://127.0.0.1:11435/ui/",
       }),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&listening);
     assert!(s.contains("web ui"), "web ui row present: {s:?}");
@@ -1092,6 +1123,7 @@ mod tests {
       daemon: Some(daemon()),
       proxy: serde_json::json!({"enabled": false, "status": "disabled", "ui_url": Value::Null}),
       backends: Value::Null,
+      servers: Value::Null,
     };
     assert!(
       !status_human(&disabled).contains("web ui"),
@@ -1133,6 +1165,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     let model = &v["models"][0];
@@ -1166,6 +1199,7 @@ mod tests {
       }),
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     assert_eq!(v["daemon"]["pid"], serde_json::json!(11));
@@ -1201,6 +1235,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     assert!(v.get("host").is_some(), "host key must appear: {v}");
@@ -1248,6 +1283,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     // Regression guard: managed + external rows are exact tabs, no
@@ -1277,6 +1313,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     // Clamped row carries the `*` marker; healthy row is the bare number.
@@ -1305,6 +1342,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     let plain = console::strip_ansi_codes(&s);
@@ -1347,6 +1385,7 @@ mod tests {
       daemon: None,
       proxy: proxy_value("listening", Some("127.0.0.1:11434"), None),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1366,6 +1405,7 @@ mod tests {
       daemon: None,
       proxy: proxy_value("disabled", None, None),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1384,6 +1424,7 @@ mod tests {
       daemon: None,
       proxy: proxy_value("port_in_use", Some("127.0.0.1:11434"), None),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1402,6 +1443,7 @@ mod tests {
       daemon: None,
       proxy: proxy_value("unbound", Some("127.0.0.1:80"), Some("permission denied")),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     let proxy = v.get("proxy").expect("proxy block must round-trip");
@@ -1422,6 +1464,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     assert!(
@@ -1452,6 +1495,7 @@ mod tests {
       }),
       proxy: proxy_value("disabled", None, None),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     assert!(
@@ -1479,6 +1523,7 @@ mod tests {
       }),
       proxy: proxy_value("listening", Some("127.0.0.1:11434"), None),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     assert!(
@@ -1506,6 +1551,7 @@ mod tests {
       }),
       proxy: proxy_value("port_in_use", Some("127.0.0.1:11434"), None),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     assert!(
@@ -1571,6 +1617,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let rendered = status_human(&snap);
     assert!(
@@ -1591,6 +1638,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     assert_eq!(
@@ -1609,6 +1657,7 @@ mod tests {
       daemon: None,
       proxy: Value::Null,
       backends: Value::Null,
+      servers: Value::Null,
     };
     let v = status_json(&snap);
     assert!(
@@ -1636,6 +1685,7 @@ mod tests {
       }),
       proxy: proxy_value("unbound", Some("127.0.0.1:80"), Some("permission denied")),
       backends: Value::Null,
+      servers: Value::Null,
     };
     let s = status_human(&snap);
     assert!(

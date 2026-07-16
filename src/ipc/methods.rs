@@ -557,7 +557,7 @@ pub(crate) fn resolve_model_id(path: &std::path::Path) -> Result<ModelId, ErrorO
 /// Header-derived launch inputs from one GGUF read: `(model id, architecture,
 /// trained ctx window, routed-backend tag)`. The routed-backend tag is the
 /// registry's verdict for this header (`None` = the default process backend).
-pub(crate) type ResolvedModelInfo = (ModelId, Option<String>, Option<u32>, Option<String>);
+pub(crate) type ResolvedModelInfo = (ModelId, Option<String>, Option<u32>, Vec<String>);
 
 /// One-pass GGUF header read that returns both the canonical model id
 /// and the architecture string. The launch path calls this so the
@@ -581,11 +581,10 @@ pub(crate) fn resolve_model_id_and_arch(
   let native_ctx = summary
     .native_ctx
     .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
-  // The backend that auto-claims this header (registry-driven routing verdict),
-  // or `None` — computed from the same header read the selection seam consults.
-  // Names no backend.
-  let routed_backend = crate::backend::routed_backend_for(&header.header);
-  Ok((id, summary.arch, native_ctx, routed_backend))
+  // The backends that can serve this model, priority-ordered — computed from the
+  // same header read the selection seam consults. Names no backend.
+  let supported_backends = crate::backend::supported_backends_for(&header.header);
+  Ok((id, summary.arch, native_ctx, supported_backends))
 }
 
 /// Project the daemon's catalog into the lean rows preset-key
@@ -1071,7 +1070,7 @@ mod tests {
         split_siblings: Vec::new(),
         display_label: None,
         multimodal: None,
-        routed_backend: None,
+        supported_backends: Vec::new(),
       })
       .await;
 

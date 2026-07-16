@@ -68,16 +68,24 @@ pub struct DiscoveredModel {
   /// scanner (see [`scanner::find_mmproj`]). Surfaced after the model
   /// title in the TUI so the user knows a model launches multimodal.
   pub multimodal: Option<Multimodal>,
-  /// The id of the backend that **auto-claims** this model beyond the default
-  /// identity rule (a header-level routing predicate), or `None` when no
-  /// backend does. Computed once at scan time from the same header parse that
-  /// fills `metadata` (and cached), so the hot `list_models` path reads a
-  /// precomputed value instead of re-reading the header on every call. `None`
-  /// for registry sources and parse failures. The `list` badge shows this id
-  /// when that backend is available, and launch routing prefers it. Determined
-  /// generically via [`crate::backend::Backend::auto_routes`] over the backend
-  /// registry, so this field names no backend.
-  pub routed_backend: Option<String>,
+  /// The backends that can serve this model, **priority-ordered** (first = the
+  /// auto-route default). Computed once at scan time from the same header parse
+  /// that fills `metadata` (and cached), so the hot `list_models` path reads a
+  /// precomputed value instead of re-reading the header on every call. Empty
+  /// for registry sources and parse failures. The `list` "backend" column +
+  /// right-pane badges show all of them; launch routing prefers the first
+  /// available one. Determined generically via
+  /// [`crate::backend::supported_backends_for`], so this field names no backend.
+  pub supported_backends: Vec<String>,
+}
+
+impl DiscoveredModel {
+  /// The model's default (highest-priority) backend id, or `None` when unknown
+  /// (registry source / parse failure). The `list` badge and launch routing
+  /// treat this as the auto-route pick.
+  pub fn default_backend(&self) -> Option<&str> {
+    self.supported_backends.first().map(String::as_str)
+  }
 }
 
 /// Multimodal modality a model's mmproj projector advertises. A

@@ -800,7 +800,7 @@ mod tests {
       source: ModelSource::HuggingFace,
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
       parse_error: None,
       split_siblings: vec![],
       metadata: Some(ModelMetadata {

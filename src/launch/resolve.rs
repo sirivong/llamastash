@@ -59,6 +59,11 @@ pub struct CatalogRow {
   /// available. `None` on rows the daemon didn't tag (falls back to a
   /// source-derived badge in `list_json`).
   pub backend: Option<String>,
+  /// Every backend that can serve this model, priority-ordered (first =
+  /// default). Drives the `list` "backend" column + right-pane badges, which
+  /// render all of them (clipping the column if it overflows). Empty on rows the
+  /// daemon didn't tag (registry sources, parse failures).
+  pub supported_backends: Vec<String>,
 }
 
 impl CatalogRow {
@@ -87,6 +92,7 @@ impl CatalogRow {
       tokenizer_kind: None,
       total_parameters: None,
       backend: None,
+      supported_backends: Vec::new(),
     }
   }
 
@@ -188,6 +194,7 @@ mod tests {
       tokenizer_kind: None,
       total_parameters: None,
       backend: None,
+      supported_backends: Vec::new(),
     }
   }
 

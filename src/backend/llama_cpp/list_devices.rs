@@ -18,11 +18,11 @@
 //! (`Vulkan`, `CUDA`, `ROCm`, `Metal`) is the selector's alphabetic
 //! prefix, used only for display.
 //!
-//! [`build_catalog`] unions the per-binary lists and dedups by exact
-//! selector (first binary in config order wins). Two binaries that
-//! both expose `Vulkan0` collapse to one entry; `CUDA0` and `Vulkan1`
-//! for the same physical card stay distinct because they are genuinely
-//! different launch options (different backend, different binary).
+//! [`probe_devices`] returns one binary's [`crate::backend::Device`] list; the
+//! neutral server catalog ([`crate::backend::build_server_catalog`]) carries the
+//! owning binary per [`crate::backend::Server`]. `CUDA0` and `Vulkan1` for the
+//! same physical card stay distinct — they are genuinely different launch
+//! options (different compute backend, different binary).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -160,6 +160,24 @@ fn is_selector(s: &str) -> bool {
   first_alpha && ends_digit && all_alnum
 }
 
+/// Probe one `llama-server` binary for the neutral [`crate::backend::Device`]
+/// list — the backend's [`crate::backend::Backend::probe_devices`] hook. Maps
+/// each parsed [`BinaryDevice`] to a [`crate::backend::Device`] (the selector's
+/// prefix becomes `gpu_backend`); the owning binary is carried by the
+/// [`crate::backend::Server`] this feeds, not the device.
+pub fn probe_devices(binary: &Path) -> Vec<crate::backend::Device> {
+  probe(binary)
+    .into_iter()
+    .map(|d| crate::backend::Device {
+      selector: d.selector,
+      gpu_backend: d.backend,
+      name: d.name,
+      total_mib: d.total_mib,
+      free_mib: d.free_mib,
+    })
+    .collect()
+}
+
 /// Run `<binary> --list-devices` and parse the result. Returns an
 /// empty vec on any failure (missing binary, non-zero exit, timeout) —
 /// a binary that can't enumerate just contributes nothing to the
@@ -180,30 +198,6 @@ pub fn probe(binary: &Path) -> Vec<BinaryDevice> {
       Vec::new()
     }
   }
-}
-
-/// Build the launch device catalog by probing every binary and unioning
-/// the results, deduped by exact selector (first binary wins on a
-/// collision). `binaries` is in priority order — the default binary
-/// first, then config extras.
-pub fn build_catalog(binaries: &[PathBuf]) -> Vec<LaunchDevice> {
-  let mut out: Vec<LaunchDevice> = Vec::new();
-  for binary in binaries {
-    for dev in probe(binary) {
-      if out.iter().any(|d| d.selector == dev.selector) {
-        continue;
-      }
-      out.push(LaunchDevice {
-        selector: dev.selector,
-        backend: dev.backend,
-        name: dev.name,
-        binary: binary.clone(),
-        total_mib: dev.total_mib,
-        free_mib: dev.free_mib,
-      });
-    }
-  }
-  out
 }
 
 #[cfg(test)]

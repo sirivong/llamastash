@@ -152,7 +152,7 @@ pub fn resolve_lemond_binary(cfg: &crate::config::LemonadeConfig) -> Option<Path
   fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
   }
-  if let Some(explicit) = &cfg.binary {
+  if let Some(explicit) = cfg.primary_binary() {
     return explicit.is_file().then(|| canonical(explicit));
   }
   // Never auto-discover a host `lemond`/`lemonade` on `PATH` under the
@@ -316,6 +316,26 @@ impl Backend for LemonadeBackend {
 
   fn binary_path(&self, ctx: &MethodContext) -> Option<String> {
     resolve_lemond_binary(&ctx.backend.lemonade).map(|b| b.display().to_string())
+  }
+
+  fn configured_servers(&self, ctx: &MethodContext) -> Vec<crate::backend::ServerSpec> {
+    // One umbrella server when Lemonade is available; no device probe.
+    if !self.available(ctx) {
+      return Vec::new();
+    }
+    resolve_lemond_binary(&ctx.backend.lemonade)
+      .map(|binary| {
+        vec![crate::backend::ServerSpec {
+          binary,
+          name: ctx
+            .backend
+            .lemonade
+            .servers
+            .first()
+            .and_then(|s| s.name.clone()),
+        }]
+      })
+      .unwrap_or_default()
   }
 
   async fn status_accelerators(&self, ctx: &MethodContext, _device: &[Accelerator]) -> Vec<String> {
@@ -933,7 +953,10 @@ mod tests {
     let this_exe = std::env::current_exe().expect("current exe");
     let cfg = LemonadeConfig {
       enabled: Some(true),
-      binary: Some(this_exe.clone()),
+      servers: vec![crate::backend::ServerConfig {
+        binary: this_exe.clone(),
+        name: None,
+      }],
       port: 13305,
     };
     let expected = this_exe.canonicalize().unwrap_or(this_exe);
@@ -943,7 +966,10 @@ mod tests {
     // back to PATH when the user named a specific file).
     let cfg_missing = LemonadeConfig {
       enabled: Some(true),
-      binary: Some(PathBuf::from("/nonexistent/lemond-xyz")),
+      servers: vec![crate::backend::ServerConfig {
+        binary: PathBuf::from("/nonexistent/lemond-xyz"),
+        name: None,
+      }],
       port: 13305,
     };
     assert_eq!(resolve_lemond_binary(&cfg_missing), None);

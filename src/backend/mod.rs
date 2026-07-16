@@ -47,6 +47,9 @@ pub mod ds4;
 pub mod identity;
 pub mod lemonade;
 pub mod llama_cpp;
+pub mod server;
+
+pub use server::{build_server_catalog, Device, Server, ServerConfig, ServerSpec};
 
 /// The default backend id — what a plain GGUF binds to (`backend_for_identity`)
 /// and the fallback for an unknown identity / persisted tag. Consumers that
@@ -494,6 +497,31 @@ pub trait Backend {
     true
   }
 
+  /// Enumerate this backend's configured **servers** (build/binary variants),
+  /// resolved to absolute paths, from its own `servers:` config. The boot
+  /// [`build_server_catalog`] probes each for devices and derives an id/name.
+  /// Default: no servers — a backend contributes to the catalog only if it
+  /// resolves at least one binary.
+  fn configured_servers(&self, _ctx: &MethodContext) -> Vec<ServerSpec> {
+    Vec::new()
+  }
+
+  /// Probe one server binary for the GPU **devices** it can target (the exact
+  /// `--device` selectors it accepts). Default empty — a backend with no
+  /// device-selection surface (ds4 / lemonade). llama.cpp overrides with its
+  /// `--list-devices` probe.
+  fn probe_devices(&self, _binary: &Path) -> Vec<Device> {
+    Vec::new()
+  }
+
+  /// Default-ordering weight among the servers a model supports (higher first).
+  /// Orders both the launch **server** knob and `supported_backends`, and picks
+  /// the no-selection default. Default `0`; a purpose-built backend that should
+  /// win the auto-route (ds4 over llama.cpp) returns a higher value.
+  fn launch_priority(&self) -> i32 {
+    0
+  }
+
   /// Resolve the executable + port this launch spawns on, given the
   /// orchestrator's default (device-owning) binary and the reserved pool port.
   ///
@@ -816,15 +844,33 @@ impl Backends {
 
 /// The id of the backend that **auto-claims** `header` (the first registry
 /// entry whose [`Backend::auto_routes`] matches), or `None` when no backend
-/// does. The single generic routing-predicate entry point: discovery records
-/// this per model and the `list` badge / launch routing read it, so a new
-/// special-routing backend surfaces from its `auto_routes` override alone —
-/// no discovery, catalog, or badge edit, and no call site names a backend.
+/// does. The single generic routing-predicate entry point: launch routing reads
+/// it, so a new special-routing backend surfaces from its `auto_routes` override
+/// alone — no call site names a backend.
 pub fn routed_backend_for(header: &GgufHeader) -> Option<String> {
   Backends::all()
     .into_iter()
     .find(|b| b.auto_routes(header))
     .map(|b| b.id().to_string())
+}
+
+/// Every backend that can serve a disk GGUF with `header`, **priority-ordered**
+/// (highest [`Backend::launch_priority`] first, ties broken by registration
+/// order). The first entry is the auto-route default. A backend is included when
+/// it `auto_routes` the header (special routing, e.g. ds4 for a compatible
+/// DeepSeek-V4) **or** it is the identity-default backend for a plain GGUF
+/// ([`DEFAULT_BACKEND_ID`], always able to run a local file). Discovery records
+/// this per model; the `list` badge / right-pane badges show all of them, and
+/// launch routing prefers the first available one. Names no backend beyond the
+/// identity default.
+pub fn supported_backends_for(header: &GgufHeader) -> Vec<String> {
+  let mut backends: Vec<Backends> = Backends::all()
+    .into_iter()
+    .filter(|b| b.auto_routes(header) || b.id() == DEFAULT_BACKEND_ID)
+    .collect();
+  // Stable sort by priority descending — ds4 (20) before llamacpp (10).
+  backends.sort_by_key(|b| std::cmp::Reverse(b.launch_priority()));
+  backends.into_iter().map(|b| b.id().to_string()).collect()
 }
 
 impl Backend for Backends {
@@ -908,6 +954,18 @@ impl Backend for Backends {
 
   fn available(&self, ctx: &MethodContext) -> bool {
     for_each_backend!(self, b => b.available(ctx))
+  }
+
+  fn configured_servers(&self, ctx: &MethodContext) -> Vec<ServerSpec> {
+    for_each_backend!(self, b => b.configured_servers(ctx))
+  }
+
+  fn probe_devices(&self, binary: &Path) -> Vec<Device> {
+    for_each_backend!(self, b => b.probe_devices(binary))
+  }
+
+  fn launch_priority(&self) -> i32 {
+    for_each_backend!(self, b => b.launch_priority())
   }
 
   fn resolve_launch_binary(
@@ -1167,14 +1225,17 @@ pub fn adopted_process_name(backend_id: &str) -> &'static str {
 pub fn resolve_backend_for_launch(
   identity: &ModelIdentity,
   choice: BackendChoice,
-  routed_backend: Option<&str>,
+  supported_backends: &[String],
   mode: LaunchMode,
   ctx: &MethodContext,
 ) -> Backends {
   match choice {
     BackendChoice::Auto => {
-      if let Some(id) = routed_backend {
-        if let Some(b) = Backends::all().into_iter().find(|b| b.id() == id) {
+      // Walk the priority-ordered supported list; take the first backend that
+      // is available and serves this mode (so a compatible ds4 model falls back
+      // to llama.cpp when ds4 is absent, or on an embedding/rerank launch).
+      for id in supported_backends {
+        if let Some(b) = Backends::all().into_iter().find(|b| b.id() == id.as_str()) {
           if b.available(ctx) && b.serves_mode(mode) {
             return b;
           }

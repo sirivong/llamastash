@@ -406,6 +406,13 @@ pub struct StartArgs {
   /// backend) to force one per launch. Validated against the live registry.
   #[arg(long, value_parser = parse_backend_id)]
   pub backend: Option<String>,
+  /// Server (a specific build/binary of a backend, e.g. `llamacpp·vulkan`) to
+  /// launch on. Determines which binary spawns and, when `--backend` is unset,
+  /// which backend runs it. Ids come from `status` (`servers`). A `--device`
+  /// selector already implies its owning server, so `--server` is for picking a
+  /// build with no device pin.
+  #[arg(long)]
+  pub server: Option<String>,
   /// Emit JSON instead of human-readable success prose. Stable
   /// shape: `{ "name", "launch_id", "port", "pid", "preset",
   /// "path" }`. With `--wait`, also carries `state` and `resolved_ctx`.

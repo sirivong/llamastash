@@ -103,7 +103,14 @@ pub async fn handle(args: StartArgs, cli: &Cli, config: &Config) -> CliResult {
     }
   }
 
-  let payload = build_payload(&row.path, mode, &params, args.backend.as_deref(), selection);
+  let payload = build_payload(
+    &row.path,
+    mode,
+    &params,
+    args.backend.as_deref(),
+    args.server.as_deref(),
+    selection,
+  );
   let resp = client
     .call("start_model", Some(payload))
     .await
@@ -336,6 +343,7 @@ fn direct_catalog_row(path: PathBuf, mode: CliLaunchMode) -> CatalogRow {
     tokenizer_kind: None,
     total_parameters: None,
     backend: None,
+    supported_backends: Vec::new(),
   }
 }
 
@@ -451,6 +459,7 @@ fn build_payload(
   mode: &str,
   p: &PartialParams,
   backend: Option<&str>,
+  server: Option<&str>,
   selection: &str,
 ) -> Value {
   let mut obj = serde_json::Map::new();
@@ -466,6 +475,11 @@ fn build_payload(
   // applies its default (`Auto` → identity rule).
   if let Some(b) = backend {
     obj.insert("backend".into(), Value::String(b.to_string()));
+  }
+  // Chosen server (build/binary). Omitted when unset. Drives the launch binary
+  // and, when `backend` is unset, the backend.
+  if let Some(s) = server {
+    obj.insert("server".into(), Value::String(s.to_string()));
   }
   if let Some(ctx) = p.ctx {
     obj.insert("ctx".into(), Value::from(ctx));
@@ -601,6 +615,7 @@ mod tests {
       tokenizer_kind: None,
       total_parameters: None,
       backend: None,
+      supported_backends: Vec::new(),
     }
   }
 
@@ -641,7 +656,7 @@ mod tests {
       knobs,
       extras: vec!["--rope-freq-base".into(), "10000".into()],
     };
-    let v = build_payload("/m/a.gguf", "chat", &p, None, "default");
+    let v = build_payload("/m/a.gguf", "chat", &p, None, None, "default");
     assert_eq!(v["model_path"], serde_json::json!("/m/a.gguf"));
     assert_eq!(v["mode"], serde_json::json!("chat"));
     assert_eq!(v["selection"], serde_json::json!("default"));
@@ -668,7 +683,7 @@ mod tests {
       knobs: TypedKnobs::default(),
       extras: vec![],
     };
-    let v = build_payload("/m/a.gguf", "chat", &p, Some("llamacpp"), "explicit");
+    let v = build_payload("/m/a.gguf", "chat", &p, Some("llamacpp"), None, "explicit");
     assert_eq!(v["backend"], serde_json::json!("llamacpp"));
     assert_eq!(v["selection"], serde_json::json!("explicit"));
   }
@@ -747,6 +762,7 @@ mod tests {
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       backend: None,
+      server: None,
       json: false,
       wait: false,
     };
@@ -771,6 +787,7 @@ mod tests {
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       backend: None,
+      server: None,
       json: false,
       wait: false,
     };
@@ -801,6 +818,7 @@ mod tests {
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       backend: None,
+      server: None,
       json: false,
       wait: false,
     };
@@ -833,6 +851,7 @@ mod tests {
       tokenizer_kind: None,
       total_parameters: None,
       backend: None,
+      supported_backends: Vec::new(),
     };
     let args = StartArgs {
       model: Some(path.display().to_string()),
@@ -844,6 +863,7 @@ mod tests {
       knobs: crate::cli::knob_flags::KnobFlags::default(),
       extra: vec![],
       backend: None,
+      server: None,
       json: false,
       wait: false,
     };

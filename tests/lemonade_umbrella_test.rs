@@ -184,7 +184,7 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
     log_dir: dir.clone(),
     probe: fast_probe(),
     arch_defaults: Default::default(),
-    device_catalog: Default::default(),
+    servers: Default::default(),
     default_launch_mode: Default::default(),
   };
   let ctx = MethodContext::new(ShutdownToken::new())
@@ -194,7 +194,10 @@ async fn start_model_replies_promptly_and_records_preload_outcome() {
       llamastash::backend::BackendConfig {
         lemonade: LemonadeConfig {
           enabled: Some(true),
-          binary: Some(fake_lemond_binary()),
+          servers: vec![llamastash::backend::ServerConfig {
+            binary: fake_lemond_binary(),
+            name: None,
+          }],
           port,
         },
         ..Default::default()

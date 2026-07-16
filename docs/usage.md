@@ -71,17 +71,21 @@ backend: # Per-engine config, one block per backend. llama.cpp is the
          # always-on default (no enable toggle); lemonade + ds4 are
          # optional, each default-on when its own binary resolves.
   llamacpp:
-    binary: /usr/local/bin/llama-server # Overridable by --llama-server / env var.
-    additional_binaries: # Extra builds probed for --list-devices (CUDA/ROCm/Vulkan).
-      - /opt/builds/cuda/llama-server
+    servers: # Build/binary variants. First = default (auto/no-device launches),
+             # and the target of --llama-server / LLAMASTASH_LLAMA_SERVER. Each is
+             # probed with --list-devices; every entry is its own selectable
+             # server (no dedup across builds — CUDA/ROCm/Vulkan builds all list).
+      - binary: /usr/local/bin/llama-server
+      - binary: /opt/builds/cuda/llama-server
+        name: cuda # Optional; else auto-derived (<backend>·<gpu_backend>).
     fit_ctx_floor: 16384 # Min --fit-ctx window. Env: LLAMASTASH_FIT_CTX_FLOOR.
     strict_fit: false # Refuse (vs degrade) an unplaceable --fit. Env: LLAMASTASH_STRICT_FIT.
     jinja: true # Emit --jinja every launch (tool calling). Config-only.
   ds4: # See §"ds4 backend" below.
-    # binary: /opt/ds4/ds4-server # ds4-server path; else PATH.
+    # servers: [{ binary: /opt/ds4/ds4-server }] # ds4-server path; else PATH.
     # enabled: # tri-state: unset=auto, true=force on, false=force off.
   lemonade:
-    # binary: /opt/lemonade/lemond # lemond path; else PATH.
+    # servers: [{ binary: /opt/lemonade/lemond }] # lemond path; else PATH.
     # enabled: # tri-state (see ds4).
     # port: 13305 # lemond umbrella port.
 
@@ -205,7 +209,7 @@ The "nav focuses" alias means `List` + `RightPane`; "input focuses" means `ChatI
 | `LLAMASTASH_CONFIG_DIR`             | Override the directory `paths::config_dir()` resolves to; `user_config_file()` becomes `<dir>/config.yaml`. Empty value = unset                                                                                                                                                                                                                                                                                                                 |
 | `LLAMASTASH_STATE_DIR`              | Override the directory `paths::state_dir()` resolves to (state.json, daemon.pid, init_snapshot.json, runtime.json). Empty value = unset                                                                                                                                                                                                                                                                                                         |
 | `LLAMASTASH_CACHE_DIR`              | Override the directory `paths::cache_dir()` resolves to; `log_dir()` inherits as `<dir>/logs`. Empty value = unset                                                                                                                                                                                                                                                                                                                              |
-| `LLAMASTASH_LLAMA_SERVER`           | Path to `llama-server` (config key `backend.llamacpp.binary`)                                                                                                                                                                                                                                                                                                                                                                                   |
+| `LLAMASTASH_LLAMA_SERVER`           | Path to `llama-server` (sets the first `backend.llamacpp.servers[]` entry)                                                                                                                                                                                                                                                                                                                                                                      |
 | `LLAMASTASH_NO_SCAN`                | Skip filesystem scanning                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `LLAMASTASH_IPC_URL`                | Point a CLI/TUI at a non-default daemon control plane (verbatim URL, e.g. `http://127.0.0.1:48134`). Must be set together with `LLAMASTASH_IPC_TOKEN`; partial overrides are rejected. Bypasses `runtime.json` lookup entirely.                                                                                                                                                                                                                 |
 | `LLAMASTASH_IPC_TOKEN`              | Bearer token for the control-plane URL. See `LLAMASTASH_IPC_URL`.                                                                                                                                                                                                                                                                                                                                                                               |
@@ -292,11 +296,13 @@ Launch a model. Layered resolution: catalog row → optional preset → per-invo
 ```
 llamastash start <ref> [--preset NAME] [--ctx N] [--port N] [--wait]
                      [--reasoning on|off] [--mode chat|embedding|rerank]
-                     [--backend auto|ds4|llamacpp|lemonade]
+                     [--backend auto|ds4|llamacpp|lemonade] [--server <id>]
                      [--<advanced-knob> ...] [-- <llama-server-flags>...]
 ```
 
 `--backend` defaults to `auto` (picks the engine by model identity — a DeepSeek-V4 GGUF routes to the [ds4 backend](#ds4-backend) when available, everything else to llama.cpp). Override it to force a specific engine.
+
+`--server <id>` picks a specific **server** — one build/binary of a backend (`llamacpp·vulkan`, `llamacpp·cuda`, `ds4·ds4`). It determines which binary spawns and, when `--backend` is unset, which backend runs the model (the server's owning backend). Server ids come from `status` (the `servers` array; `status --json` mirrors it). A `--device <selector>` already implies its owning server, so `--server` is for picking a build with no device pin. The pick persists in `last_params`, so a relaunch reuses it.
 
 Every typed knob the Settings editor exposes is also a first-class `start` flag — `--n-gpu-layers`, `--threads`, `--device`, `--tensor-split`, `--main-gpu`, `--split-mode`, `--flash-attn`, `--cache-type-k`/`-v`, `--batch-size`, `--mlock`, … Run `start --help` for the full list under **Advanced launch params** (the flags are generated from the same spec table the TUI uses, so the two surfaces can't drift). Booleans take `--flash-attn` (= on) or `--flash-attn=false`. Anything `start` doesn't recognise as a knob — including `llama-server`'s single-dash shorts like `-ngl` — still works verbatim after `--`. A knob set both inline and after `--` resolves to the `--` value.
 
@@ -430,9 +436,9 @@ llamastash daemon status [--json]   # PID + uptime + connections + managed launc
 
 [ds4](https://github.com/antirez/ds4) (antirez's DwarfStar) is a third backend: a direct, process-per-model engine that runs the `ds4-server` binary for the DeepSeek-V4 Flash/PRO GGUFs at [huggingface.co/antirez/deepseek-v4-gguf](https://huggingface.co/antirez/deepseek-v4-gguf). It is the purpose-built engine for those files (disk KV cache, SSD streaming); a current llama.cpp (**b9840+**) also runs DeepSeek-V4, so ds4 is preferred, never required.
 
-> **Minimum llama.cpp version for these GGUFs.** DeepSeek-V4 support landed in llama.cpp **b9840** ([ggml-org/llama.cpp#24162](https://github.com/ggml-org/llama.cpp/pull/24162), merged 2026-06-29). On **b9840 or newer** — a release binary or a source build from that merge onward — llama.cpp loads antirez's Flash/PRO GGUFs; on anything older it fails immediately with `error loading model: unknown model architecture: 'deepseek4'`. This matters because ds4's "falls back to llama.cpp, never a refusal" (below) only degrades gracefully when your llama.cpp is new enough — an older `llama-server` turns that fallback into a hard load error. Point `backend.llamacpp.binary` at a b9840+ build if you rely on the fallback. (Note: on the llama.cpp backend, Flash Attention is currently auto-disabled for the deepseek4 graph; it loads and runs without it.)
+> **Minimum llama.cpp version for these GGUFs.** DeepSeek-V4 support landed in llama.cpp **b9840** ([ggml-org/llama.cpp#24162](https://github.com/ggml-org/llama.cpp/pull/24162), merged 2026-06-29). On **b9840 or newer** — a release binary or a source build from that merge onward — llama.cpp loads antirez's Flash/PRO GGUFs; on anything older it fails immediately with `error loading model: unknown model architecture: 'deepseek4'`. This matters because ds4's "falls back to llama.cpp, never a refusal" (below) only degrades gracefully when your llama.cpp is new enough — an older `llama-server` turns that fallback into a hard load error. Point `backend.llamacpp.servers` at a b9840+ build if you rely on the fallback. (Note: on the llama.cpp backend, Flash Attention is currently auto-disabled for the deepseek4 graph; it loads and runs without it.)
 
-**You supply the binary.** LlamaStash does not install ds4-server — build it from the repo (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and either put `ds4-server` on `PATH` or point `backend.ds4.binary` at it. ds4 is **default-on the moment the binary resolves**; it stays completely dormant when it doesn't (no discovery, no new JSON fields on other rows).
+**You supply the binary.** LlamaStash does not install ds4-server — build it from the repo (`git clone https://github.com/antirez/ds4 && cd ds4 && make`) and either put `ds4-server` on `PATH` or point `backend.ds4.servers` at it. ds4 is **default-on the moment the binary resolves**; it stays completely dormant when it doesn't (no discovery, no new JSON fields on other rows).
 
 Enable / configure:
 

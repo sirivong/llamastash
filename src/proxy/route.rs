@@ -363,7 +363,7 @@ pub(crate) async fn running_model_backend(
   let rb = cat
     .iter()
     .find(|m| m.path == id.path)
-    .and_then(|m| m.routed_backend.clone())?;
+    .and_then(|m| m.default_backend().map(str::to_string))?;
   Backends::all()
     .into_iter()
     .find(|b| b.id() == rb && b.available(&state.ctx))
@@ -387,8 +387,8 @@ pub(crate) async fn would_route_backend(
     Some("rerank") => crate::launch::mode::LaunchMode::Rerank,
     _ => crate::launch::mode::LaunchMode::Chat,
   };
-  // A GGUF identity: the fallback is the default backend, and the routing
-  // verdict (`routed_backend`) drives the auto pick — exactly the daemon's rule.
+  // A GGUF identity: the fallback is the default backend, and the priority-
+  // ordered supported list drives the auto pick — exactly the daemon's rule.
   let identity = crate::backend::identity::ModelIdentity::Gguf(crate::gguf::identity::ModelId {
     path: m.path.clone(),
     header_blake3: [0u8; 32],
@@ -396,7 +396,7 @@ pub(crate) async fn would_route_backend(
   Some(crate::backend::resolve_backend_for_launch(
     &identity,
     crate::launch::params::BackendChoice::Auto,
-    m.routed_backend.as_deref(),
+    &m.supported_backends,
     launch_mode,
     &state.ctx,
   ))
@@ -460,6 +460,7 @@ pub(crate) fn catalog_row_from_discovered(m: &DiscoveredModel) -> CatalogRow {
     tokenizer_kind,
     total_parameters,
     backend: None,
+    supported_backends: m.supported_backends.clone(),
   }
 }
 
@@ -733,7 +734,7 @@ mod tests {
       source: crate::discovery::ModelSource::HuggingFace,
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
       parse_error: None,
       split_siblings: vec![],
       metadata: Some(ModelMetadata {
@@ -776,21 +777,30 @@ mod tests {
     let exe = std::env::current_exe().unwrap();
     let ds4_cfg = crate::config::Ds4Config {
       enabled: Some(true),
-      binary: Some(exe),
+      servers: vec![crate::backend::ServerConfig {
+        binary: exe,
+        name: None,
+      }],
     };
 
     // A chat model routed to that backend → auto-start lands on a backend that
     // doesn't serve embeddings, so an embeddings/rerank request must be refused.
     let mut chat = discovered_with_mode(ModeHint::Chat);
     chat.path = std::path::PathBuf::from("/m/deepseek.gguf");
-    chat.routed_backend = Some(crate::backend::ds4::DS4_BACKEND_ID.to_string());
+    chat.supported_backends = vec![
+      crate::backend::ds4::DS4_BACKEND_ID.to_string(),
+      crate::backend::DEFAULT_BACKEND_ID.to_string(),
+    ];
     let chat_row = catalog_row_from_discovered(&chat);
 
     // A compatible-but-embedding-hint model routes to the default backend
     // (which serves embeddings), so it must NOT be guarded.
     let mut embed = discovered_with_mode(ModeHint::Embedding);
     embed.path = std::path::PathBuf::from("/m/embed.gguf");
-    embed.routed_backend = Some(crate::backend::ds4::DS4_BACKEND_ID.to_string());
+    embed.supported_backends = vec![
+      crate::backend::ds4::DS4_BACKEND_ID.to_string(),
+      crate::backend::DEFAULT_BACKEND_ID.to_string(),
+    ];
     let embed_row = catalog_row_from_discovered(&embed);
 
     let catalog = ModelCatalog::new();

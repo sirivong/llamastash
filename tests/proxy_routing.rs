@@ -91,7 +91,7 @@ fn discovered(path: &str, display_label: Option<&str>, arch: &str) -> Discovered
     split_siblings: Vec::new(),
     display_label: display_label.map(str::to_string),
     multimodal: None,
-    routed_backend: None,
+    supported_backends: Vec::new(),
   }
 }
 

@@ -282,10 +282,37 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
   // `llama-server` will accept. Empty when no binary is configured.
   let device_catalog = match ctx.launch.as_ref() {
     Some(env) => {
-      let catalog_snap = env.device_catalog.read().await;
-      serde_json::to_value(&*catalog_snap).unwrap_or(Value::Null)
+      // Flatten the server catalog into the legacy per-device rows (each tagged
+      // with its owning server's binary), deduped by selector — first server
+      // wins, matching the old catalog. Stage 4 replaces this with `servers`.
+      let servers = env.servers.read().await;
+      let mut seen = std::collections::HashSet::new();
+      let mut rows = Vec::new();
+      for s in servers.iter() {
+        for d in &s.devices {
+          if !seen.insert(d.selector.clone()) {
+            continue;
+          }
+          rows.push(json!({
+            "selector": d.selector,
+            "backend": d.gpu_backend,
+            "name": d.name,
+            "binary": s.binary.display().to_string(),
+            "total_mib": d.total_mib,
+            "free_mib": d.free_mib,
+          }));
+        }
+      }
+      Value::Array(rows)
     }
     None => Value::Null,
+  };
+  // Neutral server catalog: every backend's build/binary variants, each with
+  // its probed devices + derived id. The `list`/status surfaces read this; the
+  // flat `device_catalog` above stays as the legacy per-device projection.
+  let servers = match ctx.launch.as_ref() {
+    Some(env) => serde_json::to_value(&*env.servers.read().await).unwrap_or(Value::Null),
+    None => Value::Array(Vec::new()),
   };
   let backends = backends_status(ctx).await;
   let mut body = json!({
@@ -294,6 +321,7 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
     "gpu": gpu,
     "host": host,
     "device_catalog": device_catalog,
+    "servers": servers,
     "backends": backends,
     "daemon": {
       "pid": std::process::id(),
@@ -329,10 +357,11 @@ async fn backends_status(ctx: &MethodContext) -> Value {
   // accelerators live (a managed multiplexer) overrides and ignores them.
   let device_accels: Vec<crate::backend::Accelerator> = match ctx.launch.as_ref() {
     Some(env) => env
-      .device_catalog
+      .servers
       .read()
       .await
       .iter()
+      .flat_map(|s| s.devices.iter())
       .filter_map(|d| accelerator_from_selector(&d.selector))
       .collect(),
     None => Vec::new(),
@@ -550,6 +579,7 @@ mod tests {
         "gpu",
         "host",
         "models",
+        "servers",
       ],
       "catalog-only status top-level keys drifted"
     );

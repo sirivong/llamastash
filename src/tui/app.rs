@@ -370,6 +370,10 @@ pub struct App {
   /// `--list-devices`. Populated by [`Self::ingest_status`]; consumed
   /// by the launch picker's Device row.
   pub device_catalog: Vec<crate::backend::llama_cpp::LaunchDevice>,
+  /// Neutral server catalog from `status.servers` — every backend's build /
+  /// binary variants with their probed devices. Drives the daemon-pane `server`
+  /// row (grouped by backend). Populated by [`Self::ingest_status`].
+  pub servers: Vec<crate::backend::Server>,
   /// Set when the user presses `q` so the event loop can exit.
   pub should_exit: bool,
   /// Whether the modal help overlay is visible. Bound to `?`.
@@ -568,6 +572,7 @@ impl App {
       daemon_info: DaemonInfo::default(),
       host_metrics: HostMetricsSnapshot::default(),
       device_catalog: Vec::new(),
+      servers: Vec::new(),
       should_exit: false,
       show_help: false,
       help_scroll: 0,
@@ -1028,6 +1033,13 @@ impl App {
           serde_json::from_value::<Vec<crate::backend::llama_cpp::LaunchDevice>>(catalog.clone())
         {
           self.device_catalog = devices;
+        }
+      }
+    }
+    if let Some(servers) = body.get("servers") {
+      if !servers.is_null() {
+        if let Ok(parsed) = serde_json::from_value::<Vec<crate::backend::Server>>(servers.clone()) {
+          self.servers = parsed;
         }
       }
     }
@@ -2154,7 +2166,7 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
       .and_then(Value::as_str)
       .map(String::from),
     multimodal: row.get("multimodal").and_then(parse_multimodal),
-    routed_backend: None,
+    supported_backends: Vec::new(),
   })
 }
 
@@ -2385,7 +2397,7 @@ mod tests {
       split_siblings: Vec::new(),
       display_label: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }
   }
 

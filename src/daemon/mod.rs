@@ -70,14 +70,6 @@ pub struct DaemonOptions {
   /// launch); production startup pre-resolves so the daemon fails
   /// fast if the binary is missing.
   pub binary: Option<PathBuf>,
-  /// Additional `llama-server` binaries (from `config.llama_server_paths`)
-  /// probed for devices alongside `binary`. Each is queried with
-  /// `--list-devices` at startup; the union (deduped by selector)
-  /// becomes the launch device catalog. Lets one install offer
-  /// CUDA / ROCm / Vulkan launches by pointing at the matching
-  /// single-backend builds. Backend is inferred from each binary's
-  /// device names — never declared in config.
-  pub extra_binaries: Vec<PathBuf>,
   /// Listening-port range the launch allocator probes. Defaults to
   /// `41100..=41300`.
   pub port_range: PortRange,
@@ -115,10 +107,11 @@ pub struct DaemonOptions {
   pub proxy: ProxyConfig,
   /// Aggregate backend config, grouped under `backend:` in `config.yaml`:
   /// llama.cpp launch knobs (`jinja` / `strict_fit` / `fit_ctx_floor`, plus the
-  /// raw config `binary` / `additional_binaries`, distinct from the resolved
-  /// [`Self::binary`] / [`Self::extra_binaries`] above), the `[lemonade]` block,
-  /// and the `[ds4]` block. Each backend reads its own sub-config through its
-  /// hooks; gate Lemonade activation through [`Self::lemonade_available`].
+  /// per-backend `servers:` arrays, distinct from the resolved default
+  /// [`Self::binary`] above), the `[lemonade]` block, and the `[ds4]` block.
+  /// Each backend reads its own sub-config through its hooks (the server catalog
+  /// is built from `configured_servers`); gate Lemonade activation through
+  /// [`Self::lemonade_available`].
   pub backend: BackendConfig,
   /// Per-backend force-enable flags keyed by backend id (`--lemonade` /
   /// `LLAMASTASH_LEMONADE`, `--ds4` / `LLAMASTASH_DS4`). Kept separate from the
@@ -179,7 +172,6 @@ impl DaemonOptions {
       state_dir: root,
       log_dir,
       binary: None,
-      extra_binaries: Vec::new(),
       port_range: PortRange::default(),
       discovery: DiscoveryOptions::new(Vec::new()),
       probe_timeout_secs: None,
@@ -224,7 +216,6 @@ impl DaemonOptions {
       state_dir,
       log_dir,
       binary: None,
-      extra_binaries: Vec::new(),
       port_range: PortRange::default(),
       // Production-default discovery: no scan roots until a later
       // commit threads config + CLI flags through `handle_start`.
@@ -429,47 +420,41 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
       },
       None => ProbeOptions::default(),
     };
-    // Build the launch device catalog from the default binary plus any
-    // configured extras. The default binary leads so it wins selector
-    // collisions (e.g. two builds both exposing `Vulkan0`).
-    let mut catalog_binaries = vec![binary.clone()];
-    for extra in &opts.extra_binaries {
-      if !catalog_binaries.contains(extra) {
-        catalog_binaries.push(extra.clone());
-      }
-    }
-    // Populate the catalog in the background: probing each binary with
-    // `--list-devices` is best-effort I/O we must keep off the startup
-    // critical path so the detached-start parent's `runtime.json` wait
-    // never trips. The cell starts empty and flips to the full set once
-    // the probe finishes.
-    let device_catalog = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-    {
-      let cell = Arc::clone(&device_catalog);
-      let binary_count = catalog_binaries.len();
-      tokio::spawn(async move {
-        let built = tokio::task::spawn_blocking(move || {
-          crate::backend::llama_cpp::build_catalog(&catalog_binaries)
-        })
-        .await
-        .unwrap_or_default();
-        log::info!(
-          "launch device catalog: {} device(s) across {} binary(ies)",
-          built.len(),
-          binary_count
-        );
-        *cell.write().await = built;
-      });
-    }
+    // The server catalog is populated in the background: each backend's
+    // `configured_servers` + per-binary `--list-devices` probe is best-effort
+    // I/O we must keep off the startup critical path so the detached-start
+    // parent's `runtime.json` wait never trips. The cell starts empty and flips
+    // to the full set once the probe finishes; a launch in that window falls
+    // back to the default `binary`.
+    let servers = Arc::new(tokio::sync::RwLock::new(Vec::new()));
     ctx = ctx.with_launch_env(LaunchEnv {
       binary,
       port_range: opts.port_range,
       log_dir: opts.log_dir.clone(),
       probe,
       arch_defaults: opts.arch_defaults.clone(),
-      device_catalog,
+      servers: Arc::clone(&servers),
       default_launch_mode: opts.default_launch_mode,
     });
+    // Build the neutral server catalog generically over `Backends::all()` —
+    // `configured_servers` (per backend) → `probe_devices` (per binary) → id
+    // derivation. Reads `ctx.launch.binary`, so it runs after `with_launch_env`.
+    {
+      let cell = Arc::clone(&servers);
+      let ctx_for_probe = ctx.clone();
+      tokio::spawn(async move {
+        let built =
+          tokio::task::spawn_blocking(move || crate::backend::build_server_catalog(&ctx_for_probe))
+            .await
+            .unwrap_or_default();
+        log::info!(
+          "server catalog: {} server(s), {} device(s)",
+          built.len(),
+          built.iter().map(|s| s.devices.len()).sum::<usize>()
+        );
+        *cell.write().await = built;
+      });
+    }
   } else {
     log::info!(
       "daemon started without `llama-server` binary resolved; `start_model` will return an error until one is configured"

@@ -26,6 +26,8 @@ pub async fn handle(args: StatusArgs, cli: &Cli, config: &Config) -> CliResult {
       proxy: snap.proxy.clone(),
       // Backends are daemon-level too — keep them on a scoped view.
       backends: snap.backends.clone(),
+      // Server catalog is daemon-level; keep it on a scoped view too.
+      servers: snap.servers.clone(),
     },
     None => snap,
   };

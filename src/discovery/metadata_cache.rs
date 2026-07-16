@@ -38,11 +38,12 @@ pub struct CachedParse {
   /// alongside an already-cached model won't surface until that model
   /// file changes or the daemon restarts — an accepted edge case.
   pub multimodal: Option<crate::discovery::Multimodal>,
-  /// The id of the backend that auto-claims this header (a routing predicate),
-  /// or `None`. Computed on the same cache-miss header parse as `metadata`, so
-  /// a warm rescan reuses the verdict instead of re-reading tensor info.
-  /// Determined generically over the backend registry — names no backend.
-  pub routed_backend: Option<String>,
+  /// The backends that can serve this model, priority-ordered (first = the
+  /// auto-route default). Computed on the same cache-miss header parse as
+  /// `metadata`, so a warm rescan reuses the verdict instead of re-reading
+  /// tensor info. Determined generically over the backend registry — names no
+  /// backend. See [`crate::backend::supported_backends_for`].
+  pub supported_backends: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -194,7 +195,7 @@ mod tests {
       }),
       parse_error: None,
       multimodal: None,
-      routed_backend: None,
+      supported_backends: Vec::new(),
     }
   }
 
