@@ -6,6 +6,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 - `llamastash config` opens the active config file in `$EDITOR`.
 - `llamastash config bindings` prints every effective keybinding as YAML for copying between configs.
+- The launch picker's Device row is a multi-GPU checkbox toggle — `Space` toggles the cursor GPU, `←/→` walk, scoped to the selected server (unset = all GPUs); the right-pane header badges every backend a model supports (e.g. ` ds4  llamacpp `), and `doctor` gains a configured-servers advisory (warns on a missing `servers[].binary`, summarizes the rest).
 
 ### Changed
 

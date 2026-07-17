@@ -310,6 +310,10 @@ pub enum Action {
   /// Right pane; dispatches only when the active right tab is
   /// Settings.
   CycleValuePrev,
+  /// Toggle the launch picker's Device row cursor GPU into/out of the
+  /// multi-select. Bound to `Space` in the Right pane; dispatches only in
+  /// Settings when the focused field is the multi-GPU Device row.
+  ToggleDevice,
 }
 
 /// Editorial grouping for the help overlay. Independent of
@@ -783,6 +787,11 @@ fn build_default_bindings() -> Vec<Binding> {
     hint: "prev value", description: None,
     chords: [(KeyCode::Left, KeyModifiers::NONE, "←", CAT_SETTINGS)],
   });
+  v.extend_from_slice(&binds! {
+    action: Action::ToggleDevice, scopes: FocusSet::RIGHT_PANE,
+    hint: "toggle GPU", description: Some("toggle GPU in multi-select"),
+    chords: [(KeyCode::Char(' '), KeyModifiers::NONE, "Space", CAT_SETTINGS)],
+  });
   // ─── Enter — four Action variants across disjoint scopes ────
   v.extend_from_slice(&binds! {
     action: Action::OpenLaunchPicker, scopes: FocusSet::LIST,
@@ -1187,6 +1196,7 @@ impl Action {
     ("prev_field", Action::PrevField),
     ("cycle_value_next", Action::CycleValueNext),
     ("cycle_value_prev", Action::CycleValuePrev),
+    ("toggle_device", Action::ToggleDevice),
   ];
 
   /// Parse a config-name (snake_case or kebab-case) into an action.

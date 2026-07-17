@@ -338,6 +338,10 @@ impl Backend for LemonadeBackend {
       .unwrap_or_default()
   }
 
+  fn config_servers(&self, config: &crate::config::Config) -> Vec<crate::backend::ServerConfig> {
+    config.backend.lemonade.servers.clone()
+  }
+
   async fn status_accelerators(&self, ctx: &MethodContext, _device: &[Accelerator]) -> Vec<String> {
     // Prefer what lemond actually has installed (live `system-info` probe) over
     // the static capability floor — the static `[cpu, npu]` misses a

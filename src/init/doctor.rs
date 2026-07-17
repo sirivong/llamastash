@@ -421,6 +421,62 @@ fn check_gtt_hint(hardware: &HardwareSnapshot) -> Option<Finding> {
 
 use crate::init::detection::fmt_gib;
 
+/// Info fix hint for the configured-servers summary — nothing to act on.
+const SERVERS_CONFIGURED_FIX: &str = "(no action — informational)";
+/// Warning fix hint when a configured server binary path no longer exists.
+const SERVER_MISSING_FIX: &str =
+  "fix or remove the `backend.<id>.servers[].binary` path that no longer exists (see docs/usage.md#servers)";
+
+/// Server-catalog advisory (config-only, no daemon): warn on a configured
+/// `servers:` binary that no longer resolves to a file, and — when any server
+/// is configured — summarize the resolvable servers with their probed device
+/// counts. Stays silent on a default install that configures no `servers:` (the
+/// primary is PATH-resolved and covered by `BinaryMissing`). Additive string
+/// finding ids, so the doctor schema stays 2.
+fn check_servers(config: &Config) -> Vec<Finding> {
+  let mut out = Vec::new();
+  let missing = crate::backend::missing_configured_servers(config);
+  for (backend_id, path) in &missing {
+    out.push(Finding::from_parts(
+      "server_binary_missing",
+      Severity::Warning,
+      format!(
+        "configured {backend_id} server binary not found: {}",
+        path.display()
+      ),
+      SERVER_MISSING_FIX,
+    ));
+  }
+  let catalog = crate::backend::config_server_catalog(config);
+  if catalog.is_empty() && missing.is_empty() {
+    return out;
+  }
+  let summary = catalog
+    .iter()
+    .map(|s| match s.devices.len() {
+      0 => s.id.clone(),
+      1 => format!("{} (1 GPU)", s.id),
+      n => format!("{} ({n} GPUs)", s.id),
+    })
+    .collect::<Vec<_>>()
+    .join(", ");
+  let msg = if summary.is_empty() {
+    format!(
+      "{} configured server binary/binaries not found",
+      missing.len()
+    )
+  } else {
+    format!("{} configured server(s): {summary}", catalog.len())
+  };
+  out.push(Finding::from_parts(
+    "servers_configured",
+    Severity::Info,
+    msg,
+    SERVERS_CONFIGURED_FIX,
+  ));
+  out
+}
+
 /// Freshen the persisted snapshot's `bundle_date` against the latest
 /// available remote so the staleness check reflects what the recommender
 /// would actually use, not the binary's bundled date. The recommender
@@ -673,6 +729,9 @@ pub async fn run(args: DoctorArgs, _cli: &Cli, config: &Config) -> CliResult {
       .findings
       .extend(backend.doctor_findings(config).await);
   }
+
+  // Server-catalog advisory: configured `servers:` health across backends.
+  report.findings.extend(check_servers(config));
 
   if args.json {
     println!(
@@ -1129,5 +1188,59 @@ mod tests {
       report.findings.len()
     );
     console::set_colors_enabled(prior_colors);
+  }
+
+  #[test]
+  fn check_servers_silent_without_configured_servers() {
+    // A default install configures no `servers:` (PATH-resolved primary) — the
+    // advisory stays quiet rather than adding noise.
+    assert!(check_servers(&Config::default()).is_empty());
+  }
+
+  #[test]
+  fn check_servers_warns_on_a_missing_configured_binary() {
+    let mut config = Config::default();
+    config.backend.llamacpp.servers = vec![crate::backend::ServerConfig {
+      binary: std::path::PathBuf::from("/nonexistent/build-xyz/bin/llama-server"),
+      name: None,
+    }];
+    let findings = check_servers(&config);
+    assert!(
+      findings.iter().any(|f| f.id == "server_binary_missing"
+        && f.severity == Severity::Warning
+        && f.message.contains("llamacpp")
+        && f.message.contains("llama-server")),
+      "warning naming the backend + missing path"
+    );
+    // The summary still lists the count of configured binaries.
+    assert!(findings.iter().any(|f| f.id == "servers_configured"));
+  }
+
+  #[test]
+  fn check_servers_summarizes_a_present_binary() {
+    // A present binary resolves into the config catalog (0 GPUs from the failed
+    // probe of a non-llama-server file), so the info summary lists it and no
+    // warning fires.
+    let dir = crate::test_support::unique_temp_dir("doctor-servers", "present");
+    let bin = dir.join("llama-server");
+    std::fs::write(&bin, b"not a real server").unwrap();
+    let mut config = Config::default();
+    config.backend.llamacpp.servers = vec![crate::backend::ServerConfig {
+      binary: bin,
+      name: None,
+    }];
+    let findings = check_servers(&config);
+    assert!(
+      !findings.iter().any(|f| f.id == "server_binary_missing"),
+      "a present binary must not warn"
+    );
+    let info = findings
+      .iter()
+      .find(|f| f.id == "servers_configured")
+      .expect("info summary present");
+    assert_eq!(info.severity, Severity::Info);
+    assert!(info.message.contains("configured server"));
+    assert!(info.safe_to_log);
+    std::fs::remove_dir_all(&dir).ok();
   }
 }

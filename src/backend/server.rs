@@ -56,7 +56,7 @@ pub struct ServerSpec {
 /// A resolved server: one build/binary of a backend, with its probed devices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Server {
-  /// Stable selection / persistence key (`llamacpp-rocm`, `ds4-ds4`). Also the
+  /// Stable selection / persistence key (`llamacpp-rocm`, `ds4`). Also the
   /// display label — derived once by [`build_server_catalog`].
   pub id: String,
   /// The backend that owns this server (`llamacpp` / `ds4` / `lemonade`).
@@ -193,12 +193,114 @@ pub fn build_server_catalog(ctx: &MethodContext) -> Vec<Server> {
       .into_iter()
       .map(|spec| {
         let devices = backend.probe_devices(&spec.binary);
+        #[cfg(debug_assertions)]
+        let devices = debug_fake_multi_gpu(devices);
         (spec, devices)
       })
       .collect();
     out.extend(derive_servers(&backend_id, probed));
   }
   out
+}
+
+/// Config-only server catalog for read-only diagnostics (`doctor`), which runs
+/// without a daemon [`MethodContext`]. Enumerates each backend's configured
+/// `servers:` from [`crate::config::Config`] via [`Backend::config_servers`],
+/// skips any whose
+/// binary doesn't resolve to a file, probes the rest for devices, and derives
+/// ids exactly like [`build_server_catalog`]. Names no backend — the registry
+/// loop is the whole wiring.
+pub fn config_server_catalog(config: &crate::config::Config) -> Vec<Server> {
+  let mut out = Vec::new();
+  for backend in Backends::all() {
+    let backend_id = backend.id().to_string();
+    let probed: Vec<(ServerSpec, Vec<Device>)> = backend
+      .config_servers(config)
+      .into_iter()
+      .filter_map(|sc| {
+        let resolved =
+          crate::util::paths::canonicalize(&sc.binary).unwrap_or_else(|_| sc.binary.clone());
+        if !resolved.is_file() {
+          return None;
+        }
+        let devices = backend.probe_devices(&resolved);
+        Some((
+          ServerSpec {
+            binary: resolved,
+            name: sc.name,
+          },
+          devices,
+        ))
+      })
+      .collect();
+    out.extend(derive_servers(&backend_id, probed));
+  }
+  out
+}
+
+/// Configured server binaries whose path does **not** resolve to a file, paired
+/// with the owning backend id — the `doctor` server advisory's warning input.
+/// Reads config alone (no probe).
+pub fn missing_configured_servers(config: &crate::config::Config) -> Vec<(String, PathBuf)> {
+  let mut out = Vec::new();
+  for backend in Backends::all() {
+    for sc in backend.config_servers(config) {
+      let resolved =
+        crate::util::paths::canonicalize(&sc.binary).unwrap_or_else(|_| sc.binary.clone());
+      if !resolved.is_file() {
+        out.push((backend.id().to_string(), sc.binary));
+      }
+    }
+  }
+  out
+}
+
+/// Debug-only multi-GPU simulator for the **launch device catalog**, compiled
+/// out of release builds (`#[cfg(debug_assertions)]`). When
+/// `LLAMASTASH_DEBUG_FAKE_GPUS=N` (N >= 2) is set on the **daemon** process of a
+/// debug build, each device-bearing server's probe is fanned out into N
+/// synthetic devices (stepped selector + name) so the picker's multi-device row,
+/// the server-scoped gating, and `main_gpu`/`tensor_split` can be exercised on a
+/// single-GPU host. Sibling of the host-metrics simulator
+/// (`host_metrics::debug_fake_multi_gpu`), which independently fans out the
+/// display GPUs — this one is the launch-selector list. A device-less server
+/// (ds4 / lemonade / CPU-only build) has nothing to fan out and is left as-is.
+#[cfg(debug_assertions)]
+fn debug_fake_multi_gpu(devices: Vec<Device>) -> Vec<Device> {
+  let n: usize = match std::env::var("LLAMASTASH_DEBUG_FAKE_GPUS")
+    .ok()
+    .and_then(|v| v.parse().ok())
+  {
+    Some(n) if n >= 2 => n,
+    _ => return devices,
+  };
+  fan_out_devices(devices, n)
+}
+
+/// Fan the first probed device out into `n` synthetic clones (stepped selector +
+/// name). Empty in, empty out; a device-less server has nothing to clone. Pure
+/// so it is unit-testable without touching the env var.
+#[cfg(debug_assertions)]
+fn fan_out_devices(devices: Vec<Device>, n: usize) -> Vec<Device> {
+  let Some(seed) = devices.into_iter().next() else {
+    return Vec::new();
+  };
+  // The selector's alphabetic prefix (`ROCm0` -> `ROCm`) becomes the stem for
+  // the synthetic selectors `ROCm0..ROCm(N-1)`, matching real llama.cpp naming.
+  let prefix: String = seed
+    .selector
+    .chars()
+    .take_while(|c| c.is_ascii_alphabetic())
+    .collect();
+  (0..n)
+    .map(|i| Device {
+      selector: format!("{prefix}{i}"),
+      gpu_backend: seed.gpu_backend.clone(),
+      name: format!("{} (fake #{i})", seed.name),
+      total_mib: seed.total_mib,
+      free_mib: seed.free_mib,
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -303,6 +405,24 @@ mod tests {
     // The compute type for a device-less backend comes from `name:` (`rocm`).
     let servers = derive_servers("ds4", vec![(spec("/x/ds4-server", Some("rocm")), vec![])]);
     assert_eq!(servers[0].id, "ds4-rocm");
+  }
+
+  #[test]
+  fn fake_gpu_fan_out_steps_selectors_from_one_seed() {
+    let out = fan_out_devices(vec![dev("ROCm0", "ROCm")], 3);
+    assert_eq!(out.len(), 3);
+    assert_eq!(
+      out.iter().map(|d| d.selector.as_str()).collect::<Vec<_>>(),
+      ["ROCm0", "ROCm1", "ROCm2"]
+    );
+    // Same compute backend, distinct names (so the picker dedup keeps them).
+    assert!(out.iter().all(|d| d.gpu_backend == "ROCm"));
+    assert_ne!(out[0].name, out[1].name);
+  }
+
+  #[test]
+  fn fake_gpu_fan_out_of_a_deviceless_server_stays_empty() {
+    assert!(fan_out_devices(vec![], 4).is_empty());
   }
 
   #[test]

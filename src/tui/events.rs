@@ -1043,6 +1043,8 @@ fn apply_action(app: &mut App, action: Action, writer: Option<&mpsc::Sender<Writ
     // keys stay unbound so they don't double as pane navigation.
     Action::CycleValueNext => apply_cycle_value(app, ValueDir::Next),
     Action::CycleValuePrev => apply_cycle_value(app, ValueDir::Prev),
+    // Space toggles the focused GPU on the picker's multi-GPU Device row.
+    Action::ToggleDevice => apply_toggle_device(app),
     // HF dialog stage chords (`o`, `n`, `p`) dispatch via the dialog's
     // own per-stage handler in `handle_hf_dialog_input`. The Action
     // variants exist only so the help overlay can list them — if one
@@ -1158,6 +1160,25 @@ fn apply_cycle_value(app: &mut App, dir: ValueDir) {
   if !cyclable {
     app.show_toast("nothing to cycle — focused field has no preset values");
   }
+}
+
+/// `Space` on the picker's Device row toggles the cursor GPU in/out of the
+/// multi-select. Inert everywhere else — only fires in the Settings tab with the
+/// editable picker focused on the (multi-GPU) Device row.
+fn apply_toggle_device(app: &mut App) {
+  use crate::launch::flag_aliases::KnobField;
+  use crate::tui::launch_picker::PickerField;
+  if !(app.focus == Focus::RightPane && app.right_tab == RightTab::Settings) {
+    return;
+  }
+  if running_view_is_locked(app) {
+    return;
+  }
+  with_picker(app, |p| {
+    if p.field == PickerField::Knob(KnobField::Device) {
+      p.toggle_focused_device();
+    }
+  });
 }
 
 /// Auto-materialise the inline Settings picker if absent, then run

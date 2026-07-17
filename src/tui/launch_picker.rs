@@ -264,10 +264,14 @@ pub struct LaunchPickerState {
   /// the Device row + multi-GPU gating scope to the [`Self::current_server`].
   /// Empty when the daemon hasn't probed any binary.
   pub servers: Vec<crate::backend::Server>,
-  /// The user's chosen server id (`llamacpp·vulkan`, `ds4·ds4`), or `None` for
+  /// The user's chosen server id (`llamacpp-vulkan`, `ds4`), or `None` for
   /// the priority default (`servers[0]`). Sent verbatim as
   /// [`crate::launch::params::LaunchParams::server`]; seeded from last_params.
   pub selected_server: Option<String>,
+  /// Walk cursor over the scoped server's devices — the GPU `Space` toggles.
+  /// ←/→ move it; it does **not** itself select. Clamped to the device count
+  /// on render; reset to 0 when the scoped server changes.
+  device_cursor: usize,
   /// Effective presets for this model (per-model ∪ arch), name-sorted —
   /// the cycle stops below `auto`. Empty for a model with no presets, in
   /// which case the Preset row is hidden.
@@ -310,6 +314,7 @@ impl LaunchPickerState {
       prefer_port: None,
       servers: Vec::new(),
       selected_server: None,
+      device_cursor: 0,
       presets: Vec::new(),
       default_stop: PresetStop::LastUsed,
       preset_stop: PresetStop::LastUsed,
@@ -486,6 +491,7 @@ impl LaunchPickerState {
       i => Some(ids[i - 1].clone()),
     };
     self.set_user_str(KnobField::Device, None);
+    self.device_cursor = 0;
     self.seed_native_descriptors();
   }
 
@@ -752,7 +758,7 @@ impl LaunchPickerState {
       KnobField::FlashAttn | KnobField::Mlock | KnobField::NoMmap => {
         self.cycle_bool(field, forward)
       }
-      KnobField::Device => self.cycle_device(field, forward),
+      KnobField::Device => self.walk_device_cursor(forward),
       // Free-form ratio with no natural preset set — edited via `e`.
       // ←/→ is a deliberate no-op (there's nothing to cycle through).
       KnobField::TensorSplit => {}
@@ -866,43 +872,85 @@ impl LaunchPickerState {
     }
   }
 
-  /// Cycle the Device row through the flat catalog. The cycle space is
-  /// `[default] + catalog selectors`: stepping off either end wraps back
-  /// to `None`. `default` already means "let llama-server pick the
-  /// device(s)", so the row carries no separate `Auto` stop (device is
-  /// not fit-governed). `user_knobs.device` holds the chosen selector
-  /// verbatim (`"Vulkan1"`), or `None` for default.
-  fn cycle_device(&mut self, field: KnobField, forward: bool) {
-    let selectors: Vec<String> = self
+  /// Walk the Device row's cursor over the scoped server's devices (←/→). The
+  /// cursor only *highlights* a GPU — `Space` ([`Self::toggle_focused_device`])
+  /// toggles it into/out of the selection. Wraps at both ends; a no-op on a
+  /// device-less server.
+  fn walk_device_cursor(&mut self, forward: bool) {
+    let n = self.current_devices().len();
+    if n == 0 {
+      return;
+    }
+    let cur = self.device_cursor.min(n - 1);
+    self.device_cursor = if forward {
+      (cur + 1) % n
+    } else {
+      (cur + n - 1) % n
+    };
+  }
+
+  /// The concrete set of selected `--device` selectors in catalog order. An
+  /// unset row means "all the server's GPUs" (the llama.cpp default), so it
+  /// materializes to the full device list — the checkbox view then shows every
+  /// box ticked, and toggling one off yields an explicit `N-1` set.
+  fn device_selection(&self) -> Vec<String> {
+    let devices: Vec<&str> = self
+      .current_devices()
+      .iter()
+      .map(|d| d.selector.as_str())
+      .collect();
+    match self
+      .effective_str(KnobField::Device)
+      .filter(|s| !s.is_empty())
+    {
+      None => devices.iter().map(|s| s.to_string()).collect(),
+      Some(csv) => {
+        let picked: std::collections::HashSet<&str> = csv
+          .split(',')
+          .map(str::trim)
+          .filter(|s| !s.is_empty())
+          .collect();
+        // Reorder against the catalog so `main_gpu` / `tensor_split` indices
+        // stay stable regardless of the persisted string's order.
+        devices
+          .iter()
+          .filter(|s| picked.contains(**s))
+          .map(|s| s.to_string())
+          .collect()
+      }
+    }
+  }
+
+  /// `Space` on the Device row: toggle the cursor's GPU in/out of the selection.
+  /// Re-serialized in catalog order into `user_knobs.device`. Both extremes
+  /// normalize to unset — selecting **all** N is the llama.cpp default (no
+  /// `--device`), and clearing the **last** one has no valid "zero GPUs"
+  /// meaning, so either snaps the row back to inherited (all GPUs).
+  pub fn toggle_focused_device(&mut self) {
+    let devices: Vec<String> = self
       .current_devices()
       .iter()
       .map(|d| d.selector.clone())
       .collect();
-    if selectors.is_empty() {
-      // No devices on the scoped server (CPU-only / device-less backend) —
-      // only the default exists, so any cycle resets to it.
-      self.set_user_str(field, None);
+    if devices.is_empty() {
       return;
     }
-    // Cycle positions: 0 = default (None), 1+i = selector[i]. A stale
-    // Auto coerces to default (position 0).
-    let cur_pos: usize = match self.user_value_str(field).filter(|s| !s.is_empty()) {
-      None => 0,
-      Some(sel) => selectors
-        .iter()
-        .position(|s| *s == sel)
-        .map(|i| i + 1)
-        .unwrap_or(0),
-    };
-    let len = selectors.len() + 1; // +default
-    let next_pos = if forward {
-      (cur_pos + 1) % len
+    let cursor = self.device_cursor.min(devices.len() - 1);
+    let target = &devices[cursor];
+    let mut picked: std::collections::HashSet<String> =
+      self.device_selection().into_iter().collect();
+    if !picked.remove(target) {
+      picked.insert(target.clone());
+    }
+    let ordered: Vec<String> = devices
+      .iter()
+      .filter(|s| picked.contains(*s))
+      .cloned()
+      .collect();
+    if ordered.is_empty() || ordered.len() == devices.len() {
+      self.set_user_str(KnobField::Device, None);
     } else {
-      (cur_pos + len - 1) % len
-    };
-    match next_pos {
-      0 => self.set_user_str(field, None),
-      i => self.set_user_str(field, Some(selectors[i - 1].to_string())),
+      self.set_user_str(KnobField::Device, Some(ordered.join(",")));
     }
   }
 
@@ -912,16 +960,9 @@ impl LaunchPickerState {
   /// the old hardcoded `[0, 1, 2, 3]` ring, which showed phantom GPU indices on
   /// a host with fewer than four devices.
   fn main_gpu_presets(&self) -> Vec<u32> {
-    let selected = self
-      .user_value_str(KnobField::Device)
-      .filter(|s| !s.is_empty())
-      .map(|s| s.split(',').filter(|t| !t.trim().is_empty()).count())
-      .unwrap_or(0);
-    let n = if selected > 0 {
-      selected
-    } else {
-      self.current_devices().len()
-    };
+    // `device_selection` already collapses unset -> "all GPUs", so the count of
+    // active devices is just its length.
+    let n = self.device_selection().len();
     (0..n.max(1) as u32).collect()
   }
 
@@ -938,8 +979,11 @@ impl LaunchPickerState {
       PickerField::Server => {
         self.selected_server = None;
         self.set_user_str(KnobField::Device, None);
+        self.device_cursor = 0;
         self.seed_native_descriptors();
       }
+      // Reset on the Device row re-inherits (all GPUs); the cursor stays put.
+      PickerField::Knob(KnobField::Device) => self.set_user_str(KnobField::Device, None),
       PickerField::Knob(k) => self.clear_user(k),
       PickerField::NativeKnob(i) => {
         if let Some(d) = self.native_descriptors.get(i) {
@@ -1127,24 +1171,42 @@ impl LaunchPickerState {
     self.user_knobs.slot_mut(field).clear();
   }
 
-  /// Display label for the Device row. Resolves the selector against
-  /// the catalog to show `"<name> (<backend>)"` (e.g.
-  /// `"NVIDIA GeForce RTX 3080 (Vulkan)"`). Falls back to the raw
-  /// selector when it isn't in the catalog (stale persisted value).
-  /// Returns `"inherited"` when no device is selected (llama-server
-  /// picks) — matching the unset-value label every other knob row uses.
+  /// Display for the Device row. With >1 device (the only case the row is
+  /// shown) it renders a checkbox list — `[x]`/`[ ]` per selector in catalog
+  /// order, the walk cursor marked with a leading `>`, and a `(all)` suffix
+  /// when every box is ticked (the unset / inherited default). `Space` toggles
+  /// the cursor's box; ←/→ move the cursor. Below two devices it degrades to
+  /// the plain `"<name> (<backend>)"` / `"inherited"` label.
   pub fn device_value_display(&self) -> String {
-    let sel = self
-      .effective_str(KnobField::Device)
-      .filter(|v| !v.is_empty());
-    sel
-      .map(
-        |s| match self.current_devices().iter().find(|d| d.selector == s) {
+    let devices = self.current_devices();
+    if devices.len() < 2 {
+      let sel = self
+        .effective_str(KnobField::Device)
+        .filter(|v| !v.is_empty());
+      return sel
+        .map(|s| match devices.iter().find(|d| d.selector == s) {
           Some(d) => format!("{} ({})", d.name, d.gpu_backend),
-          None => s.to_string(),
-        },
-      )
-      .unwrap_or_else(|| INHERITED_LABEL.into())
+          None => s,
+        })
+        .unwrap_or_else(|| INHERITED_LABEL.into());
+    }
+    let picked: std::collections::HashSet<String> = self.device_selection().into_iter().collect();
+    let cursor = self.device_cursor.min(devices.len() - 1);
+    let mut parts: Vec<String> = Vec::with_capacity(devices.len());
+    for (i, d) in devices.iter().enumerate() {
+      let ticked = if picked.contains(&d.selector) {
+        "[x]"
+      } else {
+        "[ ]"
+      };
+      let mark = if i == cursor { ">" } else { " " };
+      parts.push(format!("{mark}{ticked}{}", d.selector));
+    }
+    let mut out = parts.join(" ");
+    if picked.len() == devices.len() {
+      out.push_str("  (all)");
+    }
+    out
   }
 }
 
@@ -1631,91 +1693,99 @@ mod tests {
   }
 
   #[test]
-  fn device_value_display_resolves_selector_to_name_and_backend() {
+  fn device_value_display_single_device_shows_name_and_backend() {
+    // Below two devices the row degrades to the plain name label (and is
+    // hidden in navigation) — the checkbox view only appears with >1 GPU.
     let mut s = LaunchPickerState::for_model("test");
-    s.servers = catalog_two_vendors();
-    // No selection → inherited (llama-server picks the device).
+    s.servers = one_server(vec![device("ROCm0", "ROCm", "AMD Radeon AI PRO R9700")]);
     assert_eq!(s.device_value_display(), "inherited");
-    s.set_user_str(KnobField::Device, Some("Vulkan1".into()));
-    assert_eq!(s.device_value_display(), "NVIDIA GeForce RTX 3080 (Vulkan)");
     s.set_user_str(KnobField::Device, Some("ROCm0".into()));
     assert_eq!(s.device_value_display(), "AMD Radeon AI PRO R9700 (ROCm)");
   }
 
   #[test]
-  fn device_value_display_unknown_selector_falls_back_to_raw() {
-    // A persisted selector no longer in the catalog still renders
-    // something useful rather than "inherited".
+  fn device_value_display_renders_checkbox_list_with_cursor_and_all() {
     let mut s = LaunchPickerState::for_model("test");
     s.servers = catalog_two_vendors();
-    s.set_user_str(KnobField::Device, Some("CUDA9".into()));
-    assert_eq!(s.device_value_display(), "CUDA9");
-  }
-
-  #[test]
-  fn cycle_device_walks_default_then_each_selector_and_wraps() {
-    let mut s = LaunchPickerState::for_model("test");
-    s.servers = catalog_two_vendors();
-    // Device is not fit-governed and `default` already means auto-select,
-    // so there is no Auto stop. Ring: default → Vulkan0 → Vulkan1 →
-    // ROCm0 → wrap.
-    assert_eq!(s.user_value_str(KnobField::Device), None);
-    s.cycle_device(KnobField::Device, true);
-    assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan0".into()));
-    assert!(
-      !s.user_is_auto(KnobField::Device),
-      "device has no Auto stop"
+    // Unset == all GPUs → every box ticked, cursor on the first, `(all)` tag.
+    assert_eq!(
+      s.device_value_display(),
+      ">[x]Vulkan0  [x]Vulkan1  [x]ROCm0  (all)"
     );
-    s.cycle_device(KnobField::Device, true);
-    assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan1".into()));
-    s.cycle_device(KnobField::Device, true);
-    assert_eq!(s.user_value_str(KnobField::Device), Some("ROCm0".into()));
-    // One more wraps back to default.
-    s.cycle_device(KnobField::Device, true);
-    assert_eq!(s.user_value_str(KnobField::Device), None);
-    assert!(!s.user_is_auto(KnobField::Device));
-  }
-
-  #[test]
-  fn cycle_device_backward_from_default_wraps_to_last() {
-    let mut s = LaunchPickerState::for_model("test");
-    s.servers = catalog_two_vendors();
-    s.cycle_device(KnobField::Device, false);
-    assert_eq!(s.user_value_str(KnobField::Device), Some("ROCm0".into()));
-    s.cycle_device(KnobField::Device, false);
-    assert_eq!(s.user_value_str(KnobField::Device), Some("Vulkan1".into()));
-  }
-
-  #[test]
-  fn cycle_device_stored_value_is_a_real_selector() {
-    // Regression: the stored value must be a llama-server selector
-    // (`Vulkan0`), never the old `card:driver` coordinate (`0:0`) that
-    // made llama-server bail with `invalid device`.
-    let mut s = LaunchPickerState::for_model("test");
-    s.servers = catalog_two_vendors();
-    // Two steps past Inherited → Auto → the first real selector.
-    s.cycle_device(KnobField::Device, true);
-    s.cycle_device(KnobField::Device, true);
-    let stored = s.user_value_str(KnobField::Device).unwrap().to_string();
-    assert!(
-      !stored.contains(':'),
-      "selector must not be a coordinate: {stored}"
+    // Toggle the cursor GPU off → explicit N-1 set, cursor stays, no `(all)`.
+    s.toggle_focused_device();
+    assert_eq!(
+      s.device_value_display(),
+      ">[ ]Vulkan0  [x]Vulkan1  [x]ROCm0"
     );
+  }
+
+  #[test]
+  fn walk_device_cursor_moves_and_wraps() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.servers = catalog_two_vendors();
+    s.field = PickerField::Knob(KnobField::Device);
+    // ←/→ walk the cursor without changing the selection.
+    s.cycle_focused_value_next();
     assert!(s
-      .current_server()
-      .unwrap()
-      .devices
-      .iter()
-      .any(|d| d.selector == stored));
+      .device_value_display()
+      .starts_with(" [x]Vulkan0 >[x]Vulkan1"));
+    s.cycle_focused_value_next();
+    assert!(s.device_value_display().contains(">[x]ROCm0"));
+    s.cycle_focused_value_next(); // wrap back to the first
+    assert!(s.device_value_display().starts_with(">[x]Vulkan0"));
+    // Selection untouched by walking.
+    assert_eq!(s.user_value_str(KnobField::Device), None);
   }
 
   #[test]
-  fn cycle_device_with_empty_catalog_stays_default() {
+  fn toggle_device_builds_catalog_ordered_selection() {
     let mut s = LaunchPickerState::for_model("test");
-    // No servers (CPU-only / no binary) — cycling resets to default.
-    s.cycle_device(KnobField::Device, true);
+    s.servers = catalog_two_vendors();
+    // Move cursor to ROCm0 (index 2) and toggle it off.
+    s.field = PickerField::Knob(KnobField::Device);
+    s.cycle_focused_value_next();
+    s.cycle_focused_value_next();
+    s.toggle_focused_device();
+    // Persisted string keeps catalog order (Vulkan0, Vulkan1), not toggle order.
+    assert_eq!(
+      s.user_value_str(KnobField::Device),
+      Some("Vulkan0,Vulkan1".into())
+    );
+  }
+
+  #[test]
+  fn toggle_all_devices_back_on_normalizes_to_unset() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.servers = catalog_two_vendors();
+    s.field = PickerField::Knob(KnobField::Device);
+    // Toggle the cursor GPU off, then on again → full set → unset (llama.cpp
+    // default: no `--device`).
+    s.toggle_focused_device();
+    assert_eq!(
+      s.user_value_str(KnobField::Device),
+      Some("Vulkan1,ROCm0".into())
+    );
+    s.toggle_focused_device();
     assert_eq!(s.user_value_str(KnobField::Device), None);
-    s.cycle_device(KnobField::Device, false);
+  }
+
+  #[test]
+  fn toggle_last_device_off_normalizes_to_unset() {
+    let mut s = LaunchPickerState::for_model("test");
+    s.servers = catalog_two_vendors();
+    s.field = PickerField::Knob(KnobField::Device);
+    // Pin a single device, then toggle it off → empty is invalid → unset.
+    s.set_user_str(KnobField::Device, Some("Vulkan0".into()));
+    s.toggle_focused_device(); // cursor at 0 = Vulkan0
+    assert_eq!(s.user_value_str(KnobField::Device), None);
+  }
+
+  #[test]
+  fn toggle_device_with_empty_catalog_is_a_no_op() {
+    let mut s = LaunchPickerState::for_model("test");
+    // No servers (CPU-only / no binary) — nothing to toggle.
+    s.toggle_focused_device();
     assert_eq!(s.user_value_str(KnobField::Device), None);
   }
 

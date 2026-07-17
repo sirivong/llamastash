@@ -594,48 +594,72 @@ fn focused_is_lemonade_registry(app: &App) -> bool {
   }
 }
 
-/// A backend identity chip for the header row. Any backend that warrants header
-/// identification returns one via [`focused_backend_badge`]; llama.cpp (the
-/// default) returns `None`. Backend-agnostic so a future backend adds a chip
-/// without touching the layout.
+/// A backend identity chip for the header row. Any focused model that resolves
+/// at least one backend returns one via [`focused_backend_badge`].
+/// Backend-agnostic so a future backend adds a chip without touching the layout.
 struct BackendBadge {
-  /// Chip text rendered with the accent background (e.g. `" ds4 "`) — the
-  /// resolved backend id, padded. Owned so it can name any backend generically.
+  /// Chip text rendered with the accent background — one or more backend ids,
+  /// padded (` ds4 ` for a running row, ` ds4  llamacpp ` for a selected
+  /// deepseek4 that both engines can serve). Owned so it names any backend
+  /// generically.
   chip: String,
 }
 
-/// Resolve the header badge for the focused model, or `None` when the backend
-/// warrants no chip. Drives both the badge render and the header layout (the
-/// badge row collapses to zero height when this is `None`, so its slot doesn't
-/// double the header gap). Add future backends as their own arms.
+/// Resolve the header badge for the focused model, or `None` when no backend
+/// resolves. Drives both the badge render and the header layout (the badge row
+/// collapses to zero height when this is `None`, so its slot doesn't double the
+/// header gap).
+///
+/// A **running** row keys on the launch's real backend (a single id — honest
+/// even for a compatible file force-run on the default). A **selected** row
+/// shows every backend that can serve the model — its `supported_backends`
+/// (priority order, so llama.cpp is **not hidden** when a second engine also
+/// serves the model, e.g. a deepseek4's ` ds4  llamacpp `), falling back to the
+/// `list_models` routing prediction, then the discovery-source backend.
+///
+/// A set that is *only* the default backend (a plain llama.cpp model, or a
+/// llama.cpp-only running row) is suppressed — the default is the implicit norm
+/// and a chip on every model would be noise. Plain id chips otherwise — no
+/// per-backend special-casing, so a new backend surfaces without touching this.
 fn focused_backend_badge(app: &App) -> Option<BackendBadge> {
   let path = focused_path(app)?;
   let running = app.right_pane_focus();
-  // The resolved backend id: a *running* row keys on the launch's real backend
-  // (honest even for a compatible file force-run on the default); a *selected*
-  // row on the `list_models` routing prediction, falling back to the model's
-  // discovery-source backend (a registry model always runs on its backend). A
-  // plain id chip — no per-backend special-casing, so a new backend surfaces a
-  // chip without touching this.
-  let backend_id: String = match running {
-    Some(m) => m.backend.clone()?,
-    None => app
-      .predicted_backend(&path)
-      .map(str::to_string)
-      .or_else(|| {
+  let ids: Vec<String> = match running {
+    Some(m) => vec![m.backend.clone()?],
+    None => {
+      let supported = app
+        .models
+        .iter()
+        .find(|m| m.path == path)
+        .map(|m| m.supported_backends.clone())
+        .unwrap_or_default();
+      if !supported.is_empty() {
+        supported
+      } else {
         app
-          .models
-          .iter()
-          .find(|m| m.path == path)
-          .map(|m| m.source.backend_id().to_string())
-      })?,
+          .predicted_backend(&path)
+          .map(str::to_string)
+          .or_else(|| {
+            app
+              .models
+              .iter()
+              .find(|m| m.path == path)
+              .map(|m| m.source.backend_id().to_string())
+          })
+          .into_iter()
+          .collect()
+      }
+    }
   };
-  // The default backend (llama.cpp) is the implicit norm — no chip.
-  if backend_id == crate::backend::DEFAULT_BACKEND_ID {
+  if ids.is_empty()
+    || ids
+      .iter()
+      .all(|id| id == crate::backend::DEFAULT_BACKEND_ID)
+  {
     return None;
   }
   Some(BackendBadge {
-    chip: format!(" {backend_id} "),
+    chip: format!(" {} ", ids.join("  ")),
   })
 }
 
@@ -864,9 +888,9 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::Terminal;
     // The badge sits in the header row under the path, resolved via
-    // `focused_backend_badge` and painted by `render_header_badge`. A model
-    // with no backend badge (llama.cpp) resolves to `None` → empty row. The
-    // model name itself never contains "ds4".
+    // `focused_backend_badge` and painted by `render_header_badge`. A running
+    // row keys on the launch's actual backend (a single id). The model name
+    // itself never contains "ds4".
     let render_badge = |app: &App| -> String {
       let palette = app.palette();
       let Some(badge) = focused_backend_badge(app) else {
@@ -935,6 +959,32 @@ mod tests {
       .expect("model row present");
     let sel_badge = focused_backend_badge(&sel_app).expect("lemonade source → badge");
     assert_eq!(sel_badge.chip.trim(), "lemonade");
+  }
+
+  #[test]
+  fn selected_row_badges_all_supported_backends_including_llamacpp() {
+    // A selected (not-running) deepseek4 that both ds4 and llama.cpp can serve
+    // shows both, in priority order — and llama.cpp is no longer suppressed.
+    let mut app = App::new(AppOptions::default());
+    let mut m = fake_model();
+    m.supported_backends = vec!["ds4".into(), "llamacpp".into()];
+    app.models = vec![m];
+    app.list_cursor = app
+      .rendered_rows()
+      .iter()
+      .position(|r| r.path() == Some(std::path::Path::new("/m/qwen.gguf")))
+      .expect("model row present");
+    let badge = focused_backend_badge(&app).expect("selected multi-backend → badge");
+    // llama.cpp is not hidden when a second engine (ds4) also serves the model.
+    assert_eq!(badge.chip.trim(), "ds4  llamacpp");
+
+    // But a llama.cpp-*only* model stays chip-less — the default backend is the
+    // implicit norm, so a badge on every plain model would be noise.
+    app.models[0].supported_backends = vec!["llamacpp".into()];
+    assert!(
+      focused_backend_badge(&app).is_none(),
+      "llamacpp-only model must not carry a chip"
+    );
   }
 
   fn render_stats_text(app: &App) -> String {

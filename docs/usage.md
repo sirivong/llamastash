@@ -198,6 +198,7 @@ Bare letters are for tool actions (`f` favorite, `e` edit, `u/c/p` yank, `t` the
 | `insert_newline`                        | `Shift+Enter`                     | All input focuses (kitty-protocol terminals only)                                  |
 | `toggle_think_collapse`                 | `r`                               | Right pane (Chat tab)                                                              |
 | `toggle_auto_scroll`                    | `s`                               | Right pane (Logs)                                                                  |
+| `toggle_device`                         | `Space`                           | Right pane (Settings, launch picker Device row)                                    |
 
 The "nav focuses" alias means `List` + `RightPane`; "input focuses" means `ChatInput` + `EmbedInput` + `RerankInput`; "TUI focuses" is both groups combined.
 
@@ -850,7 +851,7 @@ Non-interactive contract: when stdout isn't a terminal and `--recommended` is no
 
 ### `llamastash doctor`
 
-Read-only diagnostic (its one write is the memory-drift baseline refresh). Re-runs hardware detection, diffs against `_init_snapshot.json`, and emits 0-8 findings with stable ids agents can branch on: `binary_missing`, `binary_digest_drift` (skipped on brew installs — routine `brew upgrade` legitimately rotates the digest), `hardware_drift`, `memory_drift`, `gtt_hint`, `snapshot_stale`, `config_mode_drift`, `remote_snapshot_unreachable`. When the local benchmark snapshot looks stale, `doctor` probes the latest remote (the same one the recommender prefers) before judging `snapshot_stale`, so it only fires when no fresher snapshot is actually reachable; `LLAMASTASH_OFFLINE` skips that probe.
+Read-only diagnostic (its one write is the memory-drift baseline refresh). Re-runs hardware detection, diffs against `_init_snapshot.json`, and emits findings with stable ids agents can branch on: `binary_missing`, `binary_digest_drift` (skipped on brew installs — routine `brew upgrade` legitimately rotates the digest), `hardware_drift`, `memory_drift`, `gtt_hint`, `snapshot_stale`, `config_mode_drift`, `remote_snapshot_unreachable`, plus two configured-server advisories — `server_binary_missing` (Warning: a `backend.<id>.servers[].binary` path no longer resolves) and `servers_configured` (Info: a summary of the resolvable servers and their device counts; silent when no `servers:` are configured). When the local benchmark snapshot looks stale, `doctor` probes the latest remote (the same one the recommender prefers) before judging `snapshot_stale`, so it only fires when no fresher snapshot is actually reachable; `LLAMASTASH_OFFLINE` skips that probe.
 
 ```
 llamastash doctor [--json]
@@ -983,7 +984,8 @@ default)`, `(built-in)`, `(model default)`).
 | Key       | Action                                                         |
 | --------- | -------------------------------------------------------------- |
 | `↑` / `↓` | Move between editor rows                                       |
-| `←` / `→` | Cycle the focused row's value through its preset list          |
+| `←` / `→` | Cycle the focused row's value (on the `device` row: walk the GPU cursor) |
+| `Space`   | Toggle the cursor GPU on the multi-GPU `device` row             |
 | `e`       | Open inline edit on a numeric / enum / extras row              |
 | `Enter`   | Commit an open inline edit; otherwise dispatch `start_model`   |
 | `Esc`     | Cancel an open inline edit, or return focus to the Models list |
@@ -1021,15 +1023,18 @@ across heterogeneous cards, `main_gpu` picks the primary GPU, and
 `split_mode` chooses `none|layer|row`. For per-tensor placement beyond
 these, `--override-tensor` works through the `extras` row.
 
-The `device` row (`--device` / `-d`) pins a model to one GPU instead of
-letting `llama-server` split it across every visible card. It cycles
-the device list that the configured `llama-server` binary reports via
-`--list-devices` (selectors such as `CUDA0`, `ROCm0`, `Vulkan0`),
-plus a `default` slot that emits no `--device` flag (auto-select).
-Backspace resets to `default`. The selector is passed through to
-`llama-server` verbatim, so only devices that binary actually exposes
-are offered — on a multi-vendor box, run a Vulkan-capable build to see
-every card.
+The `device` row (`--device` / `-d`) pins a model to a chosen subset of
+GPUs instead of letting `llama-server` split it across every visible
+card. In the TUI it's a **checkbox toggle**: `←/→` walk a cursor over
+the devices the selected server reports via `--list-devices` (selectors
+such as `CUDA0`, `ROCm0`, `Vulkan0`), and `Space` toggles the cursor's
+GPU in or out of the selection. Every box ticked (`(all)`) is the
+llama-server default — no `--device` flag — and clearing the last box
+snaps back to it; Backspace resets the row. Selectors are passed through
+verbatim (comma-joined for a multi-GPU pick, e.g. `ROCm0,ROCm1`), so
+only devices the server's binary exposes are offered — the list rescopes
+when you cycle the `server` row. On the CLI, `start --device ROCm0,ROCm1`
+takes the same comma-separated list.
 
 The whole **Multi-GPU placement** group (`device`, `tensor_split`,
 `main_gpu`, `split_mode`) — and the matching `Device` column in the

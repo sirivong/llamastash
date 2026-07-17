@@ -49,7 +49,10 @@ pub mod lemonade;
 pub mod llama_cpp;
 pub mod server;
 
-pub use server::{build_server_catalog, Device, Server, ServerConfig, ServerSpec};
+pub use server::{
+  build_server_catalog, config_server_catalog, missing_configured_servers, Device, Server,
+  ServerConfig, ServerSpec,
+};
 
 /// The default backend id — what a plain GGUF binds to (`backend_for_identity`)
 /// and the fallback for an unknown identity / persisted tag. Consumers that
@@ -506,6 +509,16 @@ pub trait Backend {
     Vec::new()
   }
 
+  /// This backend's configured servers read from [`crate::config::Config`]
+  /// **alone** (no daemon context) — the view read-only `doctor` needs. Returns
+  /// the raw
+  /// `backend.<id>.servers` entries; unlike [`Self::configured_servers`] it adds
+  /// no daemon-resolved PATH primary, reporting exactly what config declares.
+  /// Default: none.
+  fn config_servers(&self, _config: &crate::config::Config) -> Vec<ServerConfig> {
+    Vec::new()
+  }
+
   /// Probe one server binary for the GPU **devices** it can target (the exact
   /// `--device` selectors it accepts). Default empty — a backend with no
   /// device-selection surface (ds4 / lemonade). llama.cpp overrides with its
@@ -958,6 +971,10 @@ impl Backend for Backends {
 
   fn configured_servers(&self, ctx: &MethodContext) -> Vec<ServerSpec> {
     for_each_backend!(self, b => b.configured_servers(ctx))
+  }
+
+  fn config_servers(&self, config: &crate::config::Config) -> Vec<ServerConfig> {
+    for_each_backend!(self, b => b.config_servers(config))
   }
 
   fn probe_devices(&self, binary: &Path) -> Vec<Device> {

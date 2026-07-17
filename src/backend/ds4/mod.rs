@@ -640,6 +640,10 @@ impl Backend for Ds4Backend {
       .unwrap_or_default()
   }
 
+  fn config_servers(&self, config: &crate::config::Config) -> Vec<super::ServerConfig> {
+    config.backend.ds4.servers.clone()
+  }
+
   fn launch_priority(&self) -> i32 {
     // Purpose-built for DeepSeek-V4 — outranks llama.cpp for a compatible file.
     20
@@ -1249,14 +1253,32 @@ mod tests {
     std::fs::remove_dir_all(&dir).ok();
   }
 
-  #[tokio::test]
-  async fn doctor_advisory_absent_for_non_ds4_models() {
+  // Sync (not `#[tokio::test]`) so the env-lock guard is held across a plain
+  // `block_on`: the advisory folds `LLAMASTASH_MODEL_PATHS` into its scan, so a
+  // parallel test setting it must not leak a ds4 model in. `disable_scan` in the
+  // config already bounds the scan to `dir` — no need to touch `NO_SCAN` (which
+  // would race the `build_options` tests that read it).
+  #[test]
+  fn doctor_advisory_absent_for_non_ds4_models() {
     use crate::gguf::test_fixtures::build_minimal_gguf;
+    let _env = crate::cli::test_lock::serialize();
     let dir = crate::test_support::unique_temp_dir("doctor-ds4", "plain");
     std::fs::write(dir.join("qwen.gguf"), build_minimal_gguf("qwen2")).unwrap();
+    // Drop any inherited env path so the scan sees only `dir`.
+    let prev_paths = std::env::var_os("LLAMASTASH_MODEL_PATHS");
+    std::env::remove_var("LLAMASTASH_MODEL_PATHS");
     let config = ds4_scan_config(&dir);
+    let findings = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap()
+      .block_on(Ds4Backend::new().doctor_findings(&config));
+    match prev_paths {
+      Some(v) => std::env::set_var("LLAMASTASH_MODEL_PATHS", v),
+      None => std::env::remove_var("LLAMASTASH_MODEL_PATHS"),
+    }
     assert!(
-      Ds4Backend::new().doctor_findings(&config).await.is_empty(),
+      findings.is_empty(),
       "no advisory when no ds4-compatible model is present"
     );
     std::fs::remove_dir_all(&dir).ok();

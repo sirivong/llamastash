@@ -283,6 +283,10 @@ impl Backend for LlamaCppBackend {
     out
   }
 
+  fn config_servers(&self, config: &crate::config::Config) -> Vec<super::ServerConfig> {
+    config.backend.llamacpp.servers.clone()
+  }
+
   fn probe_devices(&self, binary: &Path) -> Vec<super::Device> {
     list_devices::probe_devices(binary)
   }
