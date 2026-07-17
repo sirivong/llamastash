@@ -2,9 +2,9 @@
 
 **Status:** in progress — breaking, target **0.1.0** (all breaking changes for the next version are acceptable; no migration). Supersedes the standalone A3 "device-catalog/TUI de-leak" (TODO R7): the neutral device-provider hook becomes per-server here.
 
-**Shipped (2026-07-16):** Stage 1 (neutral `Device`/`Server` types, `servers: []` config, the three hooks, generic boot catalog) · Stage 2 (server resolution + `start --server` + binary-from-server + persist + `supported_backends` in discovery/IPC/CLI) · Stage 3 partial (`split_mode: tensor`, `main_gpu` sized to real device count) · Stage 4 partial (`status.servers` + CLI `status --json`, `list` column + `supported_backends`, TUI daemon-pane server row grouped by backend) · Stage 5 (docs). E2E-verified: `--server llamacpp·vulkan` spawns the Vulkan build; `list --json` shows `ds4|llamacpp`; the daemon pane renders `…/build-hip/bin/llama-server (rocm|vulkan) · …/ds4-server (ds4)`.
+**Shipped (2026-07-16/17):** Stage 1 (neutral `Device`/`Server` types, `servers: []` config, the three hooks, generic boot catalog) · Stage 2 (server resolution + `start --server` + binary-from-server + persist + `supported_backends` in discovery/IPC/CLI) · Stage 3 partial (`split_mode: tensor`, `main_gpu` sized to real device count; server-scoped multi-GPU gating) · Stage 4 (`status.servers` **replaces** `device_catalog`, + CLI `status --json`, `list` column + `supported_backends`, TUI daemon-pane server row grouped by backend, **TUI launch-picker `server` row** under `preset` with server-scoped device list + cross-backend knob-set swap, seeded from `last_params`) · Stage 5 (docs). Server ids use a plain `-` separator (`llamacpp-rocm`); a device-less engine is the bare backend id or `name:`-labelled (`ds4-rocm`). E2E-verified on real 2-build (ROCm+Vulkan) host: `--server llamacpp-vulkan` spawns the Vulkan build, `--server llamacpp-rocm` the ROCm build; `status.servers` carries both (no `device_catalog`); `list --json` shows the `supported_backends`; the TUI picker's `server` row opens on the `last_params` build (surfaced a real bug — `last_params_list` wasn't projecting `server` — now fixed + regression-tested).
 
-**Deferred (follow-ups, not gaps):** the TUI **server-selection knob** (after the preset row) and the **multi-device inline-toggle** UI — the CLI `--server` and `--device sel1,sel2` paths already deliver both; a `doctor` server/device advisory; TUI right-pane per-backend badges beyond the primary; the full `device_catalog`→`servers` wire rename (both are emitted today). Tracked in `TODO.md`.
+**Deferred (follow-ups, not gaps):** the **multi-device inline-toggle** UI (Space toggles the focused GPU) — the CLI `--device sel1,sel2` path already delivers multi-select; a `doctor` server/device advisory; TUI right-pane per-backend badges beyond the primary. Tracked in `TODO.md`.
 
 ## Terminology (two distinct levels — do not collapse)
 
@@ -154,12 +154,18 @@ DXGI software-adapter filter; add a test asserting the server list and
 
 ### Naming derivation (server `id` / display `name`)
 
-1. explicit `name:` → `<backend>·<name>` (e.g. `llamacpp·rocm`);
-2. else `<backend>·<gpu_backend>` **if unique** among that backend's servers;
-3. else (same gpu_backend on two builds, or no devices) →
-   `<backend>·<binary-parent-dir-basename>` (`llamacpp·build-hip` vs
-   `llamacpp·build-hip-rocwmma`);
-4. still-colliding → `#N` in config order.
+Plain `-` separator (typeable — no middle-dot):
+
+1. explicit `name:` → `<backend>-<name>` (e.g. `llamacpp-rocm`);
+2. else `<backend>-<gpu_backend>` **if unique** among that backend's servers
+   (from the device probe: `rocm` / `vulkan` / `cuda` / `metal`);
+3. else, same gpu_backend on two builds →
+   `<backend>-<binary-parent-dir-basename>` (`llamacpp-build-hip` vs
+   `llamacpp-build-hip-rocwmma`);
+4. **device-less** server (no `--list-devices` probe — ds4 / lemonade / a
+   CPU-only build; compute type unknowable) → the **bare backend id** (`ds4`,
+   `lemonade`), so use `name:` to label ds4's Metal/CUDA/ROCm build (`ds4-rocm`);
+5. still-colliding → `-N` in config order.
 
 ## Trait hooks (`Backend`)
 

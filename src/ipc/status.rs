@@ -275,41 +275,12 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
   // }
   // ```
   let proxy = ctx.proxy_status.as_ref().map(project_proxy_status);
-  // Launch device catalog — the exact `--device` selectors the TUI
-  // picker may offer, each tagged with the binary that owns it.
-  // Sourced from every configured binary's `--list-devices` (not from
-  // vendor tools), so what the picker shows is precisely what
-  // `llama-server` will accept. Empty when no binary is configured.
-  let device_catalog = match ctx.launch.as_ref() {
-    Some(env) => {
-      // Flatten the server catalog into the legacy per-device rows (each tagged
-      // with its owning server's binary), deduped by selector — first server
-      // wins, matching the old catalog. Stage 4 replaces this with `servers`.
-      let servers = env.servers.read().await;
-      let mut seen = std::collections::HashSet::new();
-      let mut rows = Vec::new();
-      for s in servers.iter() {
-        for d in &s.devices {
-          if !seen.insert(d.selector.clone()) {
-            continue;
-          }
-          rows.push(json!({
-            "selector": d.selector,
-            "backend": d.gpu_backend,
-            "name": d.name,
-            "binary": s.binary.display().to_string(),
-            "total_mib": d.total_mib,
-            "free_mib": d.free_mib,
-          }));
-        }
-      }
-      Value::Array(rows)
-    }
-    None => Value::Null,
-  };
   // Neutral server catalog: every backend's build/binary variants, each with
-  // its probed devices + derived id. The `list`/status surfaces read this; the
-  // flat `device_catalog` above stays as the legacy per-device projection.
+  // its probed devices + derived id. The single launch-device surface the TUI
+  // picker and CLI read — each server carries the `--device` selectors its own
+  // binary accepts, sourced from that binary's `--list-devices` (not vendor
+  // tools), so what the picker offers is precisely what `llama-server` accepts.
+  // Empty array when no binary is configured.
   let servers = match ctx.launch.as_ref() {
     Some(env) => serde_json::to_value(&*env.servers.read().await).unwrap_or(Value::Null),
     None => Value::Array(Vec::new()),
@@ -320,7 +291,6 @@ pub(crate) async fn status_response(ctx: &MethodContext) -> Value {
     "external": external,
     "gpu": gpu,
     "host": host,
-    "device_catalog": device_catalog,
     "servers": servers,
     "backends": backends,
     "daemon": {
@@ -571,16 +541,7 @@ mod tests {
     keys.sort_unstable();
     assert_eq!(
       keys,
-      vec![
-        "backends",
-        "daemon",
-        "device_catalog",
-        "external",
-        "gpu",
-        "host",
-        "models",
-        "servers",
-      ],
+      vec!["backends", "daemon", "external", "gpu", "host", "models", "servers",],
       "catalog-only status top-level keys drifted"
     );
   }

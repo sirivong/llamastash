@@ -110,6 +110,24 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       palette,
       show_source,
     ));
+    // Server (build/binary) cycle row, just under the preset row — shown only
+    // when the model has more than one compatible server (a real choice). No
+    // source chip: it's a selector, not an inherited value.
+    if pv.field_visible(PickerField::Server) {
+      let server_focused = pv.field == PickerField::Server;
+      if server_focused {
+        focused_line = Some(lines.len() as u16);
+      }
+      lines.push(crate::tui::fmt::kv_row_focused(
+        "server",
+        pv.server_value_label(),
+        None,
+        server_focused,
+        true,
+        palette,
+        show_source,
+      ));
+    }
   }
 
   // Every typed knob flows through the same `value (chip)` row shape in
@@ -698,6 +716,7 @@ mod tests {
         backend_knobs: Default::default(),
         extras: vec!["--rope-freq-base".into(), "10000".into()],
         port: Some(41100),
+        server: None,
       },
     );
     app.list_cursor = 2;
@@ -833,6 +852,7 @@ mod tests {
           backend_knobs: Default::default(),
           extras: vec![],
           port: Some(41100),
+          server: None,
         },
       );
       app.list_cursor = 2;

@@ -850,6 +850,9 @@ fn launch_params_row(p: &LaunchParams) -> Value {
     "reasoning": p.reasoning,
     "knobs": &p.knobs,
     "extras": p.extras.iter().map(|s| s.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+    // Chosen server build (`null` when none) so the TUI picker's Server row
+    // reopens on the last-used build.
+    "server": p.server,
   });
   // Native knobs are additive and omitted when empty, so the row stays
   // byte-stable for llama.cpp / Lemonade (neither declares native knobs).
@@ -983,6 +986,28 @@ mod tests {
       row2["backend_knobs"]["kv_disk_dir"],
       serde_json::json!("/tmp/kv"),
       "set backend_knobs round-trips into the row"
+    );
+  }
+
+  #[test]
+  fn launch_params_row_carries_server_pick_for_the_tui() {
+    // Regression: the server pick is persisted in `last_params` but was
+    // dropped from the `last_params_list` projection, so the TUI picker's
+    // Server row never reopened on the last-used build.
+    use crate::launch::mode::LaunchMode;
+    use std::path::PathBuf;
+    let lp = LaunchParams::new(PathBuf::from("/m/a.gguf"), LaunchMode::Chat);
+    assert_eq!(
+      launch_params_row(&lp)["server"],
+      serde_json::Value::Null,
+      "no pick → null"
+    );
+    let mut lp2 = LaunchParams::new(PathBuf::from("/m/a.gguf"), LaunchMode::Chat);
+    lp2.server = Some("llamacpp-vulkan".into());
+    assert_eq!(
+      launch_params_row(&lp2)["server"],
+      serde_json::json!("llamacpp-vulkan"),
+      "the picked server build round-trips into the row for the TUI"
     );
   }
 

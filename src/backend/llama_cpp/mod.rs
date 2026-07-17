@@ -17,7 +17,7 @@ mod compose;
 pub mod list_devices;
 
 use compose::compose;
-pub use list_devices::{parse_list_devices, probe_devices, BinaryDevice, LaunchDevice};
+pub use list_devices::{parse_list_devices, probe_devices, BinaryDevice};
 
 use std::path::{Path, PathBuf};
 

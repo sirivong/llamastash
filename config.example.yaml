@@ -358,11 +358,13 @@ backend:
     # probed with `--list-devices` at daemon start to build the launch
     # server/device catalog, so one install can offer CUDA / ROCm / Vulkan
     # launches by listing the matching single-backend builds — every entry
-    # is its own selectable server (no dedup across builds). Devices are not
-    # labelled by backend here; the compute backend is inferred from each
-    # binary's own device names (`CUDA0`, `ROCm0`, `Vulkan0`). An optional
-    # per-server `name:` overrides the auto-derived label. Leave the list
-    # empty to fall back to a `llama-server` on `$PATH`.
+    # is its own selectable server (no dedup across builds). Each server gets
+    # a stable id you pass to `start --server` and cycle in the TUI's Server
+    # row: it auto-derives as `<backend>-<compute>` from the binary's own
+    # device names (`llamacpp-cuda`, `llamacpp-rocm`, `llamacpp-vulkan`), or
+    # `<backend>-<build-dir>` when two builds share a compute type. An optional
+    # per-server `name:` overrides it (`llamacpp-<name>`). Leave the list empty
+    # to fall back to a `llama-server` on `$PATH`.
     #
     # Sources — CLI: --llama-server PATH (sets the first entry) ·
     #           Env: LLAMASTASH_LLAMA_SERVER=PATH.
@@ -462,11 +464,15 @@ backend:
     enabled: true
 
     # The `ds4-server` binary (single-entry `servers` list). Leave empty
-    # to fall back to a `ds4-server` found on `$PATH`.
+    # to fall back to a `ds4-server` found on `$PATH`. ds4-server has no
+    # `--list-devices` probe, so its compute type (Metal / CUDA / ROCm —
+    # ds4 has no Vulkan build) can't be auto-detected: the server id is the
+    # bare `ds4`. Set `name:` to label it — `name: rocm` → id `ds4-rocm`.
     #
     # Sources — CLI: (none) · Env: (none). Config-only.
     servers:
       - binary: /opt/ds4/ds4-server
+        name: rocm
 
 # ─── Keybindings ──────────────────────────────────────────────────
 #

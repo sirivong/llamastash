@@ -499,7 +499,6 @@ fn format_uptime(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::backend::llama_cpp::LaunchDevice;
   use crate::daemon::host_metrics::HostMetricsSnapshot;
   use crate::discovery::{DiscoveredModel, ModelSource};
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
@@ -749,13 +748,18 @@ mod tests {
       server_path: Some("/usr/bin/llama-server".into()),
       ..Default::default()
     };
-    app.device_catalog = vec![LaunchDevice {
-      selector: "CUDA1".into(),
-      backend: "CUDA".into(),
-      name: "Test GPU".into(),
+    app.servers = vec![crate::backend::Server {
+      id: "llamacpp-cuda".into(),
+      backend_id: "llamacpp".into(),
       binary: PathBuf::from("/opt/cuda/llama-server"),
-      total_mib: Some(24576),
-      free_mib: Some(24000),
+      name: "llamacpp-cuda".into(),
+      devices: vec![crate::backend::Device {
+        selector: "CUDA1".into(),
+        gpu_backend: "CUDA".into(),
+        name: "Test GPU".into(),
+        total_mib: Some(24576),
+        free_mib: Some(24000),
+      }],
     }];
     // Rows: [TableHeader, Header(▶ Running), Model] — running row at 2.
     app.list_cursor = 2;

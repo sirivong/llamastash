@@ -24,7 +24,7 @@
 //! same physical card stay distinct — they are genuinely different launch
 //! options (different compute backend, different binary).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -50,21 +50,6 @@ pub struct BinaryDevice {
   /// Total device memory in MiB, when the line carried it.
   pub total_mib: Option<u64>,
   /// Free device memory in MiB, when the line carried it.
-  pub free_mib: Option<u64>,
-}
-
-/// A launch-ready device: a [`BinaryDevice`] tagged with the binary
-/// that produced it, so the supervisor knows *which* `llama-server` to
-/// spawn for this selector.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LaunchDevice {
-  pub selector: String,
-  pub backend: String,
-  pub name: String,
-  /// Absolute path to the binary that reported this device — the one
-  /// the supervisor must spawn so the selector is valid.
-  pub binary: PathBuf,
-  pub total_mib: Option<u64>,
   pub free_mib: Option<u64>,
 }
 
@@ -260,34 +245,6 @@ random line: with a colon but not a selector
     assert_eq!(devs[0].name, "Some Adapter");
     assert_eq!(devs[0].total_mib, None);
     assert_eq!(devs[0].free_mib, None);
-  }
-
-  #[test]
-  fn build_catalog_dedups_by_selector_first_binary_wins() {
-    // Simulate by parsing two blocks and folding manually mirrors what
-    // build_catalog does across binaries — here we exercise the dedup
-    // rule directly through LaunchDevice assembly semantics.
-    let vulkan_a = parse_list_devices("  Vulkan0: Card A (100 MiB, 90 MiB free)\n");
-    let vulkan_b = parse_list_devices("  Vulkan0: Card A again (100 MiB, 80 MiB free)\n");
-    let mut out: Vec<LaunchDevice> = Vec::new();
-    for (bin, devs) in [("/a", vulkan_a), ("/b", vulkan_b)] {
-      for dev in devs {
-        if out.iter().any(|d| d.selector == dev.selector) {
-          continue;
-        }
-        out.push(LaunchDevice {
-          selector: dev.selector,
-          backend: dev.backend,
-          name: dev.name,
-          binary: PathBuf::from(bin),
-          total_mib: dev.total_mib,
-          free_mib: dev.free_mib,
-        });
-      }
-    }
-    assert_eq!(out.len(), 1, "duplicate Vulkan0 collapses to one entry");
-    assert_eq!(out[0].binary, PathBuf::from("/a"), "first binary wins");
-    assert_eq!(out[0].name, "Card A");
   }
 
   #[test]

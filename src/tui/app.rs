@@ -145,6 +145,9 @@ pub struct LastParamsRow {
   /// passes this back as a soft preference (`prefer_port`) so a
   /// returning user lands on the same port if it's still free.
   pub port: Option<u16>,
+  /// Server id (build/binary) the last launch used, when one was picked.
+  /// Seeds the picker's Server row so a relaunch reuses the same build.
+  pub server: Option<String>,
 }
 
 /// Snapshot of the daemon-side metadata the Daemon info panel
@@ -364,15 +367,11 @@ pub struct App {
   /// emits. Populated by [`Self::ingest_status`]; consumed by the
   /// Host info-row pane.
   pub host_metrics: HostMetricsSnapshot,
-  /// Launch device catalog from the daemon's `status.device_catalog` —
-  /// the exact `--device` selectors the picker may offer, each tagged
-  /// with the owning binary. Sourced from every configured binary's
-  /// `--list-devices`. Populated by [`Self::ingest_status`]; consumed
-  /// by the launch picker's Device row.
-  pub device_catalog: Vec<crate::backend::llama_cpp::LaunchDevice>,
   /// Neutral server catalog from `status.servers` — every backend's build /
-  /// binary variants with their probed devices. Drives the daemon-pane `server`
-  /// row (grouped by backend). Populated by [`Self::ingest_status`].
+  /// binary variants with their probed `--device` selectors. The single
+  /// launch-device source: the daemon-pane `server` row (grouped by backend),
+  /// the launch picker's Server + Device rows, and the multi-GPU gates all
+  /// derive from it. Populated by [`Self::ingest_status`].
   pub servers: Vec<crate::backend::Server>,
   /// Set when the user presses `q` so the event loop can exit.
   pub should_exit: bool,
@@ -470,6 +469,22 @@ pub struct StartModelArgs {
   /// Per-backend native-knob values from the picker (see
   /// [`crate::launch::native_knobs`]). Populated for ds4; empty for llama.cpp.
   pub backend_knobs: std::collections::BTreeMap<String, crate::config::KnobValue<String>>,
+  /// Chosen server id (a build/binary of a backend) from the picker's Server
+  /// row, or `None` for the priority default. Sent as `LaunchParams.server`;
+  /// the daemon derives the binary (and, when `backend` is `Auto`, the backend)
+  /// from it.
+  pub server: Option<String>,
+}
+
+/// The binary + compute-backend label a focused running model launched on
+/// when it uses a **non-default** server build. Returned by
+/// [`App::focused_override_device`] so the daemon-pane `server` row can swap
+/// to the override build. Owned (not a borrow into `servers`) so the render
+/// path can hold it across the immutable-borrow boundary.
+#[derive(Debug, Clone)]
+pub struct OverrideServer {
+  pub binary: PathBuf,
+  pub backend: String,
 }
 
 /// How alarming a confirm prompt is, so the overlay can tone its
@@ -571,7 +586,6 @@ impl App {
       daemon_start_error: None,
       daemon_info: DaemonInfo::default(),
       host_metrics: HostMetricsSnapshot::default(),
-      device_catalog: Vec::new(),
       servers: Vec::new(),
       should_exit: false,
       show_help: false,
@@ -1027,15 +1041,6 @@ impl App {
         }
       }
     }
-    if let Some(catalog) = body.get("device_catalog") {
-      if !catalog.is_null() {
-        if let Ok(devices) =
-          serde_json::from_value::<Vec<crate::backend::llama_cpp::LaunchDevice>>(catalog.clone())
-        {
-          self.device_catalog = devices;
-        }
-      }
-    }
     if let Some(servers) = body.get("servers") {
       if !servers.is_null() {
         if let Ok(parsed) = serde_json::from_value::<Vec<crate::backend::Server>>(servers.clone()) {
@@ -1107,6 +1112,10 @@ impl App {
           .get("port")
           .and_then(Value::as_u64)
           .and_then(|n| u16::try_from(n).ok());
+        let server = params
+          .get("server")
+          .and_then(Value::as_str)
+          .map(String::from);
         if recent.len() < RECENT_LIST_CAP {
           recent.push(path.clone());
         }
@@ -1119,6 +1128,7 @@ impl App {
             backend_knobs,
             extras,
             port,
+            server,
           },
         );
       }
@@ -1483,10 +1493,29 @@ impl App {
   /// single-GPU / CPU-only users aren't shown a control that can never
   /// carry a choice.
   pub fn multi_device(&self) -> bool {
-    self.device_catalog.len() > 1
+    self.flat_device_count() > 1
   }
 
-  pub fn focused_override_device(&self) -> Option<&crate::backend::llama_cpp::LaunchDevice> {
+  /// Count of distinct `--device` selectors across every server, deduped
+  /// (first server wins). The neutral successor to the old flat
+  /// `device_catalog.len()` — derived from `servers` on demand. Gates the
+  /// Models-list Device column.
+  fn flat_device_count(&self) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for s in &self.servers {
+      for d in &s.devices {
+        seen.insert(d.selector.as_str());
+      }
+    }
+    seen.len()
+  }
+
+  /// Binary + compute-backend label for the focused running model's device
+  /// override, when it runs on a **non-default** server binary. Resolves the
+  /// row's `--device` selector against the server catalog (the owning server
+  /// carries the binary). `None` when the focused row has no selector or
+  /// resolves to the daemon's default server.
+  pub fn focused_override_device(&self) -> Option<OverrideServer> {
     let rows = self.rendered_rows();
     let selector = match rows.get(self.list_cursor) {
       Some(ListRow::Model {
@@ -1494,20 +1523,48 @@ impl App {
       }) => d.clone(),
       _ => return None,
     };
-    let entry = self
-      .device_catalog
+    let server = self
+      .servers
       .iter()
-      .find(|e| e.selector == selector)?;
+      .find(|s| s.devices.iter().any(|d| d.selector == selector))?;
+    let device = server.devices.iter().find(|d| d.selector == selector)?;
     let is_default = self
       .daemon_info
       .server_path
       .as_deref()
-      .is_some_and(|def| entry.binary == Path::new(def));
+      .is_some_and(|def| server.binary == Path::new(def));
     if is_default {
       None
     } else {
-      Some(entry)
+      Some(OverrideServer {
+        binary: server.binary.clone(),
+        backend: device.gpu_backend.clone(),
+      })
     }
+  }
+
+  /// Servers compatible with `path`'s model, priority-ordered: for each backend
+  /// in the model's `supported_backends` (priority order), every catalog server
+  /// of that backend (in catalog order). Falls back to the whole catalog when
+  /// the model declares no supported backends (older daemon / no metadata).
+  /// Feeds the launch picker's Server row.
+  fn compatible_servers(&self, path: &Path) -> Vec<crate::backend::Server> {
+    let supported: Vec<String> = self
+      .models
+      .iter()
+      .find(|m| m.path == path)
+      .map(|m| m.supported_backends.clone())
+      .unwrap_or_default();
+    if supported.is_empty() {
+      return self.servers.clone();
+    }
+    let mut out = Vec::new();
+    for backend_id in &supported {
+      for s in self.servers.iter().filter(|s| &s.backend_id == backend_id) {
+        out.push(s.clone());
+      }
+    }
+    out
   }
 
   /// Build a [`LaunchPickerState`] seeded for the currently
@@ -1568,14 +1625,17 @@ impl App {
       .and_then(|p| self.predicted_backend(p))
       .map(BackendChoice::from_id)
       .unwrap_or_else(|| BackendChoice::from_id(crate::backend::DEFAULT_BACKEND_ID));
+    // Populate the Server row from the model's compatible servers (priority-
+    // ordered) and seed the last-used pick. The Server row cycles these; the
+    // Device row + multi-GPU gating scope to whichever server is current.
+    if let Some(p) = &path {
+      state.servers = self.compatible_servers(p);
+      state.selected_server = self.last_params.get(p).and_then(|l| l.server.clone());
+    }
     // Surface the model's backend native knobs (its own set, or none for a
-    // backend with no native-knob channel).
+    // backend with no native-knob channel). Ordered after the server seed so a
+    // remembered cross-backend pick resolves the right descriptor set.
     state.seed_native_descriptors();
-    // Populate the Device row from the launch device catalog — the
-    // exact `--device` selectors the daemon's configured binaries
-    // accept (sourced from their `--list-devices`). The picker cycles
-    // this flat list and stores the chosen selector verbatim.
-    state.device_catalog = self.device_catalog.clone();
     // Seed the preset cycle from the model's effective set (per-model ∪
     // arch, resolved against the catalog). Always called — the Preset row
     // is always shown (it offers `last used` ↔ `auto` even with no named
@@ -2166,7 +2226,18 @@ fn parse_list_models_row(row: &Value) -> Option<DiscoveredModel> {
       .and_then(Value::as_str)
       .map(String::from),
     multimodal: row.get("multimodal").and_then(parse_multimodal),
-    supported_backends: Vec::new(),
+    // Priority-ordered backends this model can run on (`ds4`, `llamacpp`, …).
+    // Feeds the launch picker's Server row (filters the server catalog).
+    supported_backends: row
+      .get("supported_backends")
+      .and_then(Value::as_array)
+      .map(|arr| {
+        arr
+          .iter()
+          .filter_map(|v| v.as_str().map(String::from))
+          .collect()
+      })
+      .unwrap_or_default(),
   })
 }
 
@@ -2345,7 +2416,7 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::backend::llama_cpp::LaunchDevice;
+  use crate::backend::{Device, Server};
   use crate::config::KnobValue;
   use crate::discovery::ModelSource;
   use crate::gguf::metadata::{ModeHint, ModelMetadata, Quant};
@@ -2891,14 +2962,24 @@ mod tests {
     assert_eq!(app.right_tab, RightTab::Settings);
   }
 
-  fn launch_device(selector: &str, backend: &str, binary: &str) -> LaunchDevice {
-    LaunchDevice {
+  fn dev(selector: &str, gpu: &str) -> Device {
+    Device {
       selector: selector.into(),
-      backend: backend.into(),
+      gpu_backend: gpu.into(),
       name: "Test GPU".into(),
-      binary: PathBuf::from(binary),
       total_mib: Some(24576),
       free_mib: Some(24000),
+    }
+  }
+
+  /// A server carrying `devices` on `binary`.
+  fn srv(binary: &str, devices: Vec<Device>) -> Server {
+    Server {
+      id: format!("llamacpp-{binary}"),
+      backend_id: "llamacpp".into(),
+      binary: PathBuf::from(binary),
+      name: "test".into(),
+      devices,
     }
   }
 
@@ -2931,15 +3012,16 @@ mod tests {
   #[test]
   fn focused_override_device_returns_entry_for_non_default_binary() {
     let mut app = running_on_device_app(Some("CUDA1"), "/usr/bin/llama-server");
-    app.device_catalog = vec![
-      launch_device("CUDA0", "CUDA", "/usr/bin/llama-server"),
-      launch_device("CUDA1", "CUDA", "/opt/cuda/llama-server"),
+    app.servers = vec![
+      srv("/usr/bin/llama-server", vec![dev("CUDA0", "CUDA")]),
+      srv("/opt/cuda/llama-server", vec![dev("CUDA1", "CUDA")]),
     ];
     assert!(app.focused_managed().is_some(), "cursor must be on the run");
     let dev = app
       .focused_override_device()
       .expect("non-default binary must surface as an override");
     assert_eq!(dev.binary, PathBuf::from("/opt/cuda/llama-server"));
+    assert_eq!(dev.backend, "CUDA");
   }
 
   #[test]
@@ -2947,7 +3029,7 @@ mod tests {
     // The hovered launch runs on the *default* binary's own device —
     // no override, so the server row stays on the plain default render.
     let mut app = running_on_device_app(Some("CUDA0"), "/usr/bin/llama-server");
-    app.device_catalog = vec![launch_device("CUDA0", "CUDA", "/usr/bin/llama-server")];
+    app.servers = vec![srv("/usr/bin/llama-server", vec![dev("CUDA0", "CUDA")])];
     assert!(app.focused_override_device().is_none());
   }
 
@@ -2956,7 +3038,7 @@ mod tests {
     // No device selector on the row (idle / auto launch) — nothing to
     // resolve against the catalog.
     let mut app = running_on_device_app(None, "/usr/bin/llama-server");
-    app.device_catalog = vec![launch_device("CUDA1", "CUDA", "/opt/cuda/llama-server")];
+    app.servers = vec![srv("/opt/cuda/llama-server", vec![dev("CUDA1", "CUDA")])];
     assert!(app.focused_override_device().is_none());
   }
 
@@ -2965,7 +3047,7 @@ mod tests {
     // Stale persisted selector (catalog re-probed without it) must not
     // panic or fabricate an override.
     let mut app = running_on_device_app(Some("ROCm0"), "/usr/bin/llama-server");
-    app.device_catalog = vec![launch_device("CUDA0", "CUDA", "/usr/bin/llama-server")];
+    app.servers = vec![srv("/usr/bin/llama-server", vec![dev("CUDA0", "CUDA")])];
     assert!(app.focused_override_device().is_none());
   }
 
@@ -3032,6 +3114,7 @@ mod tests {
         backend_knobs: Default::default(),
         extras: vec!["--rope-freq-base".into(), "10000".into()],
         port: Some(41105),
+        server: None,
       },
     );
     app.open_launch_picker();

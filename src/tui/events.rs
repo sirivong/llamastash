@@ -473,8 +473,9 @@ fn open_focused_inline_edit(app: &mut App) {
       picker.extras_input.set_text(joined);
       picker.extras_input.enter_edit();
     }
-    // Filtered out by the `is_editable` guard above (Preset is cycle-only).
-    PickerField::Preset => {}
+    // Filtered out by the `is_editable` guard above (Preset / Server are
+    // cycle-only).
+    PickerField::Preset | PickerField::Server => {}
   }
 }
 
@@ -519,7 +520,7 @@ fn commit_inline_edit(app: &mut App) -> bool {
       }
       // Empty buffer clears a native row back to inherited.
       PickerField::NativeKnob(i) => picker.set_native_text(i, ""),
-      PickerField::Preset | PickerField::Extras => {}
+      PickerField::Preset | PickerField::Server | PickerField::Extras => {}
     }
     picker.inline_edit.close();
     return true;
@@ -614,8 +615,8 @@ fn commit_inline_edit(app: &mut App) -> bool {
       Ok(())
     }
     PickerField::Extras => Ok(()),
-    // Preset is cycle-only — never opens an inline edit to commit.
-    PickerField::Preset => Ok(()),
+    // Preset / Server are cycle-only — never open an inline edit to commit.
+    PickerField::Preset | PickerField::Server => Ok(()),
   };
   match result {
     Ok(()) => {
@@ -1923,6 +1924,9 @@ fn apply_launch_submit(app: &mut App, writer: Option<&mpsc::Sender<WriterCmd>>) 
     backend: picker.launch_backend(),
     selection,
     backend_knobs: picker.backend_knobs.clone(),
+    // Chosen server build (or `None` for the priority default). The daemon
+    // derives the binary — and, when `backend` is `Auto`, the backend — from it.
+    server: picker.selected_server.clone(),
   });
 
   if active_instances > 0 {
@@ -2257,6 +2261,7 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
         backend,
         selection,
         backend_knobs,
+        server,
       } = *args;
       let mode_str = mode.map(|m| match m {
         crate::launch::mode::LaunchMode::Chat => "chat",
@@ -2281,6 +2286,8 @@ fn encode_writer_cmd(cmd: WriterCmd) -> (&'static str, Value) {
           // via `#[serde(default)]`. Populated for ds4 (six tunables), empty
           // for llama.cpp / Lemonade.
           "backend_knobs": backend_knobs,
+          // Chosen server build id; daemon ignores `null` / stale ids.
+          "server": server,
         }),
       )
     }

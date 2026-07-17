@@ -26,8 +26,8 @@ use crate::daemon::context::MethodContext;
 
 /// One launch device a server can target, from that server's own probe.
 ///
-/// The neutral successor to `llama_cpp::LaunchDevice`, minus the owning-binary
-/// field — the [`Server`] that carries this device already knows its binary.
+/// Carries no owning-binary field — the [`Server`] that owns this device
+/// already knows its binary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Device {
   /// Exact `--device` selector (`Vulkan0`, `CUDA0`, `ROCm0`), passed verbatim.
@@ -56,7 +56,7 @@ pub struct ServerSpec {
 /// A resolved server: one build/binary of a backend, with its probed devices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Server {
-  /// Stable selection / persistence key (`llamacpp·rocm`, `ds4·ds4`). Also the
+  /// Stable selection / persistence key (`llamacpp-rocm`, `ds4-ds4`). Also the
   /// display label — derived once by [`build_server_catalog`].
   pub id: String,
   /// The backend that owns this server (`llamacpp` / `ds4` / `lemonade`).
@@ -80,20 +80,18 @@ pub struct Server {
 pub struct ServerConfig {
   /// Path to this server's binary.
   pub binary: PathBuf,
-  /// Optional display-name override (`<backend>·<name>`); auto-derived when
+  /// Optional display-name override (`<backend>-<name>`); auto-derived when
   /// unset.
   #[serde(default)]
   pub name: Option<String>,
 }
 
-/// The compute-backend tag for a server, lower-cased for display / ids: the
-/// first probed device's `gpu_backend`, or `"cpu"` when the server exposed no
-/// devices.
-fn server_gpu_tag(devices: &[Device]) -> String {
-  devices
-    .first()
-    .map(|d| d.gpu_backend.to_ascii_lowercase())
-    .unwrap_or_else(|| "cpu".to_string())
+/// The compute-backend tag for a server, lower-cased for ids/display: the first
+/// probed device's `gpu_backend` (`rocm` / `vulkan` / `cuda` / `metal`). Only
+/// called with a non-empty device list — a device-less server has no detectable
+/// compute type and derives the bare backend id instead (see [`derive_servers`]).
+fn server_gpu_tag(devices: &[Device]) -> Option<String> {
+  devices.first().map(|d| d.gpu_backend.to_ascii_lowercase())
 }
 
 /// Basename of the binary's parent directory (`…/build-hip/bin/llama-server` →
@@ -115,41 +113,59 @@ fn binary_dir_tag(binary: &Path) -> String {
     .unwrap_or_else(|| "server".to_string())
 }
 
-/// Derive stable `id` / `name` for one backend's servers, per the plan's
-/// four-tier rule: explicit `name` → unique `<backend>·<gpu_backend>` →
-/// `<backend>·<binary-dir>` → `#N`. Input pairs are `(spec, probed devices)`.
+/// Derive a stable `id` / `name` for one backend's servers. The suffix after
+/// `<backend>-` comes from, in order: an explicit `name:` → the unique
+/// `<gpu_backend>` a device probe reveals (`rocm` / `vulkan` / `cuda` /
+/// `metal`) → the `<binary-dir>` basename when that gpu tag collides (two ROCm
+/// builds). A **device-less** server (ds4 / lemonade / a CPU-only build — no
+/// detectable compute type) gets the **bare backend id** (`ds4`, `lemonade`),
+/// disambiguated `-N` only when several collide; an explicit `name:` (`rocm`,
+/// `cuda`) is the way to label those (`ds4-rocm`). Input pairs are
+/// `(spec, probed devices)`.
 fn derive_servers(backend_id: &str, probed: Vec<(ServerSpec, Vec<Device>)>) -> Vec<Server> {
-  // First pass: a provisional tag per server (before collision resolution).
-  let provisional: Vec<String> = probed
+  // Provisional gpu tag per device-bearing, name-less server — used only to
+  // detect gpu-tag collisions (two ROCm builds). `None` for named or
+  // device-less servers, which don't participate in gpu-tag collision counting.
+  let gpu_tags: Vec<Option<String>> = probed
     .iter()
-    .map(|(spec, devices)| match &spec.name {
-      Some(name) => name.clone(),
-      None => server_gpu_tag(devices),
+    .map(|(spec, devices)| {
+      if spec.name.is_none() {
+        server_gpu_tag(devices)
+      } else {
+        None
+      }
     })
     .collect();
 
-  // A gpu-backend tag is "unique" only when it appears once across the
-  // name-less servers — an explicit name never collides (the user owns it).
   let mut tag_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-  for (i, (spec, _)) in probed.iter().enumerate() {
-    if spec.name.is_none() {
-      *tag_counts.entry(provisional[i].as_str()).or_insert(0) += 1;
-    }
+  for tag in gpu_tags.iter().flatten() {
+    *tag_counts.entry(tag.as_str()).or_insert(0) += 1;
   }
 
   let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
   let mut out = Vec::with_capacity(probed.len());
   for (i, (spec, devices)) in probed.into_iter().enumerate() {
-    let base = if spec.name.is_some() || tag_counts.get(provisional[i].as_str()) == Some(&1) {
-      provisional[i].clone()
-    } else {
-      binary_dir_tag(&spec.binary)
+    // The id suffix after `<backend>-`; `None` means the bare backend id (a
+    // device-less server whose compute type we can't name).
+    let base: Option<String> = match &spec.name {
+      Some(name) => Some(name.clone()),
+      None => match &gpu_tags[i] {
+        Some(tag) if tag_counts.get(tag.as_str()) == Some(&1) => Some(tag.clone()),
+        Some(_) => Some(binary_dir_tag(&spec.binary)),
+        None => None,
+      },
     };
-    // Final collision guard: append `#N` until unique within this backend.
-    let mut candidate = format!("{backend_id}\u{b7}{base}");
+    let mut candidate = match &base {
+      Some(b) => format!("{backend_id}-{b}"),
+      None => backend_id.to_string(),
+    };
+    // Final collision guard: append `-N` until unique within this backend.
     let mut n = 2;
     while used.contains(&candidate) {
-      candidate = format!("{backend_id}\u{b7}{base}#{n}");
+      candidate = match &base {
+        Some(b) => format!("{backend_id}-{b}-{n}"),
+        None => format!("{backend_id}-{n}"),
+      };
       n += 1;
     }
     used.insert(candidate.clone());
@@ -221,8 +237,8 @@ mod tests {
         ),
       ],
     );
-    assert_eq!(servers[0].id, "llamacpp\u{b7}rocm");
-    assert_eq!(servers[1].id, "llamacpp\u{b7}vulkan");
+    assert_eq!(servers[0].id, "llamacpp-rocm");
+    assert_eq!(servers[1].id, "llamacpp-vulkan");
   }
 
   #[test]
@@ -241,8 +257,8 @@ mod tests {
         ),
       ],
     );
-    assert_eq!(servers[0].id, "llamacpp\u{b7}build-hip");
-    assert_eq!(servers[1].id, "llamacpp\u{b7}build-hip-rocwmma");
+    assert_eq!(servers[0].id, "llamacpp-build-hip");
+    assert_eq!(servers[1].id, "llamacpp-build-hip-rocwmma");
     // No dedup: both survive even though both expose ROCm0.
     assert_eq!(servers.len(), 2);
   }
@@ -256,26 +272,42 @@ mod tests {
         vec![dev("ROCm0", "ROCm")],
       )],
     );
-    assert_eq!(servers[0].id, "llamacpp\u{b7}rocm");
+    assert_eq!(servers[0].id, "llamacpp-rocm");
   }
 
   #[test]
-  fn deviceless_server_tags_cpu_then_dir_on_collision() {
+  fn single_deviceless_server_is_the_bare_backend_id() {
+    // ds4 / lemonade / a CPU-only build: no probe, no detectable compute type
+    // → the bare backend id, not a misleading `-cpu`.
+    let servers = derive_servers("ds4", vec![(spec("/x/ds4-server", None), vec![])]);
+    assert_eq!(servers[0].id, "ds4");
+  }
+
+  #[test]
+  fn colliding_deviceless_servers_get_numeric_suffix() {
+    // Two device-less builds with no names → bare id then `-N` (the compute
+    // type isn't knowable; a `name:` override is how you label them).
     let servers = derive_servers(
-      "llamacpp",
+      "ds4",
       vec![
-        (spec("/a/one/llama-server", None), vec![]),
-        (spec("/a/two/llama-server", None), vec![]),
+        (spec("/a/one/ds4-server", None), vec![]),
+        (spec("/a/two/ds4-server", None), vec![]),
       ],
     );
-    // Both would be `cpu` → collide → dir basename.
-    assert_eq!(servers[0].id, "llamacpp\u{b7}one");
-    assert_eq!(servers[1].id, "llamacpp\u{b7}two");
+    assert_eq!(servers[0].id, "ds4");
+    assert_eq!(servers[1].id, "ds4-2");
+  }
+
+  #[test]
+  fn deviceless_server_honors_explicit_name() {
+    // The compute type for a device-less backend comes from `name:` (`rocm`).
+    let servers = derive_servers("ds4", vec![(spec("/x/ds4-server", Some("rocm")), vec![])]);
+    assert_eq!(servers[0].id, "ds4-rocm");
   }
 
   #[test]
   fn identical_dir_names_get_numeric_suffix() {
-    // Pathological: same gpu tag AND same dir basename → `#N` guard.
+    // Pathological: same gpu tag AND same dir basename → `-N` guard.
     let servers = derive_servers(
       "llamacpp",
       vec![
@@ -289,7 +321,7 @@ mod tests {
         ),
       ],
     );
-    assert_eq!(servers[0].id, "llamacpp\u{b7}build");
-    assert_eq!(servers[1].id, "llamacpp\u{b7}build#2");
+    assert_eq!(servers[0].id, "llamacpp-build");
+    assert_eq!(servers[1].id, "llamacpp-build-2");
   }
 }

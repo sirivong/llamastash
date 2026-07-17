@@ -45,6 +45,11 @@ pub enum PickerField {
   /// The preset cycle row, always shown at the very top of the form.
   /// Cycling it rewrites every knob row below live.
   Preset,
+  /// The server (build/binary) cycle row, shown just under `Preset` when the
+  /// model has more than one compatible server. Cycling it re-scopes the
+  /// Device row + multi-GPU gating and, on a cross-backend switch, the knob
+  /// set. Hidden with 0 or 1 server (nothing to pick).
+  Server,
   Knob(KnobField),
   /// A backend-declared native knob, by index into the active backend's
   /// [`NativeKnobDescriptor`] slice (see [`crate::launch::native_knobs`]).
@@ -90,9 +95,10 @@ pub struct PresetChoice {
 /// by `Extras`. Built once on first access so per-keypress navigation
 /// does no allocation.
 static ALL_FIELDS: LazyLock<Box<[PickerField]>> = LazyLock::new(|| {
-  // Preset row leads (rendered + navigated first); knob groups follow;
-  // extras last.
-  let mut v: Vec<PickerField> = vec![PickerField::Preset];
+  // Preset row leads, then the server row (both cycle-only selectors);
+  // knob groups follow; extras last. `Server` is gated to `>1` server in
+  // `field_visible`, so a single-server host never lands on it.
+  let mut v: Vec<PickerField> = vec![PickerField::Preset, PickerField::Server];
   for group in knob_display_groups() {
     for field in group.fields {
       v.push(PickerField::Knob(*field));
@@ -122,8 +128,8 @@ impl PickerField {
   /// on those rows) so the chip and the handler stay in lockstep.
   pub fn is_editable(self) -> bool {
     match self {
-      // Preset is a cycle-only row (←/→), like a boolean knob.
-      PickerField::Preset => false,
+      // Preset / Server are cycle-only rows (←/→), like a boolean knob.
+      PickerField::Preset | PickerField::Server => false,
       PickerField::Extras => true,
       // The native row's editability depends on its descriptor kind, which
       // the bare index can't see — resolved by
@@ -252,13 +258,16 @@ pub struct LaunchPickerState {
   pub model_backend: BackendChoice,
   pub active_instances: usize,
   pub prefer_port: Option<u16>,
-  /// Launch device catalog from `status.device_catalog` — the exact
-  /// `--device` selectors the daemon's configured binaries will accept,
-  /// each tagged with its owning binary. The Device row cycles through
-  /// this flat list (one entry per backend-view of a card, e.g. the
-  /// same physical card may appear as both `ROCm0` and `Vulkan0`).
-  /// `user_knobs.device` stores the chosen selector verbatim.
-  pub device_catalog: Vec<crate::backend::llama_cpp::LaunchDevice>,
+  /// Compatible servers for this model (priority-ordered): the builds the
+  /// Server row cycles through, from `status.servers` filtered to the model's
+  /// `supported_backends`. Each carries its own probed `--device` selectors;
+  /// the Device row + multi-GPU gating scope to the [`Self::current_server`].
+  /// Empty when the daemon hasn't probed any binary.
+  pub servers: Vec<crate::backend::Server>,
+  /// The user's chosen server id (`llamacpp·vulkan`, `ds4·ds4`), or `None` for
+  /// the priority default (`servers[0]`). Sent verbatim as
+  /// [`crate::launch::params::LaunchParams::server`]; seeded from last_params.
+  pub selected_server: Option<String>,
   /// Effective presets for this model (per-model ∪ arch), name-sorted —
   /// the cycle stops below `auto`. Empty for a model with no presets, in
   /// which case the Preset row is hidden.
@@ -299,7 +308,8 @@ impl LaunchPickerState {
       model_backend: BackendChoice::from_id(crate::backend::DEFAULT_BACKEND_ID),
       active_instances: 0,
       prefer_port: None,
-      device_catalog: Vec::new(),
+      servers: Vec::new(),
+      selected_server: None,
       presets: Vec::new(),
       default_stop: PresetStop::LastUsed,
       preset_stop: PresetStop::LastUsed,
@@ -429,6 +439,69 @@ impl LaunchPickerState {
     }
   }
 
+  /// The server whose devices + backend scope the form: the explicitly
+  /// selected one, else the priority default (`servers[0]`). `None` only when
+  /// no server was probed.
+  pub fn current_server(&self) -> Option<&crate::backend::Server> {
+    match &self.selected_server {
+      Some(id) => self.servers.iter().find(|s| &s.id == id),
+      None => self.servers.first(),
+    }
+  }
+
+  /// Devices the currently-scoped server can target — the cycle space for the
+  /// Device row and the multi-GPU gating count. Empty when no server / a
+  /// device-less (ds4 / lemonade / CPU-only) server is scoped.
+  fn current_devices(&self) -> &[crate::backend::Device] {
+    self
+      .current_server()
+      .map(|s| s.devices.as_slice())
+      .unwrap_or(&[])
+  }
+
+  /// Cycle the Server row through `[default] + server ids`. Position 0
+  /// (`default`) clears the pick so the daemon resolves the priority default /
+  /// last-used; each other stop pins that server id. A switch clears the
+  /// device selection (a stale selector wouldn't validate against the new
+  /// server) and re-seeds the native-knob descriptors (the backend may change
+  /// on a cross-backend switch, e.g. deepseek4 ds4 → llamacpp).
+  fn cycle_server(&mut self, forward: bool) {
+    if self.servers.is_empty() {
+      self.selected_server = None;
+      return;
+    }
+    let ids: Vec<String> = self.servers.iter().map(|s| s.id.clone()).collect();
+    let cur_pos = match &self.selected_server {
+      None => 0,
+      Some(id) => ids.iter().position(|s| s == id).map(|i| i + 1).unwrap_or(0),
+    };
+    let len = ids.len() + 1; // +default
+    let next_pos = if forward {
+      (cur_pos + 1) % len
+    } else {
+      (cur_pos + len - 1) % len
+    };
+    self.selected_server = match next_pos {
+      0 => None,
+      i => Some(ids[i - 1].clone()),
+    };
+    self.set_user_str(KnobField::Device, None);
+    self.seed_native_descriptors();
+  }
+
+  /// Value-column label for the Server row: the selected server id, or
+  /// `"default (<id>)"` naming the priority default the daemon resolves when
+  /// unset. `"default"` alone when no server was probed.
+  pub fn server_value_label(&self) -> String {
+    match &self.selected_server {
+      Some(id) => id.clone(),
+      None => match self.servers.first() {
+        Some(s) => format!("default ({})", s.id),
+        None => "default".to_string(),
+      },
+    }
+  }
+
   /// Seed the resolved knobs + source map from the layered resolver
   /// output. The user-knobs layer is empty on a freshly-opened
   /// editor — the rows show inherited values.
@@ -478,6 +551,7 @@ impl LaunchPickerState {
   pub fn cycle_focused_value_next(&mut self) {
     match self.field {
       PickerField::Preset => self.cycle_preset(true),
+      PickerField::Server => self.cycle_server(true),
       PickerField::Knob(k) => self.cycle_knob(k, true),
       PickerField::NativeKnob(i) => self.cycle_native(i, true),
       PickerField::Extras => {}
@@ -488,6 +562,7 @@ impl LaunchPickerState {
   pub fn cycle_focused_value_prev(&mut self) {
     match self.field {
       PickerField::Preset => self.cycle_preset(false),
+      PickerField::Server => self.cycle_server(false),
       PickerField::Knob(k) => self.cycle_knob(k, false),
       PickerField::NativeKnob(i) => self.cycle_native(i, false),
       PickerField::Extras => {}
@@ -574,6 +649,19 @@ impl LaunchPickerState {
   /// unknown id to the default. Names no backend.
   fn resolved_backend(&self) -> crate::backend::Backends {
     use crate::backend::{Backend, Backends};
+    // An explicit server pick determines the backend (its owning backend), so
+    // cycling to a llamacpp server on a deepseek4 model swaps the knob set to
+    // llama.cpp's. An unset pick falls through to the model's own backend.
+    if let Some(id) = &self.selected_server {
+      if let Some(srv) = self.servers.iter().find(|s| &s.id == id) {
+        if let Some(b) = Backends::all()
+          .into_iter()
+          .find(|b| b.id() == srv.backend_id.as_str())
+        {
+          return b;
+        }
+      }
+    }
     match &self.model_backend {
       BackendChoice::Explicit(id) => Backends::all()
         .into_iter()
@@ -785,17 +873,17 @@ impl LaunchPickerState {
   /// not fit-governed). `user_knobs.device` holds the chosen selector
   /// verbatim (`"Vulkan1"`), or `None` for default.
   fn cycle_device(&mut self, field: KnobField, forward: bool) {
-    if self.device_catalog.is_empty() {
-      // No catalog (CPU-only / no binary enumerated) — only the
-      // default exists, so any cycle resets to it.
+    let selectors: Vec<String> = self
+      .current_devices()
+      .iter()
+      .map(|d| d.selector.clone())
+      .collect();
+    if selectors.is_empty() {
+      // No devices on the scoped server (CPU-only / device-less backend) —
+      // only the default exists, so any cycle resets to it.
       self.set_user_str(field, None);
       return;
     }
-    let selectors: Vec<&str> = self
-      .device_catalog
-      .iter()
-      .map(|d| d.selector.as_str())
-      .collect();
     // Cycle positions: 0 = default (None), 1+i = selector[i]. A stale
     // Auto coerces to default (position 0).
     let cur_pos: usize = match self.user_value_str(field).filter(|s| !s.is_empty()) {
@@ -832,7 +920,7 @@ impl LaunchPickerState {
     let n = if selected > 0 {
       selected
     } else {
-      self.device_catalog.len()
+      self.current_devices().len()
     };
     (0..n.max(1) as u32).collect()
   }
@@ -845,6 +933,12 @@ impl LaunchPickerState {
       PickerField::Preset => {
         self.preset_stop = PresetStop::LastUsed;
         self.apply_preset_stop();
+      }
+      // Reset on the Server row snaps back to the priority default.
+      PickerField::Server => {
+        self.selected_server = None;
+        self.set_user_str(KnobField::Device, None);
+        self.seed_native_descriptors();
       }
       PickerField::Knob(k) => self.clear_user(k),
       PickerField::NativeKnob(i) => {
@@ -863,7 +957,7 @@ impl LaunchPickerState {
   /// `false` so single-GPU / CPU-only users don't see a row that can
   /// only ever hold `default`.
   pub fn multi_device(&self) -> bool {
-    self.device_catalog.len() > 1
+    self.current_devices().len() > 1
   }
 
   /// Whether a row is currently shown / navigable. The Multi-GPU
@@ -876,6 +970,8 @@ impl LaunchPickerState {
     match field {
       // Always shown — it offers `last used` ↔ `auto` even with no presets.
       PickerField::Preset => true,
+      // Shown only with a real choice: two or more compatible servers.
+      PickerField::Server => self.servers.len() > 1,
       PickerField::Knob(k) => self.knob_supported(k) && knob_row_visible(k, self.multi_device()),
       // A native row exists iff its index is within the backend's slice
       // (six for ds4, empty for llama.cpp / Lemonade).
@@ -1043,8 +1139,8 @@ impl LaunchPickerState {
       .filter(|v| !v.is_empty());
     sel
       .map(
-        |s| match self.device_catalog.iter().find(|d| d.selector == s) {
-          Some(d) => format!("{} ({})", d.name, d.backend),
+        |s| match self.current_devices().iter().find(|d| d.selector == s) {
+          Some(d) => format!("{} ({})", d.name, d.gpu_backend),
           None => s.to_string(),
         },
       )
@@ -1309,12 +1405,13 @@ mod tests {
   #[test]
   fn next_field_iterates_every_visible_picker_row() {
     let mut s = LaunchPickerState::for_model("qwen");
-    // A 2-device catalog makes the `device` row visible so navigation
-    // visits every row. The single-GPU skip is covered separately.
-    s.device_catalog = vec![
-      dev("CUDA0", "CUDA", "GPU 0", "/usr/bin/llama-server"),
-      dev("CUDA1", "CUDA", "GPU 1", "/usr/bin/llama-server"),
-    ];
+    // A single server with 2 devices makes the `device` row visible so
+    // navigation visits every row (the Server row stays hidden with one
+    // server). The single-GPU skip is covered separately.
+    s.servers = one_server(vec![
+      device("CUDA0", "CUDA", "GPU 0"),
+      device("CUDA1", "CUDA", "GPU 1"),
+    ]);
     // Visible rows in nav order. The Backend chooser is hidden with a single
     // concrete backend, so it's skipped (covered by `field_visible`).
     let visible: Vec<PickerField> = PickerField::all()
@@ -1485,50 +1582,58 @@ mod tests {
     assert_eq!(cycle_through(Some(99_u32), presets, true), Some(30));
   }
 
-  // ---- Flat device-catalog picker tests ----
+  // ---- Server-scoped device picker tests ----
 
-  use crate::backend::llama_cpp::LaunchDevice;
+  use crate::backend::{Device, Server};
 
-  /// Build a `LaunchDevice` for tests. Memory fields don't affect the
+  /// Build a neutral [`Device`] for tests. Memory fields don't affect the
   /// picker logic, so they're left `None`.
-  fn dev(selector: &str, backend: &str, name: &str, binary: &str) -> LaunchDevice {
-    LaunchDevice {
+  fn device(selector: &str, gpu: &str, name: &str) -> Device {
+    Device {
       selector: selector.into(),
-      backend: backend.into(),
+      gpu_backend: gpu.into(),
       name: name.into(),
-      binary: std::path::PathBuf::from(binary),
       total_mib: None,
       free_mib: None,
     }
   }
 
-  fn catalog_two_vendors() -> Vec<LaunchDevice> {
-    vec![
-      dev(
-        "Vulkan0",
-        "Vulkan",
-        "AMD Radeon AI PRO R9700",
-        "/vk/llama-server",
-      ),
-      dev(
-        "Vulkan1",
-        "Vulkan",
-        "NVIDIA GeForce RTX 3080",
-        "/vk/llama-server",
-      ),
-      dev(
-        "ROCm0",
-        "ROCm",
-        "AMD Radeon AI PRO R9700",
-        "/rocm/llama-server",
-      ),
-    ]
+  /// A server for tests.
+  fn server(id: &str, backend: &str, binary: &str, devices: Vec<Device>) -> Server {
+    Server {
+      id: id.into(),
+      backend_id: backend.into(),
+      binary: std::path::PathBuf::from(binary),
+      name: id.into(),
+      devices,
+    }
+  }
+
+  /// A single llama.cpp server carrying `devices` — the common single-server
+  /// case, so `current_server()` (with no explicit pick) scopes to it.
+  fn one_server(devices: Vec<Device>) -> Vec<Server> {
+    vec![server(
+      "llamacpp-test",
+      "llamacpp",
+      "/test/llama-server",
+      devices,
+    )]
+  }
+
+  /// One server with the three-device mixed-vendor catalog the device tests
+  /// exercise (Vulkan0/Vulkan1/ROCm0 on one build).
+  fn catalog_two_vendors() -> Vec<Server> {
+    one_server(vec![
+      device("Vulkan0", "Vulkan", "AMD Radeon AI PRO R9700"),
+      device("Vulkan1", "Vulkan", "NVIDIA GeForce RTX 3080"),
+      device("ROCm0", "ROCm", "AMD Radeon AI PRO R9700"),
+    ])
   }
 
   #[test]
   fn device_value_display_resolves_selector_to_name_and_backend() {
     let mut s = LaunchPickerState::for_model("test");
-    s.device_catalog = catalog_two_vendors();
+    s.servers = catalog_two_vendors();
     // No selection → inherited (llama-server picks the device).
     assert_eq!(s.device_value_display(), "inherited");
     s.set_user_str(KnobField::Device, Some("Vulkan1".into()));
@@ -1542,7 +1647,7 @@ mod tests {
     // A persisted selector no longer in the catalog still renders
     // something useful rather than "inherited".
     let mut s = LaunchPickerState::for_model("test");
-    s.device_catalog = catalog_two_vendors();
+    s.servers = catalog_two_vendors();
     s.set_user_str(KnobField::Device, Some("CUDA9".into()));
     assert_eq!(s.device_value_display(), "CUDA9");
   }
@@ -1550,7 +1655,7 @@ mod tests {
   #[test]
   fn cycle_device_walks_default_then_each_selector_and_wraps() {
     let mut s = LaunchPickerState::for_model("test");
-    s.device_catalog = catalog_two_vendors();
+    s.servers = catalog_two_vendors();
     // Device is not fit-governed and `default` already means auto-select,
     // so there is no Auto stop. Ring: default → Vulkan0 → Vulkan1 →
     // ROCm0 → wrap.
@@ -1574,7 +1679,7 @@ mod tests {
   #[test]
   fn cycle_device_backward_from_default_wraps_to_last() {
     let mut s = LaunchPickerState::for_model("test");
-    s.device_catalog = catalog_two_vendors();
+    s.servers = catalog_two_vendors();
     s.cycle_device(KnobField::Device, false);
     assert_eq!(s.user_value_str(KnobField::Device), Some("ROCm0".into()));
     s.cycle_device(KnobField::Device, false);
@@ -1587,7 +1692,7 @@ mod tests {
     // (`Vulkan0`), never the old `card:driver` coordinate (`0:0`) that
     // made llama-server bail with `invalid device`.
     let mut s = LaunchPickerState::for_model("test");
-    s.device_catalog = catalog_two_vendors();
+    s.servers = catalog_two_vendors();
     // Two steps past Inherited → Auto → the first real selector.
     s.cycle_device(KnobField::Device, true);
     s.cycle_device(KnobField::Device, true);
@@ -1596,17 +1701,126 @@ mod tests {
       !stored.contains(':'),
       "selector must not be a coordinate: {stored}"
     );
-    assert!(s.device_catalog.iter().any(|d| d.selector == stored));
+    assert!(s
+      .current_server()
+      .unwrap()
+      .devices
+      .iter()
+      .any(|d| d.selector == stored));
   }
 
   #[test]
   fn cycle_device_with_empty_catalog_stays_default() {
     let mut s = LaunchPickerState::for_model("test");
-    // Empty catalog (CPU-only / no binary) — cycling resets to default.
+    // No servers (CPU-only / no binary) — cycling resets to default.
     s.cycle_device(KnobField::Device, true);
     assert_eq!(s.user_value_str(KnobField::Device), None);
     s.cycle_device(KnobField::Device, false);
     assert_eq!(s.user_value_str(KnobField::Device), None);
+  }
+
+  // ---- Server selection row ----
+
+  /// Two llama.cpp builds (rocm + vulkan) — the multi-server case that makes
+  /// the Server row selectable.
+  fn two_llamacpp_servers() -> Vec<Server> {
+    vec![
+      server(
+        "llamacpp-rocm",
+        "llamacpp",
+        "/rocm/llama-server",
+        vec![device("ROCm0", "ROCm", "AMD Radeon AI PRO R9700")],
+      ),
+      server(
+        "llamacpp-vulkan",
+        "llamacpp",
+        "/vk/llama-server",
+        vec![
+          device("Vulkan0", "Vulkan", "AMD Radeon AI PRO R9700"),
+          device("Vulkan1", "Vulkan", "NVIDIA GeForce RTX 3080"),
+        ],
+      ),
+    ]
+  }
+
+  #[test]
+  fn server_row_hidden_with_zero_or_one_server() {
+    let mut s = LaunchPickerState::for_model("m");
+    assert!(!s.field_visible(PickerField::Server), "hidden with none");
+    s.servers = one_server(vec![device("ROCm0", "ROCm", "card")]);
+    assert!(!s.field_visible(PickerField::Server), "hidden with one");
+    s.servers = two_llamacpp_servers();
+    assert!(s.field_visible(PickerField::Server), "shown with two");
+  }
+
+  #[test]
+  fn server_row_default_names_priority_default_then_cycles_ids() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.servers = two_llamacpp_servers();
+    s.field = PickerField::Server;
+    // Unset → `default (<first server id>)`.
+    assert_eq!(s.selected_server, None);
+    assert_eq!(s.server_value_label(), "default (llamacpp-rocm)");
+    // Ring: default → rocm → vulkan → wrap.
+    s.cycle_focused_value_next();
+    assert_eq!(s.selected_server.as_deref(), Some("llamacpp-rocm"));
+    assert_eq!(s.server_value_label(), "llamacpp-rocm");
+    s.cycle_focused_value_next();
+    assert_eq!(s.selected_server.as_deref(), Some("llamacpp-vulkan"));
+    s.cycle_focused_value_next();
+    assert_eq!(s.selected_server, None, "wraps back to default");
+  }
+
+  #[test]
+  fn selected_server_scopes_the_device_list() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.servers = two_llamacpp_servers();
+    // Default scopes to servers[0] (rocm, 1 device) → device row hidden.
+    assert_eq!(s.current_devices().len(), 1);
+    assert!(!s.multi_device());
+    // Pick the vulkan build (2 devices) → device row appears.
+    s.selected_server = Some("llamacpp-vulkan".into());
+    assert_eq!(s.current_devices().len(), 2);
+    assert!(s.multi_device());
+  }
+
+  #[test]
+  fn switching_server_clears_the_device_pick() {
+    let mut s = LaunchPickerState::for_model("m");
+    s.servers = two_llamacpp_servers();
+    s.field = PickerField::Server;
+    s.selected_server = Some("llamacpp-vulkan".into());
+    s.set_user_str(KnobField::Device, Some("Vulkan1".into()));
+    // Cycling the server row invalidates the (now-foreign) device selector.
+    s.cycle_focused_value_next();
+    assert_eq!(s.user_value_str(KnobField::Device), None);
+  }
+
+  #[test]
+  fn selected_server_backend_swaps_the_knob_set() {
+    // A deepseek4-style model with a ds4 server and a llamacpp server.
+    let mut s = LaunchPickerState::for_model("DeepSeek-V4-Flash");
+    s.model_backend = BackendChoice::Explicit("ds4".into());
+    s.servers = vec![
+      server("ds4", "ds4", "/ds4/ds4-server", vec![]),
+      server(
+        "llamacpp-rocm",
+        "llamacpp",
+        "/rocm/llama-server",
+        vec![device("ROCm0", "ROCm", "card")],
+      ),
+    ];
+    s.field = PickerField::Server;
+    // Unset → the model's own backend (ds4) with its six native knobs.
+    s.seed_native_descriptors();
+    assert_eq!(s.active_backend_id(), "ds4");
+    assert_eq!(s.native_descriptors.len(), 6);
+    // Pick the llamacpp server → knob set swaps to llama.cpp (no native rows).
+    s.selected_server = Some("llamacpp-rocm".into());
+    s.seed_native_descriptors();
+    assert_eq!(s.active_backend_id(), "llamacpp");
+    assert!(s.native_descriptors.is_empty());
+    assert!(s.knob_supported(KnobField::NGpuLayers));
   }
 
   /// Regression net for the silent-edit-loss class: a user value set on

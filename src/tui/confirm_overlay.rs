@@ -203,6 +203,7 @@ mod tests {
         backend: Default::default(),
         selection: "explicit",
         backend_knobs: Default::default(),
+        server: None,
       }),
     };
     assert_eq!(dup.severity(), ConfirmSeverity::Neutral);
