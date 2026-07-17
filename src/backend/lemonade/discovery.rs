@@ -75,8 +75,11 @@ fn row_for(entry: &ModelEntry) -> DiscoveredModel {
     // Lemonade serves registry models by name, not local GGUFs — there's no
     // companion projector to detect, so no multimodal signal.
     multimodal: None,
-    // Registry-served, not a local GGUF — never ds4-routable.
-    supported_backends: Vec::new(),
+    // A registry model runs on Lemonade and nowhere else — it's not a local
+    // GGUF, so no other backend can serve it. Recording that here keeps the
+    // launch picker's server row scoped to Lemonade's own server(s) instead of
+    // falling back to the whole host catalog.
+    supported_backends: vec![crate::backend::lemonade::LEMONADE_BACKEND_ID.to_string()],
   }
 }
 
@@ -147,6 +150,9 @@ mod tests {
     );
     // The backend tag derives from the source.
     assert_eq!(rows[0].source.backend_id(), "lemonade");
+    // A registry model is Lemonade-only — the picker's server row must scope to
+    // Lemonade, not fall back to the whole host catalog.
+    assert_eq!(rows[0].supported_backends, vec!["lemonade".to_string()]);
     // No labels → an LLM → chat hint.
     assert_eq!(rows[0].metadata.as_ref().unwrap().mode_hint, ModeHint::Chat);
   }

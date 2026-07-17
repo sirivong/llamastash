@@ -3052,6 +3052,30 @@ mod tests {
   }
 
   #[test]
+  fn compatible_servers_scopes_to_the_models_supported_backends() {
+    // A Lemonade registry model (supported_backends = [lemonade]) must offer
+    // only Lemonade's server in the picker, not the whole host catalog — the
+    // bug where every server showed but the launch went to Lemonade anyway.
+    let mut app = App::new(AppOptions::default());
+    let mut m = fake("/m/qwen.gguf", "/m");
+    m.supported_backends = vec!["lemonade".into()];
+    app.models = vec![m];
+    app.servers = vec![
+      srv("/usr/bin/llama-server", vec![dev("CUDA0", "CUDA")]),
+      Server {
+        id: "lemonade".into(),
+        backend_id: "lemonade".into(),
+        binary: PathBuf::from("/usr/bin/lemond"),
+        name: "lemonade".into(),
+        devices: Vec::new(),
+      },
+    ];
+    let servers = app.compatible_servers(Path::new("/m/qwen.gguf"));
+    assert_eq!(servers.len(), 1, "scoped to the one lemonade server");
+    assert_eq!(servers[0].backend_id, "lemonade");
+  }
+
+  #[test]
   fn drill_into_focused_model_noop_on_header_focus() {
     let mut app = App::new(AppOptions::default());
     app.models = vec![fake("/m/a.gguf", "/m")];

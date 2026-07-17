@@ -464,48 +464,69 @@ impl LaunchPickerState {
       .unwrap_or(&[])
   }
 
-  /// Cycle the Server row through `[default] + server ids`. Position 0
-  /// (`default`) clears the pick so the daemon resolves the priority default /
-  /// last-used; each other stop pins that server id. A switch clears the
-  /// device selection (a stale selector wouldn't validate against the new
-  /// server) and re-seeds the native-knob descriptors (the backend may change
-  /// on a cross-backend switch, e.g. deepseek4 ds4 → llamacpp).
+  /// Whether the current pick resolves to the priority default: either unset,
+  /// or an explicit pin of `servers[0]` (the highest-priority compatible
+  /// server). Pinning `servers[0]` is identical to leaving it unset, so the two
+  /// collapse into one cycle stop.
+  fn server_is_default(&self) -> bool {
+    match &self.selected_server {
+      None => true,
+      Some(id) => self.servers.first().is_some_and(|s| &s.id == id),
+    }
+  }
+
+  /// Cycle the Server row. The ring is the **default** stop (position 0, which
+  /// folds in `servers[0]` — pinning it is identical to the unset default, so it
+  /// isn't offered twice) followed by each **non-default** server
+  /// (`servers[1..]`). Landing on the default clears the pick (`None`) so the
+  /// daemon resolves the priority default / last-used; each other stop pins that
+  /// id. A switch clears the device selection (a stale selector wouldn't
+  /// validate against the new server) and re-seeds the native-knob descriptors
+  /// (the backend may change on a cross-backend switch, deepseek4 ds4 →
+  /// llamacpp).
   fn cycle_server(&mut self, forward: bool) {
-    if self.servers.is_empty() {
+    // <2 servers means only the default exists — nothing to cycle.
+    if self.servers.len() < 2 {
       self.selected_server = None;
       return;
     }
-    let ids: Vec<String> = self.servers.iter().map(|s| s.id.clone()).collect();
-    let cur_pos = match &self.selected_server {
-      None => 0,
-      Some(id) => ids.iter().position(|s| s == id).map(|i| i + 1).unwrap_or(0),
+    let mut stops: Vec<Option<String>> = vec![None];
+    stops.extend(self.servers.iter().skip(1).map(|s| Some(s.id.clone())));
+    let cur_pos = if self.server_is_default() {
+      0
+    } else {
+      stops
+        .iter()
+        .position(|s| s.as_deref() == self.selected_server.as_deref())
+        .unwrap_or(0)
     };
-    let len = ids.len() + 1; // +default
+    let len = stops.len();
     let next_pos = if forward {
       (cur_pos + 1) % len
     } else {
       (cur_pos + len - 1) % len
     };
-    self.selected_server = match next_pos {
-      0 => None,
-      i => Some(ids[i - 1].clone()),
-    };
+    self.selected_server = stops[next_pos].clone();
     self.set_user_str(KnobField::Device, None);
     self.device_cursor = 0;
     self.seed_native_descriptors();
   }
 
-  /// Value-column label for the Server row: the selected server id, or
-  /// `"default (<id>)"` naming the priority default the daemon resolves when
-  /// unset. `"default"` alone when no server was probed.
+  /// Value-column label for the Server row: `"<id> (default)"` naming the
+  /// priority default the daemon resolves when the pick is the default stop,
+  /// else the pinned server id. `"default"` alone when no server was probed.
   pub fn server_value_label(&self) -> String {
-    match &self.selected_server {
-      Some(id) => id.clone(),
-      None => match self.servers.first() {
-        Some(s) => format!("default ({})", s.id),
+    if self.server_is_default() {
+      return match self.servers.first() {
+        Some(s) => format!("{} (default)", s.id),
         None => "default".to_string(),
-      },
+      };
     }
+    // Not the default → an explicit non-`servers[0]` pin.
+    self
+      .selected_server
+      .clone()
+      .unwrap_or_else(|| "default".to_string())
   }
 
   /// Seed the resolved knobs + source map from the layered resolver
@@ -1824,21 +1845,33 @@ mod tests {
   }
 
   #[test]
-  fn server_row_default_names_priority_default_then_cycles_ids() {
+  fn server_row_default_names_priority_default_then_cycles_non_default_ids() {
     let mut s = LaunchPickerState::for_model("m");
     s.servers = two_llamacpp_servers();
     s.field = PickerField::Server;
-    // Unset → `default (<first server id>)`.
+    // Unset → `<first server id> (default)` (the id leads, `(default)` trails).
     assert_eq!(s.selected_server, None);
-    assert_eq!(s.server_value_label(), "default (llamacpp-rocm)");
-    // Ring: default → rocm → vulkan → wrap.
-    s.cycle_focused_value_next();
-    assert_eq!(s.selected_server.as_deref(), Some("llamacpp-rocm"));
-    assert_eq!(s.server_value_label(), "llamacpp-rocm");
+    assert_eq!(s.server_value_label(), "llamacpp-rocm (default)");
+    // Ring dedupes servers[0] into the default: default → vulkan → wrap.
+    // (No separate `llamacpp-rocm` stop — pinning it == the default.)
     s.cycle_focused_value_next();
     assert_eq!(s.selected_server.as_deref(), Some("llamacpp-vulkan"));
+    assert_eq!(s.server_value_label(), "llamacpp-vulkan");
     s.cycle_focused_value_next();
     assert_eq!(s.selected_server, None, "wraps back to default");
+  }
+
+  #[test]
+  fn pinning_the_first_server_reads_as_the_default() {
+    // last_params may persist an explicit `servers[0]` pick — it must render as
+    // the default (folded), and cycling from it advances to the next server.
+    let mut s = LaunchPickerState::for_model("m");
+    s.servers = two_llamacpp_servers();
+    s.field = PickerField::Server;
+    s.selected_server = Some("llamacpp-rocm".into());
+    assert_eq!(s.server_value_label(), "llamacpp-rocm (default)");
+    s.cycle_focused_value_next();
+    assert_eq!(s.selected_server.as_deref(), Some("llamacpp-vulkan"));
   }
 
   #[test]
