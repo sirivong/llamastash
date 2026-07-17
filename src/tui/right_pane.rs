@@ -339,6 +339,26 @@ pub(crate) fn bottom_hint_chips(app: &App) -> Vec<crate::tui::hint_picker::Ranke
             app.hint_with(Focus::RightPane, Action::EnterEdit, "edit"),
           );
         }
+        // On the multi-GPU Device row, `Space` toggles the cursor GPU in/out of
+        // the selection — the primary action there, and not obvious from the
+        // ←/→ cycle affordance. Surface `space:choose` with a high priority
+        // (rank 12, just under `launch`) so it survives width pressure while the
+        // row is active.
+        let device_row_focused = picker_ref
+          .map(|p| {
+            p.field
+              == crate::tui::launch_picker::PickerField::Knob(
+                crate::launch::flag_aliases::KnobField::Device,
+              )
+          })
+          .unwrap_or(false);
+        if device_row_focused {
+          push(
+            &mut chips,
+            12,
+            app.hint_with(Focus::RightPane, Action::ToggleDevice, "choose"),
+          );
+        }
         if let (Some(down), Some(up)) = (
           app.hint_with(Focus::RightPane, Action::MoveDown, "cycle fields"),
           app.hint_with(Focus::RightPane, Action::MoveUp, "cycle fields"),
@@ -564,14 +584,21 @@ fn render_header_path(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Pa
 /// backend the focused model runs on. Backend-agnostic — see
 /// [`focused_backend_badge`].
 fn render_header_badge(frame: &mut Frame<'_>, area: Rect, badge: &BackendBadge, palette: &Palette) {
-  let chip = Span::styled(
-    badge.chip.clone(),
-    Style::default()
-      .fg(palette.on_accent)
-      .bg(palette.accent)
-      .add_modifier(Modifier::BOLD),
-  );
-  frame.render_widget(Paragraph::new(Line::from(chip)), area);
+  let chip_style = Style::default()
+    .fg(palette.on_accent)
+    .bg(palette.accent)
+    .add_modifier(Modifier::BOLD);
+  // Each backend id is its own accent-filled chip, separated by a plain
+  // (no-background) space so two backends read as two distinct badges
+  // (` ds4 ` ` llamacpp `) rather than one merged strip.
+  let mut spans: Vec<Span<'static>> = Vec::with_capacity(badge.ids.len() * 2);
+  for id in &badge.ids {
+    if !spans.is_empty() {
+      spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(format!(" {id} "), chip_style));
+  }
+  frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Resolve the path the right pane is currently focused on — running
@@ -598,11 +625,11 @@ fn focused_is_lemonade_registry(app: &App) -> bool {
 /// at least one backend returns one via [`focused_backend_badge`].
 /// Backend-agnostic so a future backend adds a chip without touching the layout.
 struct BackendBadge {
-  /// Chip text rendered with the accent background — one or more backend ids,
-  /// padded (` ds4 ` for a running row, ` ds4  llamacpp ` for a selected
-  /// deepseek4 that both engines can serve). Owned so it names any backend
-  /// generically.
-  chip: String,
+  /// One or more backend ids, priority-ordered. Each renders as its own
+  /// accent-filled chip (` ds4 `, ` llamacpp `) with a plain gap between, so a
+  /// multi-backend model reads as separate badges. Owned so it names any
+  /// backend generically.
+  ids: Vec<String>,
 }
 
 /// Resolve the header badge for the focused model, or `None` when no backend
@@ -658,9 +685,7 @@ fn focused_backend_badge(app: &App) -> Option<BackendBadge> {
   {
     return None;
   }
-  Some(BackendBadge {
-    chip: format!(" {} ", ids.join("  ")),
-  })
+  Some(BackendBadge { ids })
 }
 
 /// Number of vertical rows the focused path needs at `inner_width`,
@@ -943,7 +968,7 @@ mod tests {
     app.list_cursor = 2;
     app.managed[0].backend = Some("lemonade".into());
     let badge = focused_backend_badge(&app).expect("running lemonade → badge");
-    assert_eq!(badge.chip.trim(), "lemonade");
+    assert_eq!(badge.ids, vec!["lemonade".to_string()]);
 
     // A selected (not-running) Lemonade-registry model badges from its source.
     let mut sel_app = App::new(AppOptions::default());
@@ -958,7 +983,7 @@ mod tests {
       .position(|r| r.path() == Some(model_path.as_path()))
       .expect("model row present");
     let sel_badge = focused_backend_badge(&sel_app).expect("lemonade source → badge");
-    assert_eq!(sel_badge.chip.trim(), "lemonade");
+    assert_eq!(sel_badge.ids, vec!["lemonade".to_string()]);
   }
 
   #[test]
@@ -975,8 +1000,9 @@ mod tests {
       .position(|r| r.path() == Some(std::path::Path::new("/m/qwen.gguf")))
       .expect("model row present");
     let badge = focused_backend_badge(&app).expect("selected multi-backend → badge");
-    // llama.cpp is not hidden when a second engine (ds4) also serves the model.
-    assert_eq!(badge.chip.trim(), "ds4  llamacpp");
+    // llama.cpp is not hidden when a second engine (ds4) also serves the model —
+    // and each id is a separate chip (` ds4 ` ` llamacpp `), not one merged strip.
+    assert_eq!(badge.ids, vec!["ds4".to_string(), "llamacpp".to_string()]);
 
     // But a llama.cpp-*only* model stays chip-less — the default backend is the
     // implicit norm, so a badge on every plain model would be noise.
@@ -984,6 +1010,44 @@ mod tests {
     assert!(
       focused_backend_badge(&app).is_none(),
       "llamacpp-only model must not carry a chip"
+    );
+  }
+
+  #[test]
+  fn multi_backend_badge_paints_separate_chips_with_a_plain_gap() {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    // Two backends must read as two distinct badges: each accent-filled, with a
+    // plain (non-accent) space between them — not one merged accent strip.
+    let mut app = App::new(AppOptions::default());
+    let mut m = fake_model();
+    m.supported_backends = vec!["ds4".into(), "llamacpp".into()];
+    app.models = vec![m];
+    app.list_cursor = app
+      .rendered_rows()
+      .iter()
+      .position(|r| r.path() == Some(std::path::Path::new("/m/qwen.gguf")))
+      .expect("model row present");
+    let badge = focused_backend_badge(&app).expect("multi-backend badge");
+    let palette = app.palette();
+    let mut term = Terminal::new(TestBackend::new(60, 1)).unwrap();
+    term
+      .draw(|f| render_header_badge(f, Rect::new(0, 0, 60, 1), &badge, palette))
+      .unwrap();
+    let buf = term.backend().buffer().clone();
+    let accent = palette.accent;
+    let is_accent = |x: u16| buf.cell((x, 0)).unwrap().bg == accent;
+    // A plain space cell flanked on both sides by accent cells is the inter-chip
+    // gap; the trailing blank area (default bg, no accent neighbour) can't
+    // satisfy this, so it uniquely proves the two chips are separated.
+    let gap = (1..buf.area.width - 1).any(|x| {
+      let c = buf.cell((x, 0)).unwrap();
+      c.symbol() == " " && c.bg != accent && is_accent(x - 1) && is_accent(x + 1)
+    });
+    assert!(
+      gap,
+      "a plain gap cell must sit between the two accent-filled backend chips"
     );
   }
 

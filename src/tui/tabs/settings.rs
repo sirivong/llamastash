@@ -76,6 +76,13 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
       m.launch_id.clone(),
       palette,
     ));
+    // Server (build/binary) the launch ran on — mirrors the editable picker's
+    // server row so the operator can see which build served the model. Shown
+    // only when the model has more than one compatible server (a real choice);
+    // a single-server model has nothing to disambiguate.
+    if let Some(label) = running_server_label(app, m) {
+      lines.push(crate::tui::fmt::kv_row("server", label, palette));
+    }
   } else if let Some(pv) = picker_view {
     // Editable: duplicate-launch heads-up, then the preset cycle row.
     if pv.active_instances > 0 {
@@ -540,6 +547,29 @@ fn format_persisted_knob_value(knobs: &crate::config::TypedKnobs, field: KnobFie
   }
 }
 
+/// Read-only `server` row label for a running launch, or `None` when the model
+/// has one (or zero) compatible servers so there's nothing to disambiguate.
+/// Mirrors the editable picker's `server_value_label`: the priority-default
+/// server (catalog first) reads `<id> (default)`, an explicitly-picked
+/// non-default server reads its bare id. A launch that recorded no server pick
+/// took the default, so it renders the default label too.
+fn running_server_label(app: &App, m: &ManagedRow) -> Option<String> {
+  let servers = app.compatible_servers(&m.path);
+  if servers.len() < 2 {
+    return None;
+  }
+  let default_id = servers.first().map(|s| s.id.as_str());
+  let label = match m.server.as_deref() {
+    Some(id) if Some(id) != default_id => id.to_string(),
+    Some(id) => format!("{id} (default)"),
+    None => match default_id {
+      Some(id) => format!("{id} (default)"),
+      None => "default".to_string(),
+    },
+  };
+  Some(label)
+}
+
 fn bool_label(v: &Option<KnobValue<bool>>) -> String {
   match v.set_value().copied() {
     Some(true) => "on".into(),
@@ -675,6 +705,88 @@ mod tests {
     assert_eq!(clamp_scroll_with_margin(0, 5, 50, 10), 0);
     // Zero viewport returns 0 (would otherwise underflow).
     assert_eq!(clamp_scroll_with_margin(5, 5, 0, 30), 0);
+  }
+
+  fn server_with(id: &str, selector: &str) -> crate::backend::Server {
+    crate::backend::Server {
+      id: id.into(),
+      backend_id: crate::backend::DEFAULT_BACKEND_ID.into(),
+      binary: PathBuf::from(format!("/builds/{id}/llama-server")),
+      name: id.into(),
+      devices: vec![crate::backend::Device {
+        selector: selector.into(),
+        gpu_backend: "ROCm".into(),
+        name: "Test GPU".into(),
+        total_mib: Some(24576),
+        free_mib: Some(24000),
+      }],
+    }
+  }
+
+  fn app_with_two_servers(path: &str) -> App {
+    let mut app = App::new(AppOptions::default());
+    let mut model = fake_model(path, "/m");
+    model.supported_backends = vec![crate::backend::DEFAULT_BACKEND_ID.to_string()];
+    app.models = vec![model];
+    app.servers = vec![
+      server_with("llamacpp-rocm", "ROCm0"),
+      server_with("llamacpp-vulkan", "Vulkan0"),
+    ];
+    app
+  }
+
+  #[test]
+  fn running_server_label_reports_default_and_explicit_builds() {
+    use crate::tui::app::ManagedRow;
+    let app = app_with_two_servers("/m/a.gguf");
+    let path = PathBuf::from("/m/a.gguf");
+    // No recorded pick → the launch took the priority-default (catalog first).
+    let m_default = ManagedRow {
+      path: path.clone(),
+      server: None,
+      ..Default::default()
+    };
+    assert_eq!(
+      running_server_label(&app, &m_default),
+      Some("llamacpp-rocm (default)".to_string())
+    );
+    // An explicit non-default build reads its bare id.
+    let m_vk = ManagedRow {
+      path: path.clone(),
+      server: Some("llamacpp-vulkan".into()),
+      ..Default::default()
+    };
+    assert_eq!(
+      running_server_label(&app, &m_vk),
+      Some("llamacpp-vulkan".to_string())
+    );
+    // Pinning the priority-default build reads `(default)` too.
+    let m_rocm = ManagedRow {
+      path,
+      server: Some("llamacpp-rocm".into()),
+      ..Default::default()
+    };
+    assert_eq!(
+      running_server_label(&app, &m_rocm),
+      Some("llamacpp-rocm (default)".to_string())
+    );
+  }
+
+  #[test]
+  fn running_server_label_hidden_with_a_single_server() {
+    use crate::tui::app::ManagedRow;
+    let mut app = app_with_two_servers("/m/a.gguf");
+    app.servers.truncate(1);
+    let m = ManagedRow {
+      path: PathBuf::from("/m/a.gguf"),
+      server: None,
+      ..Default::default()
+    };
+    assert_eq!(
+      running_server_label(&app, &m),
+      None,
+      "a single server has nothing to disambiguate"
+    );
   }
 
   fn fake_model(path: &str, parent: &str) -> crate::discovery::DiscoveredModel {

@@ -1193,13 +1193,18 @@ impl LaunchPickerState {
   }
 
   /// Display for the Device row. With >1 device (the only case the row is
-  /// shown) it renders a checkbox list — `[x]`/`[ ]` per selector in catalog
-  /// order, the walk cursor marked with a leading `>`, and a `(all)` suffix
-  /// when every box is ticked (the unset / inherited default). `Space` toggles
-  /// the cursor's box; ←/→ move the cursor. Below two devices it degrades to
-  /// the plain `"<name> (<backend>)"` / `"inherited"` label.
+  /// shown) it renders like every other cyclable knob — a single stop the
+  /// ◀ ▶ arrows wrap — but each stop is a GPU with a `[x]`/`[ ]` checkbox in
+  /// front: `[x] Vulkan1  ·  2 of 3`. `←/→` cycle which GPU is shown (walk the
+  /// cursor); `Space` toggles its box. The `· N of M` / `· all` suffix keeps
+  /// the whole-selection count visible while only one stop shows. Below two
+  /// devices it degrades to the plain `"<name> (<backend>)"` / `"inherited"`
+  /// label.
   pub fn device_value_display(&self) -> String {
     let devices = self.current_devices();
+    if devices.is_empty() {
+      return INHERITED_LABEL.into();
+    }
     if devices.len() < 2 {
       let sel = self
         .effective_str(KnobField::Device)
@@ -1213,21 +1218,18 @@ impl LaunchPickerState {
     }
     let picked: std::collections::HashSet<String> = self.device_selection().into_iter().collect();
     let cursor = self.device_cursor.min(devices.len() - 1);
-    let mut parts: Vec<String> = Vec::with_capacity(devices.len());
-    for (i, d) in devices.iter().enumerate() {
-      let ticked = if picked.contains(&d.selector) {
-        "[x]"
-      } else {
-        "[ ]"
-      };
-      let mark = if i == cursor { ">" } else { " " };
-      parts.push(format!("{mark}{ticked}{}", d.selector));
-    }
-    let mut out = parts.join(" ");
-    if picked.len() == devices.len() {
-      out.push_str("  (all)");
-    }
-    out
+    let d = &devices[cursor];
+    let ticked = if picked.contains(&d.selector) {
+      "[x]"
+    } else {
+      "[ ]"
+    };
+    let summary = if picked.len() == devices.len() {
+      "all".to_string()
+    } else {
+      format!("{} of {}", picked.len(), devices.len())
+    };
+    format!("{ticked} {}  ·  {summary}", d.selector)
   }
 }
 
@@ -1725,20 +1727,15 @@ mod tests {
   }
 
   #[test]
-  fn device_value_display_renders_checkbox_list_with_cursor_and_all() {
+  fn device_value_display_shows_cursor_stop_checkbox_and_count() {
     let mut s = LaunchPickerState::for_model("test");
     s.servers = catalog_two_vendors();
-    // Unset == all GPUs → every box ticked, cursor on the first, `(all)` tag.
-    assert_eq!(
-      s.device_value_display(),
-      ">[x]Vulkan0  [x]Vulkan1  [x]ROCm0  (all)"
-    );
-    // Toggle the cursor GPU off → explicit N-1 set, cursor stays, no `(all)`.
+    // Unset == all GPUs → cursor on the first, its box ticked, `· all` count.
+    assert_eq!(s.device_value_display(), "[x] Vulkan0  ·  all");
+    // Toggle the cursor GPU off → explicit N-1 set, cursor stays on it, the
+    // count drops to `2 of 3`.
     s.toggle_focused_device();
-    assert_eq!(
-      s.device_value_display(),
-      ">[ ]Vulkan0  [x]Vulkan1  [x]ROCm0"
-    );
+    assert_eq!(s.device_value_display(), "[ ] Vulkan0  ·  2 of 3");
   }
 
   #[test]
@@ -1746,15 +1743,13 @@ mod tests {
     let mut s = LaunchPickerState::for_model("test");
     s.servers = catalog_two_vendors();
     s.field = PickerField::Knob(KnobField::Device);
-    // ←/→ walk the cursor without changing the selection.
+    // ←/→ walk the cursor without changing the selection — one stop shown.
     s.cycle_focused_value_next();
-    assert!(s
-      .device_value_display()
-      .starts_with(" [x]Vulkan0 >[x]Vulkan1"));
+    assert_eq!(s.device_value_display(), "[x] Vulkan1  ·  all");
     s.cycle_focused_value_next();
-    assert!(s.device_value_display().contains(">[x]ROCm0"));
+    assert_eq!(s.device_value_display(), "[x] ROCm0  ·  all");
     s.cycle_focused_value_next(); // wrap back to the first
-    assert!(s.device_value_display().starts_with(">[x]Vulkan0"));
+    assert_eq!(s.device_value_display(), "[x] Vulkan0  ·  all");
     // Selection untouched by walking.
     assert_eq!(s.user_value_str(KnobField::Device), None);
   }

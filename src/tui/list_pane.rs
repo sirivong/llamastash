@@ -583,14 +583,6 @@ const COLUMNS: &[Column] = &[
     width: 6,
     rank: 10,
   },
-  // Multi-backend hosts only (gated like Device). `llamacpp` (8) is the widest
-  // label; low priority (rank 55), so it yields width right after Params.
-  Column {
-    id: ColumnId::Backend,
-    label: "Backend",
-    width: 8,
-    rank: 55,
-  },
   Column {
     id: ColumnId::Mode,
     label: "Mode",
@@ -598,6 +590,15 @@ const COLUMNS: &[Column] = &[
     // truncates with an ellipsis, which is fine for the secondary signal.
     width: 6,
     rank: 50,
+  },
+  // Multi-backend hosts only (gated like Device). Rendered after Mode.
+  // `llamacpp` (8) is the widest label; low priority (rank 55), so it yields
+  // width right after Params.
+  Column {
+    id: ColumnId::Backend,
+    label: "Backend",
+    width: 8,
+    rank: 55,
   },
   // `:port` for a u16 maxes at 6 cells (`:65535`); the column
   // stays flush at 6 so the header label "Port" lines up.
@@ -1063,6 +1064,7 @@ fn column_value(id: ColumnId, model: &ListRow) -> String {
     backend,
     port,
     device,
+    launch_id,
     ..
   } = model
   else {
@@ -1074,7 +1076,19 @@ fn column_value(id: ColumnId, model: &ListRow) -> String {
   // the CLI table instead of a mix of blank / `Unknown` / `unknown` (e.g. a
   // registry-served Lemonade row with no GGUF header).
   match id {
-    ColumnId::Device => crate::tui::fmt::list_cell(device.as_deref(), dash),
+    // A launch with an explicit `--device` shows its selector(s). A *running*
+    // launch on the device-selecting default backend with no override targets
+    // every GPU (llama.cpp's default), so it reads `all` instead of a blank —
+    // otherwise the column shows a device for some running rows and nothing for
+    // others. Device-less backends (no `--device` concept) and not-yet-launched
+    // catalog rows keep the dash placeholder.
+    ColumnId::Device => match device.as_deref() {
+      Some(d) => d.to_string(),
+      None if launch_id.is_some() && backend == crate::backend::DEFAULT_BACKEND_ID => {
+        "all".to_string()
+      }
+      None => dash.into(),
+    },
     ColumnId::Arch => crate::tui::fmt::list_cell(Some(arch), dash),
     ColumnId::Param => crate::tui::fmt::list_cell(Some(params), dash),
     ColumnId::Quant => crate::tui::fmt::list_cell(Some(quant), dash),
@@ -1363,6 +1377,58 @@ mod tests {
       launch_ids,
       vec!["L2".to_string(), "L1".to_string()],
       "duplicate launches surface as separate rows in caller order"
+    );
+  }
+
+  #[test]
+  fn device_column_reads_all_for_default_running_row_dash_otherwise() {
+    let m = fake("/m/a.gguf", "/m");
+    let dash = crate::tui::glyphs::active().placeholder();
+    // A running llama.cpp launch with no explicit --device targets every GPU;
+    // the Device column reads `all` so it doesn't blank out inconsistently next
+    // to launches that pinned a selector.
+    let running = RunningLaunchRow {
+      launch_id: "L1".into(),
+      path: m.path.clone(),
+      port: 41100,
+      state: SurfaceState::Ready,
+      device: None,
+      backend: Some(crate::backend::DEFAULT_BACKEND_ID.into()),
+    };
+    assert_eq!(
+      column_value(ColumnId::Device, &running_row(&m, &running)),
+      "all"
+    );
+    // A launch that pinned selectors shows them verbatim.
+    let pinned = RunningLaunchRow {
+      device: Some("Vulkan0,Vulkan1".into()),
+      ..running.clone()
+    };
+    assert_eq!(
+      column_value(ColumnId::Device, &running_row(&m, &pinned)),
+      "Vulkan0,Vulkan1"
+    );
+    // A not-launched catalog row keeps the dash placeholder (no launch → no
+    // device assignment).
+    let catalog = model_row(
+      &m,
+      false,
+      SurfaceState::NotLaunched,
+      None,
+      None,
+      None,
+      crate::backend::DEFAULT_BACKEND_ID.into(),
+    );
+    assert_eq!(column_value(ColumnId::Device, &catalog), dash);
+    // A running row on a non-default (device-less) backend stays dash even with
+    // no override — that backend has no --device concept, so `all` would lie.
+    let other_backend = RunningLaunchRow {
+      backend: Some("someotherbackend".into()),
+      ..running.clone()
+    };
+    assert_eq!(
+      column_value(ColumnId::Device, &running_row(&m, &other_backend)),
+      dash
     );
   }
 
@@ -1964,6 +2030,18 @@ mod tests {
       multi.visible.last().map(|c| c.id),
       Some(ColumnId::Device),
       "Device renders last on multi-GPU hosts"
+    );
+  }
+
+  #[test]
+  fn backend_column_renders_after_mode_column() {
+    // Source order is display order; the Backend column must sit to the right
+    // of Mode.
+    let mode = COLUMNS.iter().position(|c| c.id == ColumnId::Mode);
+    let backend = COLUMNS.iter().position(|c| c.id == ColumnId::Backend);
+    assert!(
+      matches!((mode, backend), (Some(m), Some(b)) if m < b),
+      "Backend column must render after Mode (mode={mode:?}, backend={backend:?})"
     );
   }
 

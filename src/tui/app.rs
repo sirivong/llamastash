@@ -118,6 +118,11 @@ pub struct ManagedRow {
   /// on by the ds4 badge / knob panel so a running row reflects the real
   /// backend, not the `list_models` routing prediction. `None` when untagged.
   pub backend: Option<String>,
+  /// Server (build/binary) id the launch picked (`status` `params.server`),
+  /// when one was chosen. Drives the running view's read-only `server` row so
+  /// the operator can see which build served the model. `None` when the launch
+  /// took the backend's default server (no explicit pick).
+  pub server: Option<String>,
 }
 
 /// Persisted "last successful launch params" for one model, fetched
@@ -1548,7 +1553,7 @@ impl App {
   /// of that backend (in catalog order). Falls back to the whole catalog when
   /// the model declares no supported backends (older daemon / no metadata).
   /// Feeds the launch picker's Server row.
-  fn compatible_servers(&self, path: &Path) -> Vec<crate::backend::Server> {
+  pub(crate) fn compatible_servers(&self, path: &Path) -> Vec<crate::backend::Server> {
     let supported: Vec<String> = self
       .models
       .iter()
@@ -2296,6 +2301,7 @@ fn parse_external_row(row: &Value) -> Option<ManagedRow> {
     extras: Vec::new(),
     backend_knobs: Default::default(),
     backend: None,
+    server: None,
   })
 }
 
@@ -2396,6 +2402,13 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     .unwrap_or_default();
   // The backend this launch actually resolved to (honest ds4 signal).
   let backend = row.get("backend").and_then(Value::as_str).map(String::from);
+  // The server (build/binary) the launch picked, when one was chosen — drives
+  // the running view's read-only `server` row.
+  let server = row
+    .get("params")
+    .and_then(|p| p.get("server"))
+    .and_then(Value::as_str)
+    .map(String::from);
   Some(ManagedRow {
     launch_id,
     path,
@@ -2410,6 +2423,7 @@ fn parse_status_row(row: &Value) -> Option<ManagedRow> {
     extras,
     backend_knobs,
     backend,
+    server,
   })
 }
 

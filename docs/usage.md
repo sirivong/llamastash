@@ -1025,22 +1025,30 @@ these, `--override-tensor` works through the `extras` row.
 
 The `device` row (`--device` / `-d`) pins a model to a chosen subset of
 GPUs instead of letting `llama-server` split it across every visible
-card. In the TUI it's a **checkbox toggle**: `←/→` walk a cursor over
-the devices the selected server reports via `--list-devices` (selectors
-such as `CUDA0`, `ROCm0`, `Vulkan0`), and `Space` toggles the cursor's
-GPU in or out of the selection. Every box ticked (`(all)`) is the
-llama-server default — no `--device` flag — and clearing the last box
-snaps back to it; Backspace resets the row. Selectors are passed through
-verbatim (comma-joined for a multi-GPU pick, e.g. `ROCm0,ROCm1`), so
-only devices the server's binary exposes are offered — the list rescopes
-when you cycle the `server` row. On the CLI, `start --device ROCm0,ROCm1`
-takes the same comma-separated list.
+card. In the TUI it uses the same `◀ ▶` single-stop style as the other
+knobs, with a `[ ]` checkbox in front of each stop: `←/→` walk a cursor
+through the devices the selected server reports via `--list-devices`
+(one shown at a time, e.g. `[x] ROCm0  ·  2 of 3` — the selector, its
+checkbox, and how many of the N GPUs are on), and `Space` toggles the
+shown GPU in or out of the selection (a `Space:choose` hint surfaces
+while the row is active). Every box ticked (`· all`) is the llama-server
+default — no `--device` flag — and clearing the last box snaps back to
+it; Backspace resets the row. Selectors are passed through verbatim
+(comma-joined for a multi-GPU pick, e.g. `ROCm0,ROCm1`), so only devices
+the server's binary exposes are offered — the list rescopes when you
+cycle the `server` row. On the CLI, `start --device ROCm0,ROCm1` takes
+the same comma-separated list.
 
 The whole **Multi-GPU placement** group (`device`, `tensor_split`,
 `main_gpu`, `split_mode`) — and the matching `Device` column in the
 model list — appear **only when more than one GPU device is detected**.
 Single-GPU and CPU-only hosts never see them, so the launcher stays
-uncluttered when there's no device choice to make. The bottom `extras` row holds the free-form argv tail for
+uncluttered when there's no device choice to make. In the model list the
+`Device` column reads `all` for a running launch that targets every GPU
+(no `--device`), so it never blanks out inconsistently next to launches
+that pinned a selector. Once a model is running, the read-only Settings
+view shows a `server` row naming the build that served it (when the
+model has more than one compatible server). The bottom `extras` row holds the free-form argv tail for
 flags the typed editor doesn't model; forbidden flags
 (`--host`, `--listen`, `--bind`, `--api-key`, `--ssl-*`) surface a
 red inline warning with secret values redacted.
