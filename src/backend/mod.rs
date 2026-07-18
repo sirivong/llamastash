@@ -79,19 +79,6 @@ use crate::launch::mode::LaunchMode;
 use crate::launch::native_knobs::NativeKnobDescriptor;
 use crate::launch::params::{BackendChoice, LaunchParams};
 
-/// All backend configuration, grouped under the `backend:` map in
-/// `config.yaml`. Each backend owns its own typed config struct in its own
-/// module; this is the single aggregation point the top-level [`crate::config::Config`]
-/// carries. llama.cpp is the always-on default backend, so it has no `enabled`
-/// field — only the optional engines do.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "snake_case")]
-pub struct BackendConfig {
-  pub llamacpp: crate::backend::llama_cpp::LlamaCppConfig,
-  pub lemonade: crate::backend::lemonade::LemonadeConfig,
-  pub ds4: crate::backend::ds4::Ds4Config,
-}
-
 /// How a backend manages the lifecycle of the models it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lifecycle {
@@ -802,6 +789,24 @@ pub trait Backend {
   ) -> Result<serde_json::Value, crate::ipc::protocol::ErrorObject> {
     crate::daemon::launch_service::stop_supervised(ctx, launch_id, grace_secs).await
   }
+}
+
+// ============================================================================
+// BACKEND REGISTRY — the only place (besides a backend's own module) that names
+// a specific backend.
+// ============================================================================
+
+/// All backend configuration, grouped under the `backend:` map in
+/// `config.yaml`. Each backend owns its own typed config struct in its own
+/// module; this is the single aggregation point the top-level [`crate::config::Config`]
+/// carries. llama.cpp is the always-on default backend, so it has no `enabled`
+/// field — only the optional engines do.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "snake_case")]
+pub struct BackendConfig {
+  pub llamacpp: crate::backend::llama_cpp::LlamaCppConfig,
+  pub lemonade: crate::backend::lemonade::LemonadeConfig,
+  pub ds4: crate::backend::ds4::Ds4Config,
 }
 
 /// Zero-cost, exhaustive dispatch over the available backends.

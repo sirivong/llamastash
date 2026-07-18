@@ -263,7 +263,7 @@ places.
 - [x] ~~A config CLI command that opens the loaded config file using `$EDITOR`.~~ — `llamastash config` opens the active config path and waits for the editor to exit.
 - [x] config -> bindings command that prints all current binidngs in yaml format. This can be used to copy bindings from one config to another.
 - [x] check to see leaked backend stuff for example src/cli/mod.rs L:121 few commits ago (maybe fixed already) and LemonadeConfig, Ds4Config etc seems to be leaking as well — **done (2026-07-15 config-grouping refactor):** `LemonadeConfig`/`Ds4Config` moved into their backend modules, `cli/mod.rs`'s `--llama-server` write retargeted to `backend.llamacpp` (now writes the `servers[]` array after the 2026-07-16 server abstraction). Remaining generic-code leaks tracked under the R7 config-grouping bullet: the device-catalog leak is **largely closed** by the server abstraction (neutral `Server` on `LaunchEnv`); the `/props`+gate, `DaemonOptions`, and orphan residuals are done/tracked above.
-- [ ] put all code that needs touching to add new backend to top of backend/mod.rs or in a logical place together
+- [x] put all code that needs touching to add new backend to top of backend/mod.rs or in a logical place together
 
 ## General Roadmap
 
