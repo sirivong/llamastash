@@ -173,10 +173,10 @@ fn enter_on_model_opens_inline_launch_picker_in_settings_tab() {
   assert_eq!(app.focus, Focus::RightPane);
   assert_eq!(app.right_tab, RightTab::Settings);
   assert!(app.launch_picker.is_some(), "picker state must materialise");
-  // Bumped to 40 rows so the full inline picker (ctx, reasoning, the
-  // 13 typed-knob rows, extras, and the launch-chip footer) fits in a
+  // 41 rows so the full inline picker (the backend badge, ctx, reasoning,
+  // the 13 typed-knob rows, extras, and the launch-chip footer) fits in a
   // single frame without the bottom rows scrolling off-screen.
-  let frame = render_to_string(&mut app, 120, 40);
+  let frame = render_to_string(&mut app, 120, 41);
   assert!(
     frame.contains("Launch settings"),
     "Settings tab heading missing: {frame}"

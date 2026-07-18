@@ -1497,22 +1497,14 @@ impl App {
   /// and the model list's `Device` column only appear when `true`, so
   /// single-GPU / CPU-only users aren't shown a control that can never
   /// carry a choice.
+  /// Gates the Models-list Device column and the picker's multi-GPU knob
+  /// group. True when **some single server** offers more than one device — a
+  /// launch targets one server's devices, so cross-build selector variety (the
+  /// same physical GPU seen as `ROCm0` by one build and `Vulkan0` by another)
+  /// is a *server* choice, not a device one, and must not trip this. A
+  /// single-GPU host with several llama.cpp builds stays single-device here.
   pub fn multi_device(&self) -> bool {
-    self.flat_device_count() > 1
-  }
-
-  /// Count of distinct `--device` selectors across every server, deduped
-  /// (first server wins). The neutral successor to the old flat
-  /// `device_catalog.len()` — derived from `servers` on demand. Gates the
-  /// Models-list Device column.
-  fn flat_device_count(&self) -> usize {
-    let mut seen = std::collections::HashSet::new();
-    for s in &self.servers {
-      for d in &s.devices {
-        seen.insert(d.selector.as_str());
-      }
-    }
-    seen.len()
+    self.servers.iter().any(|s| s.devices.len() > 1)
   }
 
   /// Binary + compute-backend label for the focused running model's device
@@ -3063,6 +3055,34 @@ mod tests {
     let mut app = running_on_device_app(Some("ROCm0"), "/usr/bin/llama-server");
     app.servers = vec![srv("/usr/bin/llama-server", vec![dev("CUDA0", "CUDA")])];
     assert!(app.focused_override_device().is_none());
+  }
+
+  #[test]
+  fn multi_device_gates_on_within_server_count_not_cross_build_selectors() {
+    let mut app = App::new(AppOptions::default());
+    // One physical GPU, two llama.cpp builds: the HIP build calls it ROCm0,
+    // the Vulkan build calls it Vulkan0. Two distinct selectors, but no
+    // per-launch device choice on either server → column stays hidden.
+    app.servers = vec![
+      srv("/opt/hip/llama-server", vec![dev("ROCm0", "ROCm")]),
+      srv("/opt/vulkan/llama-server", vec![dev("Vulkan0", "Vulkan")]),
+    ];
+    assert!(
+      !app.multi_device(),
+      "single GPU seen by two builds is not a multi-device host"
+    );
+    // A genuine two-GPU server flips it on.
+    app.servers = vec![srv(
+      "/opt/hip/llama-server",
+      vec![dev("ROCm0", "ROCm"), dev("ROCm1", "ROCm")],
+    )];
+    assert!(
+      app.multi_device(),
+      "one server with two devices → column shows"
+    );
+    // No servers at all → single-device by definition.
+    app.servers.clear();
+    assert!(!app.multi_device());
   }
 
   #[test]

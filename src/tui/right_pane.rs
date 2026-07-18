@@ -644,10 +644,9 @@ struct BackendBadge {
 /// serves the model, e.g. a deepseek4's ` ds4  llamacpp `), falling back to the
 /// `list_models` routing prediction, then the discovery-source backend.
 ///
-/// A set that is *only* the default backend (a plain llama.cpp model, or a
-/// llama.cpp-only running row) is suppressed — the default is the implicit norm
-/// and a chip on every model would be noise. Plain id chips otherwise — no
-/// per-backend special-casing, so a new backend surfaces without touching this.
+/// Every model with a resolved backend carries a chip, including plain
+/// llama.cpp-only rows. Plain id chips throughout — no per-backend
+/// special-casing, so a new backend surfaces without touching this.
 fn focused_backend_badge(app: &App) -> Option<BackendBadge> {
   let path = focused_path(app)?;
   let running = app.right_pane_focus();
@@ -678,11 +677,7 @@ fn focused_backend_badge(app: &App) -> Option<BackendBadge> {
       }
     }
   };
-  if ids.is_empty()
-    || ids
-      .iter()
-      .all(|id| id == crate::backend::DEFAULT_BACKEND_ID)
-  {
+  if ids.is_empty() {
     return None;
   }
   Some(BackendBadge { ids })
@@ -1004,13 +999,11 @@ mod tests {
     // and each id is a separate chip (` ds4 ` ` llamacpp `), not one merged strip.
     assert_eq!(badge.ids, vec!["ds4".to_string(), "llamacpp".to_string()]);
 
-    // But a llama.cpp-*only* model stays chip-less — the default backend is the
-    // implicit norm, so a badge on every plain model would be noise.
+    // A llama.cpp-only model now carries its own chip too — the badge is no
+    // longer suppressed for the default backend.
     app.models[0].supported_backends = vec!["llamacpp".into()];
-    assert!(
-      focused_backend_badge(&app).is_none(),
-      "llamacpp-only model must not carry a chip"
-    );
+    let llama_only = focused_backend_badge(&app).expect("llamacpp-only → badge");
+    assert_eq!(llama_only.ids, vec!["llamacpp".to_string()]);
   }
 
   #[test]
