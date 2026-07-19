@@ -6,7 +6,7 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 - `llamastash config` opens the active config file in `$EDITOR`.
 - `llamastash config bindings` prints every effective keybinding as YAML for copying between configs.
-- The launch picker's Device row uses the same `◀ ▶` single-stop style as other knobs — one GPU shown as `[x] ROCm0  ·  2 of 3`, `←/→` walk the cursor, `Space` toggles it (a high-priority `Space:choose` hint shows while the row is active), scoped to the selected server (unset = all GPUs); the read-only running view gains a `server` row showing which build served the model; the right-pane header badges every backend a model supports as separate chips (e.g. ` ds4 ` ` llamacpp `); the model list's Backend column now renders after Mode and its Device column reads `all` for a running all-GPU launch; and `doctor` gains a configured-servers advisory (warns on a missing `servers[].binary`, summarizes the rest).
+- The launch picker's Device row uses the same `◀ ▶` single-stop style as other knobs — one GPU shown as `[x] ROCm0  ·  2 of 3`, `←/→` walk the cursor, `Space` toggles it (a high-priority `Space:choose` hint shows while the row is active), scoped to the selected server (unset = all GPUs); the read-only running view gains a `server` row showing which build served the model; the right-pane header badges every backend a model supports as separate chips (e.g. ` ds4 ` ` llamacpp `); the TUI model list's Backend column now renders after Mode and gains a Device column that reads `all` for a running all-GPU launch (the `llamastash list` CLI table keeps its leaner `NAME ARCH PARAMS QUANT CTX SIZE [BACKEND] STATUS` column set); and `doctor` gains a configured-servers advisory (warns on a missing `servers[].binary`, summarizes the rest).
 
 ### Changed
 
@@ -16,9 +16,14 @@ All notable changes to LlamaStash will be documented in this file. The format fo
 
 ### Fixed
 
+- `start --server <id>` now rejects an unknown server id (exit 64, listing the valid ids) instead of silently falling back to the default binary and recording the bogus value in `params.server`.
 - The launch picker's `main_gpu` row no longer offers a hardcoded `0-3` ring on hosts with fewer GPUs — it sizes to the actual device count. `split_mode` gains `tensor`.
 - Lemonade models no longer appear in the `/ui` chooser as web-UI-capable — they serve no browser UI, so the chooser lists them non-selectable. (`22fc76f`)
 - Stopping a busy Lemonade umbrella no longer times out mid-teardown and leaves a ghost running row; the stop client now waits out the grace window. (`22fc76f`)
+
+### Security
+
+- The proxy's fail-closed LAN backstop now treats a blank/whitespace `proxy.api_key` as no key (matching `ProxyAuth`), so a whitespace-only key can never leave the LAN listener keyless. Defense-in-depth — production paths already normalize the key before this point.
 
 ## [0.0.6] — 2026-07-13
 

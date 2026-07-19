@@ -305,6 +305,27 @@ pub(crate) async fn compose_and_spawn(
     }
   }
 
+  // Reject an unknown `--server` id up front — before any port/admission
+  // reservation — so a typo errors cleanly instead of silently launching on
+  // the default binary with a bogus `params.server` recorded. The catalog
+  // fills in the background at boot, so only reject once it is populated; an
+  // empty catalog means "not known yet" and keeps the id as a best-effort hint
+  // (resolved to the default binary below).
+  if let Some(server_id) = &parsed.server {
+    let servers = env.servers.read().await;
+    if !servers.is_empty() && !servers.iter().any(|s| &s.id == server_id) {
+      let valid = servers
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+      return Err(ErrorObject::new(
+        ErrorCode::InvalidParams,
+        format!("unknown server `{server_id}`; valid: {valid}"),
+      ));
+    }
+  }
+
   // Port allocation — race-safe. `reserve_port` is a CAS across
   // `collect_in_use_ports → allocate → reserve` so two concurrent
   // `start_model` calls cannot both walk away with the same port.
@@ -360,15 +381,16 @@ pub(crate) async fn compose_and_spawn(
   // Chosen server (a build/binary of a backend). Resolve it from the catalog
   // once — it drives the launch binary below and, when the backend is still
   // `Auto`, the backend itself (the server's owning backend), so a `--server`
-  // pick subsumes backend selection. A stale/unknown id resolves to `None` and
-  // is ignored (falls back to the default binary).
+  // pick subsumes backend selection. An unknown id was already rejected before
+  // the port reservation; the only `None` that reaches here is the empty-catalog
+  // startup race, which falls back to the default binary.
   launch_params.server = parsed.server.clone();
   let picked_server: Option<crate::backend::Server> = match &launch_params.server {
     Some(server_id) => {
       let servers = env.servers.read().await;
       let found = servers.iter().find(|s| &s.id == server_id).cloned();
       if found.is_none() {
-        log::warn!("server {server_id:?} not in catalog; ignoring and using default binary");
+        log::warn!("server {server_id:?} not in catalog yet; using default binary");
       }
       found
     }
@@ -1593,6 +1615,36 @@ mod tests {
     };
     let msg = expect_invalid_params(&ctx, parsed).await;
     assert!(msg.contains("exceeds maximum"), "got: {msg}");
+  }
+
+  #[tokio::test]
+  async fn compose_rejects_unknown_server_id() {
+    let (ctx, model_path, _guard) = ctx_with_env_and_gguf().await;
+    // Populate the server catalog so the id is validated (an empty catalog is
+    // the "not known yet" startup race, which intentionally falls through).
+    ctx
+      .launch
+      .as_ref()
+      .unwrap()
+      .servers
+      .write()
+      .await
+      .push(crate::backend::Server {
+        id: "llamacpp-rocm".into(),
+        backend_id: "llamacpp".into(),
+        binary: PathBuf::from("/nonexistent/llama-server"),
+        name: "llamacpp-rocm".into(),
+        devices: Vec::new(),
+      });
+    let parsed = StartParams {
+      model_path,
+      server: Some("nope".into()),
+      ..Default::default()
+    };
+    let msg = expect_invalid_params(&ctx, parsed).await;
+    assert!(msg.contains("unknown server"), "got: {msg}");
+    assert!(msg.contains("nope"), "names the bad id: {msg}");
+    assert!(msg.contains("llamacpp-rocm"), "lists valid ids: {msg}");
   }
 
   #[test]

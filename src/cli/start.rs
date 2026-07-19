@@ -507,6 +507,7 @@ fn build_payload(
 
 fn map_start_error(e: crate::ipc::ClientError, row: &CatalogRow) -> CliExit {
   use crate::backend::Backend;
+  use crate::ipc::protocol::ErrorCode;
   use crate::ipc::ClientError;
   match e {
     ClientError::Remote(err) => {
@@ -528,6 +529,11 @@ fn map_start_error(e: crate::ipc::ClientError, row: &CatalogRow) -> CliExit {
             msg = err.message,
           ),
         )
+      } else if err.code == ErrorCode::InvalidParams.as_i32() {
+        // The daemon rejected the request before spawning (bad server id,
+        // bad port, ctx out of range, …). That is a usage error, not a
+        // supervisor failure — map it to USAGE so scripts branch correctly.
+        CliExit::new(USAGE, err.message)
       } else {
         CliExit::new(
           LAUNCH_FAILED,

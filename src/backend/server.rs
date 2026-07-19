@@ -367,14 +367,19 @@ mod tests {
 
   #[test]
   fn explicit_name_overrides_derivation() {
+    // The explicit `name:` must win over the auto-derived gpu tag. Use a name
+    // that differs from the tag the device would produce (`rocm`) so this
+    // actually proves the override — `name: "rocm"` would pass whether or not
+    // the name were honored.
     let servers = derive_servers(
       "llamacpp",
       vec![(
-        spec("/x/llama-server", Some("rocm")),
+        spec("/x/llama-server", Some("myrocm")),
         vec![dev("ROCm0", "ROCm")],
       )],
     );
-    assert_eq!(servers[0].id, "llamacpp-rocm");
+    assert_eq!(servers[0].id, "llamacpp-myrocm");
+    assert_eq!(servers[0].name, "llamacpp-myrocm");
   }
 
   #[test]

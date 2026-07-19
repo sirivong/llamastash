@@ -260,6 +260,14 @@ fn must_refuse_insecure_proxy(host: IpAddr, has_api_key: bool, insecure_no_auth:
   !host.is_loopback() && !has_api_key && !insecure_no_auth
 }
 
+/// A configured proxy key counts as "present" for the backstop only when it is
+/// non-blank. `ProxyAuth::new` disables auth on a whitespace-only key, so the
+/// fail-closed guard must agree — otherwise a `proxy.api_key: "   "` would pass
+/// the backstop yet leave the LAN listener keyless.
+fn proxy_key_present(api_key: Option<&str>) -> bool {
+  api_key.is_some_and(|k| !k.trim().is_empty())
+}
+
 /// Run the daemon in the current process. Returns when the shutdown
 /// token is triggered (via the `shutdown` method, SIGINT, or SIGTERM).
 pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
@@ -486,17 +494,19 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
   if opts.proxy.enabled {
     let host = opts.proxy.effective_host();
     let addr = proxy::server::listen_addr(host, opts.proxy.effective_port());
+    // A blank/whitespace key disables auth in `ProxyAuth`, so treat it as
+    // absent for the backstop too — otherwise a whitespace-only key would
+    // pass the guard yet leave the listener keyless on the LAN. (Production
+    // paths already fold `effective_api_key()` into `api_key`, so this is
+    // defense-in-depth against a caller that reaches here unfolded.)
+    let has_api_key = proxy_key_present(opts.proxy.api_key.as_deref());
     // Fail-closed backstop: never expose a non-loopback proxy with no
     // bearer key unless the operator explicitly opted out. The CLI
     // `daemon start --proxy-host` path auto-provisions a key so users
     // don't normally reach this; the backstop catches config-only and
     // auto-spawn paths that bypass the CLI. The daemon and the control
     // plane keep running — only the proxy listener is skipped.
-    if must_refuse_insecure_proxy(
-      host,
-      opts.proxy.api_key.is_some(),
-      opts.proxy.insecure_no_auth,
-    ) {
+    if must_refuse_insecure_proxy(host, has_api_key, opts.proxy.insecure_no_auth) {
       log::error!(
         "proxy: refusing to bind {addr} without authentication. Set proxy.api_key \
          (e.g. run `llamastash daemon start --proxy-host {host}` to auto-generate one) \
@@ -508,7 +518,7 @@ pub async fn run_foreground(opts: DaemonOptions) -> Result<StartOutcome> {
     } else {
       // Loud heads-up whenever the proxy faces the network.
       if !host.is_loopback() {
-        let auth_note = if opts.proxy.api_key.is_some() {
+        let auth_note = if has_api_key {
           "bearer auth required"
         } else {
           "NO authentication (--insecure-no-auth)"
@@ -1138,11 +1148,31 @@ pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = control_plane::DRAIN_TIMEOUT;
 
 #[cfg(test)]
 mod tests {
-  use super::must_refuse_insecure_proxy;
+  use super::{must_refuse_insecure_proxy, proxy_key_present};
   use std::net::IpAddr;
 
   fn ip(s: &str) -> IpAddr {
     s.parse().expect("valid ip")
+  }
+
+  #[test]
+  fn proxy_key_present_treats_blank_as_absent() {
+    // Must mirror `ProxyAuth::new`'s `!k.trim().is_empty()` filter so the
+    // backstop and the listener agree on whether a key is in force.
+    assert!(!proxy_key_present(None));
+    assert!(!proxy_key_present(Some("")));
+    assert!(!proxy_key_present(Some("   ")));
+    assert!(!proxy_key_present(Some("\t\n")));
+    assert!(proxy_key_present(Some("sk-abc123")));
+    assert!(proxy_key_present(Some("  sk-abc123  ")));
+  }
+
+  #[test]
+  fn blank_key_on_lan_still_refuses() {
+    // The whole point of the blank-aware check: a whitespace-only key on a
+    // LAN host must still trip the fail-closed backstop.
+    let has_key = proxy_key_present(Some("   "));
+    assert!(must_refuse_insecure_proxy(ip("0.0.0.0"), has_key, false));
   }
 
   #[test]
